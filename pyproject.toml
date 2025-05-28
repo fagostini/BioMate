@@ -1,0 +1,26 @@
+[project]
+name = "biofun"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Federico Agostini", email = "federico.agostini@scilifelab.se" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "dnaio>=1.2.3",
+    "regex>=2024.11.6",
+    "rich>=14.0.0",
+]
+
+[project.scripts]
+biofun = "biofun:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.11.11",
+]
