@@ -5,14 +5,14 @@ from importlib.metadata import version
 
 from rich.logging import RichHandler
 
-from biofun import dirstruct, index
+from biomate import dirstruct, index
 
 try:
     __version__ = version(__name__)
 except Exception as e:
     raise e
 
-__all__ = ["__version__", "biofun"]
+__all__ = ["__version__", "biomate"]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,7 +30,7 @@ class CustomParser(argparse.ArgumentParser):
 
 def main():
     parser = CustomParser(
-        description=f"BioFun {__version__}: A package for bioinformatics utilities.",
+        description=f"BioMate {__version__}: A package for bioinformatics utilities.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
