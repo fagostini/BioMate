@@ -6,7 +6,7 @@ from collections import Counter, defaultdict
 import dnaio
 import regex as re
 
-from biofun.setup import setup_logging
+from biomate.setup import setup_logging
 
 
 def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

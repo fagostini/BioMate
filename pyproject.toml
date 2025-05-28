@@ -1,5 +1,5 @@
 [project]
-name = "biofun"
+name = "biomate"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-biofun = "biofun:main"
+biomate = "biomate:main"
 
 [build-system]
 requires = ["hatchling"]

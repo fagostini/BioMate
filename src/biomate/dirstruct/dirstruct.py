@@ -1,6 +1,8 @@
 import argparse
 import pathlib
 
+from biomate.setup import setup_logging
+
 
 def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     parser = subparsers.add_parser(
@@ -64,6 +66,7 @@ def validate_args(args) -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace) -> None:
+    setup_logging(args.verbose, args.quiet)
     if args.command == "extract":
         # Delete the output file if it already exists
         if args.output_file.is_file():
