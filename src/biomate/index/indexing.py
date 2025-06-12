@@ -116,7 +116,6 @@ def write_results(results, output_path):
 def main(args: argparse.Namespace) -> None:
     if not args.output:
         args.quiet = False
-        args.quiet = True
     setup_logging(args)
 
     logging.info(f"Input file: {args.input}")

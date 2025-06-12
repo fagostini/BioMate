@@ -9,6 +9,8 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "dnaio>=1.2.3",
+    "numpy>=2.3.0",
+    "polars>=1.30.0",
     "regex>=2024.11.6",
     "rich>=14.0.0",
 ]

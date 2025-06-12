@@ -5,7 +5,7 @@ from importlib.metadata import version
 
 from rich.logging import RichHandler
 
-from biomate import dirstruct, index
+from biomate import blabber, dirstruct, index
 
 try:
     __version__ = version(__name__)
@@ -48,6 +48,7 @@ def main():
         title="sub-commands",
         help="Access the help page for a sub-command with: sub-command -h",
     )
+    blabber.blabber.init_parser(subparsers)
     dirstruct.dirstruct.init_parser(subparsers)
     index.indexing.init_parser(subparsers)
 
