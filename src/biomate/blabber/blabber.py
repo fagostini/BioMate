@@ -60,6 +60,13 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         help="Path to a sample sheet file to use for generating sequences (default: None)",
     )
     parser.add_argument(
+        "--taint",
+        action="store_true",
+        help="""Add to the undetermined files approximately 10%% of sequences from each project
+        in the same lane, if there are projects with different sequencing designs.
+        """,
+    )
+    parser.add_argument(
         "--random-seed",
         type=int,
         default=None,
@@ -191,8 +198,14 @@ def generate_dnaio_fastq_files(
     recipe: list[int],
     prefix: str,
     extension: str,
-) -> None:
+    sample: bool = False,
+    sequences: list = None,
+) -> list:
+    sampled_sequences = []
     with dnaio.open(*output_files, mode="w", fileformat="fastq") as writer:
+        for reads in sequences or []:
+            if reads:
+                writer.write(*reads)
         for i in range(seq_number):
             suffix = "".join(
                 [str(random.randint(10000))]
@@ -219,12 +232,16 @@ def generate_dnaio_fastq_files(
                     )
                 )
             writer.write(*reads)
+            if sample and random.randint(10) == 0:
+                sampled_sequences.append(tuple(reads))
+    return sampled_sequences
 
 
 def main(args: argparse.Namespace) -> None:
     if not args.output:
         args.quiet = False
     setup_logging(args)
+    logging.info("Running blabber module...")
 
     random.seed(args.random_seed) if args.random_seed else random.seed()
     nucleotides = {x for x in args.alphabet.upper()}
@@ -285,11 +302,11 @@ def main(args: argparse.Namespace) -> None:
 
         if sample_sheet:
             unique_lanes = defaultdict(set)
+            taint_sequences = defaultdict(list)
             for proj, samples in sample_sheet.items():
                 for sample, (index, recipe) in samples.items():
-                    unique_lanes.setdefault(re.sub(r"S\d+_", "S0_", index), set()).add(
-                        recipe
-                    )
+                    lane_key = re.sub(r"S\d+_", "S0_", index)
+                    unique_lanes.setdefault(lane_key, set()).add(recipe)
                     recipe = [int(x) for x in recipe.split("-")]
                     output_files = [
                         output_basepath.joinpath(proj)
@@ -302,13 +319,27 @@ def main(args: argparse.Namespace) -> None:
                     if not output_files[0].parent.is_dir():
                         output_files[0].parent.mkdir(parents=True, exist_ok=True)
 
-                    generate_dnaio_fastq_files(
+                    sampled_sequences = generate_dnaio_fastq_files(
                         output_files,
                         nucleotides,
                         args.seq_number,
                         recipe,
                         prefix,
                         extension,
+                        args.taint,
+                    )
+                    taint_sequences.setdefault(lane_key, []).append(sampled_sequences)
+            taint_sequences = {
+                key: value
+                for key, values in taint_sequences.items()
+                if len(unique_lanes[key]) > 1
+                for value in values
+                if value
+            }
+            if args.taint and taint_sequences:
+                for lane, sequences in taint_sequences.items():
+                    logging.debug(
+                        f"Adding {len(sequences)} sequences to the undetermined files for lane {lane}."
                     )
             for lane in unique_lanes:
                 recipe = [
@@ -319,13 +350,14 @@ def main(args: argparse.Namespace) -> None:
                     for i, _ in enumerate(recipe, start=1)
                 ]
 
-                generate_dnaio_fastq_files(
+                _ = generate_dnaio_fastq_files(
                     output_files,
                     nucleotides,
                     args.seq_number,
                     recipe,
                     prefix,
                     extension,
+                    sequences=taint_sequences.get(lane, []),
                 )
 
         else:
