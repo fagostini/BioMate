@@ -1,0 +1,13 @@
+site_name: BioMate
+repo_url: https://github.com/fagostini/BioMate
+repo_name: GitHub
+site_description: A collection of scripts and utility tools for everyday processing of biological data, conveniently gathered into a single Python package.
+site_author: Federico Agostini <federico.agostini@scilifelab.se>
+nav:
+  - Home: 'README.md'
+  - Sub-commands:
+    - Blabber: blabber.md
+    - Dirstruct: dirstruct.md
+    - Index: index.md
+theme:
+  name: readthedocs
