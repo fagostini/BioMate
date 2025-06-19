@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="Federico Agostini <federico.agostini@scilifelab.se>" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Blabber - BioMate</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Blabber";
+        var mkdocs_page_input_path = "blabber.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> BioMate
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Sub-commands</span></p>
+              <ul class="current">
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Blabber</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#usage">Usage</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#options">Options</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#sample-sheet-usage">Sample Sheet Usage</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#example-folder-structure">Example Folder Structure</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#simulating-mixed-design-recipes">Simulating Mixed Design Recipes</a>
+    </li>
+        </ul>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="" href="../dirstruct.md">Dirstruct</a>
+                  </li>
+                  <li class="toctree-l1"><a class="" href="../index.md">Index</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">BioMate</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Sub-commands</li>
+      <li class="breadcrumb-item active">Blabber</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/fagostini/BioMate/edit/master/docs/blabber.md" class="icon icon-github"> Edit on GitHub</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="blabber">Blabber</h1>
+<p>This module allows to generate different flavours of FASTA, FASTQ or plain text sequences. It can be used to re-generate a flowcell folder using a sample sheet as input, or to simply generate random sequences for testing purposes.</p>
+<h2 id="usage">Usage</h2>
+<p>The minimal command is <code>biomate blabber</code>, which will generate 100 random 50 nucleotide long sequences in TEXT format (one sequence per line), using the standard nucleotide alphabet (A, C, G, T), and it will print them to the standard output.</p>
+<h2 id="options">Options</h2>
+<ul>
+<li><code>--seq-number</code>: Number of sequences to generate. Default is 100.</li>
+<li><code>--seq-length</code>: Length of each sequence. Default is 50.</li>
+<li><code>--alphabet</code>: Alphabet to use for sequence generation. Default is 'ACGT'.</li>
+<li><code>--output</code>: Path to the output file. If not specified, the output will be printed to the standard output. If a sample sheet is provided, this must be a directory where the flowcell folder will be created.</li>
+<li><code>--format</code>: Format of the output sequences. Can be 'fasta', 'fastq', 'fastq-ext' or 'text'. Default is 'text'. The 'fastq-ext' format includes additional information in the FASTQ header.</li>
+<li><code>--sample-sheet</code>: Path to a sample sheet file. If provided, the output will be generated based on the sample sheet, creating a flowcell folder structure. The sample sheet should be in the format used by Illumina sequencing systems, with the</li>
+</ul>
+<h2 id="sample-sheet-usage">Sample Sheet Usage</h2>
+<p>When a sample sheet is provided, the output will be generated based on the sample sheet, creating a flowcell folder structure. The sample sheet should be in the format used by Illumina sequencing systems, at least with the following columns:</p>
+<ul>
+<li><code>FCID</code>: Flowcell ID.</li>
+<li><code>Lane</code>: Lane number.</li>
+<li><code>Sample_ID</code>: Sample ID.</li>
+<li><code>Recipe</code>: Recipe name.</li>
+<li><code>Sample_Project</code>: Sample project name.</li>
+</ul>
+<blockquote>
+<p><em><strong>Note:</strong> The <code>--seq-length</code> and <code>--format</code> options will be ignored when a sample sheet is provided, as the sequence lengths will be derived from the Recipe column in the sample sheet, and the format will be set to 'fastq-ext'.</em></p>
+</blockquote>
+<p>The name of the output directory will have the following format: <code>&lt;DATE&gt;_&lt;RAND_1&gt;_&lt;RAND_2&gt;_A&lt;FCID&gt;</code>, where <code>&lt;DATE&gt;</code> is the current date in <code>YYYYMMDD</code> format, <code>&lt;RAND_1&gt;</code> is a random 2-character string followed by a random 5-digit number, and <code>&lt;RAND_2&gt;</code> is a random 4-digit number, and <code>&lt;FCID&gt;</code> is the Flowcell ID from the sample sheet.
+Within the output flowcell folder, a <code>Demultiplexing</code> folder will be created, containing <code>Sample_Project</code> subfolders and the Undetermined FASTQ files for each lane. Each <code>Sample_Project</code> The <code>Sample_ID</code> subfolders that in turn contain the FASTQ files for each sample. The FASTQ files will be named according to the following pattern: <code>&lt;Sample_Name&gt;_&lt;RAND_1&gt;_S&lt;RAND_2&gt;_&lt;Lane&gt;_R[12]_001.fastq.gz</code>, where <code>&lt;Sample_Name&gt;</code> is derived from the corresponding column in the sample sheet, <code>&lt;RAND_1&gt;</code> is a 4-digit random number, <code>&lt;RAND_2&gt;</code> is the sample index (from 1 to the total number of samples in the flowcell), and <code>&lt;Lane&gt;</code> is the lane number from the sample sheet, converted to the format <code>LXXX</code> (e.g., <code>L001</code> for lane 1).</p>
+<p>The <code>--seq-number</code> and <code>--alphabet</code> options will be used to generate the content of the FASTQ files, with the specified number of sequences and using the specified alphabet. The generated sequences will be random, but their identifiers will be consistent among paired reads (R1 and R2) to ensure they can be processed correctly in downstream applications.</p>
+<p>The input sample sheet will be copied to the flowcell folder as <code>SampleSheet.csv</code>.</p>
+<h3 id="example-folder-structure">Example Folder Structure</h3>
+<pre><code>20250613_ON46080_0992_A34YHADSA7
+├── Demultiplexing
+│   ├── A__Lpha_25_01
+│   │   ├── Sample_P41583_101
+│   │   │   ├── P41583_101_S1_L001_R1_001.fastq.gz
+│   │   │   └── P41583_101_S1_L001_R2_001.fastq.gz
+│   │   └── Sample_P41583_102
+│   │       ├── P41583_102_S2_L001_R1_001.fastq.gz
+│   │       └── P41583_102_S2_L001_R2_001.fastq.gz
+│   └── Undetermined_S0_L001_R1_001.fastq.gz
+│   └── Undetermined_S0_L001_R2_001.fastq.gz
+└── SampleSheet.csv
+</code></pre>
+<h3 id="simulating-mixed-design-recipes">Simulating Mixed Design Recipes</h3>
+<p>When generating sequences based on a sample sheet, it is possible to simulate cases in which multiple recipes are present on the same lane. Running the demux process sequentially for each recipe will result in the unassigned files containing redundant reads belonging to the other recipes. By using the <code>taint</code> option, the unassigned reads contain ~10% of the reads from each sample present in the shared lane.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href=".." class="btn btn-neutral float-left" title="Home"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/fagostini/BioMate" class="fa fa-github" style="color: #fcfcfc"> GitHub</a>
+        </span>
+    
+    
+      <span><a href=".." style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>
