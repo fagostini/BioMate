@@ -36,7 +36,7 @@ The input sample sheet will be copied to the flowcell folder as `SampleSheet.csv
 
 ### Example Folder Structure
 
-```
+```text
 20250613_ON46080_0992_A34YHADSA7
 ├── Demultiplexing
 │   ├── A__Lpha_25_01

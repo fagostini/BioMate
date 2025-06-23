@@ -100,7 +100,7 @@ def write_results(
     )
 
     with open(
-        output_path.joinpath(f"indexing_pattern_{file_index}_matches.txt"), "w"
+        output_path.joinpath(f"pattern{file_index}_matches.txt"), "w"
     ) as output_file:
         for key, value in results.items():
             for seq, cnt in value.most_common():
@@ -109,7 +109,7 @@ def write_results(
                 )
 
     with open(
-        output_path.joinpath(f"indexing_pattern_{file_index}_errors.txt"), "w"
+        output_path.joinpath(f"pattern{file_index}_errors.txt"), "w"
     ) as output_file:
         for key, value in results.items():
             counts = sum(value.values())
