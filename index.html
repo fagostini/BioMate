@@ -55,6 +55,8 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#options">Options</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#example-of-standard-output">Example of Standard Output</a>
+    </li>
     </ul>
                   </li>
               </ul>
@@ -86,14 +88,28 @@
                 <h1 id="index">Index</h1>
 <p>This module allows you to scan a fastq file, either gzipped or uncompressed, and extract the sequences that match a given pattern, or a list of patterns.</p>
 <h2 id="usage">Usage</h2>
-<p>The command <code>biomate index</code> takes at least two arguments: the path to a FASTQ file (<code>--input</code>) and the pattern to search for. The pattern can be a single string or a regular expression (<code>--index-regex</code>), or a path to a file containing a list of patterns or regular expressions (<code>--index-file</code>). If no output (<code>--output</code>) is specified, only the statistics for each matched pattern will be printed to the standard output; otherwise, both the statistics for each matched pattern (<code>indexing_pattern_&lt;INDEX&gt;_matches.txt</code>) and for each edit distance (<code>indexing_pattern_&lt;INDEX&gt;_errors.txt</code>) will be written to files, where <code>&lt;INDEX&gt;</code> is the index of the pattern in the input file or <code>1</code> if a single pattern is provided.</p>
+<p>The command <code>biomate index</code> takes at least two arguments: the path to a FASTQ file (<code>--input</code>) and the pattern to search for. The pattern can be a single string or a regular expression (<code>--index-regex</code>), or a path to a file containing a list of patterns or regular expressions (<code>--index-file</code>). If no output (<code>--output</code>) is specified, only the statistics for each matched pattern will be printed to the standard output; otherwise, both the statistics for each matched pattern (<code>pattern&lt;INDEX&gt;_matches.txt</code>) and for each edit distance (<code>pattern&lt;INDEX&gt;_errors.txt</code>) will be written to files, where <code>&lt;INDEX&gt;</code> is the index of the pattern in the input file or <code>1</code> if a single pattern is provided.</p>
 <h2 id="options">Options</h2>
-<p><code>--input</code>: Path to the input FASTQ file. It can be gzipped or uncompressed.
-<code>--output</code>: Path to the output directory where the results will be saved. If not specified, the results will be printed to the standard output. The output directory will contain two files: <code>indexing_patterns.txt</code> with the statistics for each matched pattern, and <code>indexing_errors.txt</code> with the statistics for each edit distance.
-<code>--index-regex</code>: Regular expression to search for in the sequences.
-<code>--index-file</code>: Path to a file containing a list of patterns or regular expressions to search for in the sequences. Each line in the file should contain a single pattern or regular expression.
-<code>--distance</code>: Maximum edit distance to consider when matching patterns. Default is 0 (exact match).
-<code>--error-type</code>: Type of error to consider when calculating the edit distance. Can be insertions (<code>i</code>), deletions (<code>d</code>), substitutions (<code>s</code>), or any error (<code>e</code>). Default is <code>s</code>.</p>
+<ul>
+<li><code>--input</code>: Path to the input FASTQ file. It can be gzipped or uncompressed.</li>
+<li><code>--output</code>: Path to the output directory where the results will be saved. If not specified, the results will be printed to the standard output. The output directory will contain two files: <code>indexing_patterns.txt</code> with the statistics for each matched pattern, and <code>indexing_errors.txt</code> with the statistics for each edit distance.</li>
+<li><code>--index-regex</code>: Regular expression to search for in the sequences.</li>
+<li><code>--index-file</code>: Path to a file containing a list of patterns or regular expressions to search for in the sequences. Each line in the file should contain a single pattern or regular expression.</li>
+<li><code>--distance</code>: Maximum edit distance to consider when matching patterns. Default is 0 (exact match).</li>
+<li><code>--error-type</code>: Type of error to consider when calculating the edit distance. Can be insertions (<code>i</code>), deletions (<code>d</code>), substitutions (<code>s</code>), or any error (<code>e</code>). Default is <code>s</code>.</li>
+</ul>
+<h2 id="example-of-standard-output">Example of Standard Output</h2>
+<p>When no output is specified, the command will print the statistics for each matched pattern to the standard output. The output will look like this:</p>
+<pre><code class="language-text">0 CATGGGT 3902 0.39%%
+0 CATGGTG 3584 0.36%%
+0 CATGGTT 3471 0.35%%
+0 CATGTTT 2717 0.27%%
+0 CATGGGG 88 0.01%%
+0 CATGTGT 82 0.01%%
+0 CATGTGG 82 0.01%%
+0 CATGTTG 79 0.01%%
+</code></pre>
+<p>The first column is the edit distance, the second column is the matched pattern, the third column is the number of matches, and the fourth column is the percentage of matches relative to the total number of sequences in the FASTQ file.</p>
               
             </div>
           </div><footer>
