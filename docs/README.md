@@ -1,4 +1,4 @@
-# Welcome to the BioMate Documetation
+# Welcome to the BioMate
 
 BioMate represents a collection of scripts and utility tools for everyday processing of biological data, conveniently gathered into a single Python package.
 
