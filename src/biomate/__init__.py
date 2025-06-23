@@ -43,6 +43,12 @@ def main():
         action="store_true",
         help="Suppress output (error level logging only)",
     )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="Show the version of BioMate",
+    )
 
     subparsers = parser.add_subparsers(
         title="sub-commands",
@@ -50,7 +56,7 @@ def main():
     )
     blabber.blabber.init_parser(subparsers)
     dirstruct.dirstruct.init_parser(subparsers)
-    index.indexing.init_parser(subparsers)
+    index.index.init_parser(subparsers)
 
     args = parser.parse_args()
     if not hasattr(args, "parse") or not hasattr(args, "run"):

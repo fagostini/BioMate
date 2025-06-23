@@ -1,3 +1,3 @@
-from biomate.index import indexing
+from biomate.index import index
 
-__all__ = ["indexing"]
+__all__ = ["index"]
