@@ -72,7 +72,10 @@ def validate_args(args) -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace) -> None:
+    if not args.output_file:
+        args.quiet = True
     setup_logging(args)
+
     if args.command == "extract":
         # Delete the output file if it already exists
         if args.output_file and args.output_file.is_file():
