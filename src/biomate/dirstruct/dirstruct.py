@@ -25,7 +25,6 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         "--output-file",
         type=pathlib.Path,
         help="Path to the output file where the directory structure will be saved",
-        default=None,
         required=False,
     )
     parser_create = subcommands.add_parser(
@@ -63,13 +62,14 @@ def validate_args(args) -> argparse.Namespace:
             raise argparse.ArgumentTypeError(
                 f"The source file '{args.source_file}' does not exist or is not a file."
             )
+    return args
 
 
 def main(args: argparse.Namespace) -> None:
-    setup_logging(args.verbose, args.quiet)
+    setup_logging(args)
     if args.command == "extract":
         # Delete the output file if it already exists
-        if args.output_file.is_file():
+        if args.output_file and args.output_file.is_file():
             args.output_file.unlink()
 
         # Resolve the source path to ensure it is absolute
