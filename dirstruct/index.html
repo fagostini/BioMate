@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="Federico Agostini <federico.agostini@scilifelab.se>" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Dirstruct - BioMate</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Dirstruct";
+        var mkdocs_page_input_path = "dirstruct.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> BioMate
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="" href="../README.md">Home</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Sub-commands</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../blabber/">Blabber</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Dirstruct</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#usage">Usage</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#extracting-directory-structure">Extracting Directory Structure</a>
+        <ul>
+    <li class="toctree-l4"><a class="reference internal" href="#output-file-format">Output File Format</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#creating-directory-structure">Creating Directory Structure</a>
+        <ul>
+    <li class="toctree-l4"><a class="reference internal" href="#input-file-format">Input File Format</a>
+    </li>
+        </ul>
+    </li>
+        </ul>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="..">Index</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">BioMate</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Sub-commands</li>
+      <li class="breadcrumb-item active">Dirstruct</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/fagostini/BioMate/edit/master/docs/dirstruct.md" class="icon icon-github"> Edit on GitHub</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="dirstruct">Dirstruct</h1>
+<p>This module allows you to extract or create a directory structure. It can be used to extract the structure of a given directory whose contents are too large to copy, or to re-create a directory structure for testing purposes.</p>
+<h2 id="usage">Usage</h2>
+<p>There are two main commands in this module:</p>
+<ul>
+<li><code>biomate dirstruct extract</code>: Extracts the directory structure of a given directory.</li>
+<li><code>biomate dirstruct create</code>: Creates a directory structure based on a given template.</li>
+</ul>
+<h3 id="extracting-directory-structure">Extracting Directory Structure</h3>
+<p>The command <code>biomate dirstruct extract</code> allows you to extract the directory structure of a specified directory. This is useful, in combination with the <code>create</code> command, to recreate the structure without copying the contents.</p>
+<p>To run the extraction, the command is <code>biomate dirstruct extract --source-path &lt;SOURCE_PATH&gt; --output-file &lt;OUTPUT_FILE&gt;</code>, where <code>&lt;SOURCE_PATH&gt;</code> is the path to the directory you want to extract, and <code>&lt;OUTPUT_FILE&gt;</code> is the path to the output file where the directory structure will be saved. If the output file is not specified, the structure will be printed to the standard output.</p>
+<h4 id="output-file-format">Output File Format</h4>
+<p>The output file contains a list of relative paths to directories and files, in top-down hierarchical order, with each line representing either a directory or a file. By default, a tab character is used to separate the path component from a tag indicating whether the path is a directory ('dir') or a file ('file'). For example:</p>
+<pre><code>path/to/directory/    dir
+path/to/directory/file.txt    file
+path/to/another/directory/    dir
+path/to/another/directory/file2.txt    file
+</code></pre>
+<p>The tab-separated tags are optional and can be omitted by using the <code>--no-tags</code> option. In this case, the output will simply be a list of relative paths without any additional information. However, the tags can be useful when regenerating the directory structure to distinguish between directories and files (see below).</p>
+<h3 id="creating-directory-structure">Creating Directory Structure</h3>
+<p>The command <code>biomate dirstruct create</code> allows you to create a directory structure based on a given file, usually generated by the <code>extract</code> command. However, the input file can also be manually created or modified to suit your needs.</p>
+<p>To run the creation, the command is <code>biomate dirstruct create --input-file &lt;INPUT_FILE&gt; --output-path &lt;OUTPUT_PATH&gt;</code>, where <code>&lt;INPUT_FILE&gt;</code> is the path to the file containing the directory structure, and <code>&lt;OUTPUT_PATH&gt;</code> is the path where the directory structure will be created. If the output path is not specified, the structure will be created in the current working directory.</p>
+<blockquote>
+<p><em><strong>Note:</strong> The <code>create</code> command will not delete any additional files or directories in the output path. It will only create the directories and files specified in the input file. If a file already exists at a specified path, it will be overwritten without warning.</em></p>
+</blockquote>
+<p>The <code>create</code> command will only <em>touch</em> the generated files, meaning it will create empty files with the specified names. If you want to populate the files with content, you will need to do that separately after the structure has been created.</p>
+<h4 id="input-file-format">Input File Format</h4>
+<p>The input file should contain a list of relative paths to directories and files, similar to the output format of the <code>extract</code> command. Each line should represent either a directory or a file, with an optional tab character separating the path from a tag indicating whether it is a directory ('dir') or a file ('file').</p>
+<p>If the tags are present, the <code>create</code> command will use them to determine whether to create a directory or a file at each path. If the tags are omitted, the command will assume that all paths without an extension are directories and all paths with an extension are files. In this case, if a file cannot be create, for whatever reason, the module will attempt to create the parent directories first, and then create the file.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../blabber/" class="btn btn-neutral float-left" title="Blabber"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href=".." class="btn btn-neutral float-right" title="Index">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/fagostini/BioMate" class="fa fa-github" style="color: #fcfcfc"> GitHub</a>
+        </span>
+    
+    
+      <span><a href="../blabber/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href=".." style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>
