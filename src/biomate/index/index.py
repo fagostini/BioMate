@@ -1,3 +1,5 @@
+"""Index main script."""
+
 import argparse
 import logging
 import pathlib
@@ -10,6 +12,7 @@ from biomate.setup import setup_logging
 
 
 def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
+    """Initialise module subparser."""
     parser = subparsers.add_parser(
         __name__.split(".")[-1],
         description="Indexing tool for FASTA/FASTQ files",
@@ -117,6 +120,7 @@ def write_results(
 
 
 def main(args: argparse.Namespace) -> None:
+    """Main function."""
     if not args.output:
         args.quiet = True
     setup_logging(args)
