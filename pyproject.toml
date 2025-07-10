@@ -2,7 +2,7 @@
 name = "biomate"
 version = "0.1.0"
 description = "Add your description here"
-readme = "README.md"
+readme = "docs/README.md"
 authors = [
     { name = "Federico Agostini", email = "federico.agostini@scilifelab.se" }
 ]
@@ -24,6 +24,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "interrogate==1.7.0",
     "ruff>=0.11.11",
 ]
 docs = [

@@ -1,3 +1,5 @@
+"""BioMate main script."""
+
 import argparse
 import logging
 import sys
@@ -5,7 +7,7 @@ from importlib.metadata import version
 
 from rich.logging import RichHandler
 
-from biomate import blabber, dirstruct, index
+from biomate import blabber, dirstruct, fastrewind, index
 
 try:
     __version__ = version(__name__)
@@ -22,13 +24,17 @@ logging.basicConfig(
 
 
 class CustomParser(argparse.ArgumentParser):
+    """Parser class to enable help on error."""
+
     def error(self, message):
+        """Show the error and help."""
         sys.stderr.write("error: %s\n" % message)
         self.print_help()
         sys.exit(2)
 
 
 def main():
+    """Main function."""
     parser = CustomParser(
         description=f"BioMate {__version__}: A package for bioinformatics utilities.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -57,6 +63,7 @@ def main():
     blabber.blabber.init_parser(subparsers)
     dirstruct.dirstruct.init_parser(subparsers)
     index.index.init_parser(subparsers)
+    fastrewind.fastrewind.init_parser(subparsers)
 
     args = parser.parse_args()
     if not hasattr(args, "parse") or not hasattr(args, "run"):
