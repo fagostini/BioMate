@@ -175,3 +175,10 @@ cython_debug/
 
 # MacOS
 **.DS_Store
+
+# Outputs
+**.*bcl
+**.filter
+**.control
+**.xml
+**.csv
