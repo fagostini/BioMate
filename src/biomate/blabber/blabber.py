@@ -1,3 +1,5 @@
+"""Blabber main script."""
+
 import argparse
 import logging
 import pathlib
@@ -16,6 +18,7 @@ from biomate.setup import setup_logging
 
 
 def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
+    """Initialise module subparser."""
     parser = subparsers.add_parser(
         __name__.split(".")[-1],
         description="FASTA, FASTQ or plain text sequence generator",
@@ -71,12 +74,6 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         type=int,
         default=None,
         help="Seed for the random number generator (default: None, which uses system time)",
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version="%(prog)s 0.1.0",
-        help="Show the version of the indexing tool",
     )
     parser.set_defaults(parse=validate_args, run=main)
 
@@ -201,6 +198,7 @@ def generate_dnaio_fastq_files(
     sample: bool = False,
     sequences: list = None,
 ) -> list:
+    """Generate FASTQ sequence files using the dnaio library for I/O."""
     sampled_sequences = []
     with dnaio.open(*output_files, mode="w", fileformat="fastq") as writer:
         for reads in sequences or []:
@@ -238,6 +236,7 @@ def generate_dnaio_fastq_files(
 
 
 def main(args: argparse.Namespace) -> None:
+    """Main function."""
     if not args.output:
         args.quiet = False
     setup_logging(args)

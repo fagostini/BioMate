@@ -51,6 +51,7 @@ repos:
     rev: 1.7.0
     hooks:
       - id: interrogate
+        args: ["--exclude", "cytoprofiling"]
   - repo: https://github.com/astral-sh/uv-pre-commit
     rev: 0.6.6
     hooks:

@@ -1,3 +1,5 @@
+"""Logging setup."""
+
 import argparse
 import logging
 
