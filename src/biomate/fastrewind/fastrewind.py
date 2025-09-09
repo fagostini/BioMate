@@ -32,14 +32,14 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         "--input-path",
         type=pathlib.Path,
         required=True,
-        help="Path to the input flowcell directory containing demultiplexed FASTQ files",
+        help="Path to the input flowcell directory containing demultiplexed FASTQ files.",
     )
     parser.add_argument(
         "--output-path",
         type=pathlib.Path,
         required=False,
         default=pathlib.Path("./"),
-        help="Path to the output directory where the BCL structure will be created (default: current directory)",
+        help="Path to the output directory where the BCL structure will be created (default: current directory).",
     )
     parser.add_argument(
         "--sample-sheet",
@@ -58,7 +58,7 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         type=str,
         choices=["NovaSeqXPlus", "MiSeq", "NextSeq2000"],
         default="NovaSeqXPlus",
-        help="Number of threads used by dnaio to read/write files. Default is 0, which corresponds to a single thread.",
+        help="The type of Illumina instrument, which will determine the type of outputs and folder structure.",
     )
     parser.add_argument(
         "--threads",
@@ -69,7 +69,7 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Force overwrite of existing files in the output directory",
+        help="Force overwrite of existing files in the output directory.",
     )
     parser.set_defaults(parse=validate_args, run=main)
 
@@ -302,7 +302,7 @@ def parse_fastq_groups(
                     }
                 )
 
-                formatted_key = f"{split_name[3]}_{split_name[4]}"
+                formatted_key = f"{split_name[4][0]}_{split_name[4]}"
 
                 buffer_container.setdefault(formatted_key, list()).append(r1)
                 if buffer_counter % buffer_size == 0:
@@ -329,7 +329,7 @@ def parse_fastq_groups(
                 r1.sequence += indexes + r2.sequence
                 r1.qualities += "I" * len(indexes) + r2.qualities
 
-                formatted_key = f"{split_name[3]}_{split_name[4]}"
+                formatted_key = f"{split_name[4][0]}_{split_name[4]}"
 
                 buffer_avro.append(
                     {
@@ -372,7 +372,7 @@ def parse_fastq_groups(
                     }
                 )
 
-                formatted_key = f"{split_name[3]}_{split_name[4]}"
+                formatted_key = f"{split_name[4][0]}_{split_name[4]}"
 
                 buffer_container.setdefault(formatted_key, list()).append(r1)
                 if buffer_counter % buffer_size == 0:
@@ -406,7 +406,7 @@ def parse_fastq_groups(
                     }
                 )
 
-                formatted_key = f"{split_name[3]}_{split_name[4]}"
+                formatted_key = f"{split_name[4][0]}_{split_name[4]}"
 
                 buffer_container.setdefault(formatted_key, list()).append(r1)
                 if buffer_counter % buffer_size == 0:
@@ -606,7 +606,8 @@ def preprocess_and_write_bcls(
     # Get the list of all tile files, and group them by tile id
     tiles_files = defaultdict(list)
     for fq in tiles_path.glob(pattern):
-        tiles_files.setdefault(fq.name.split("_")[0], list()).append(fq)
+        surface = fq.name.split("_")[0]
+        tiles_files.setdefault(surface, list()).append(fq)
 
     # Cycle through surfaces and associated tiles
     for surface, fq_list in tiles_files.items():
@@ -718,9 +719,10 @@ def preprocess_and_write_bcls(
 
             # For each cycle, write all the tiles into a single compressed binary file;
             # this is needed to get the individual uncompressed and compressed size information
+            logging.debug("Dump compressed tiles to cycle files...")
             for cycle in range(total_cycles):
                 with open(
-                    tempdir.joinpath(f"all_{cycle + 1}_tiles"), "wb"
+                    tempdir.joinpath(f"all_{cycle + 1}_tiles.cbcl"), "wb"
                 ) as out_handle:
                     for tile_id in temp_files.keys():
                         if temp_files[tile_id][cycle].exists():
@@ -741,6 +743,7 @@ def preprocess_and_write_bcls(
                                 out_handle.write(buffer)
 
             # Produce the final compressed BCL (cBCL) files
+            logging.debug("Generate final BCL files...")
             for cycle in range(total_cycles):
                 # Generate the header for the file using the tile metrics and quality map
                 header = pack_cbcl_header(cycle, tiles_metrics, quality_map)
@@ -754,7 +757,7 @@ def preprocess_and_write_bcls(
                     cycle_path.joinpath(f"{lane}_{surface}.cbcl"), "wb"
                 ) as out_handle:
                     with open(
-                        tempdir.joinpath(f"all_{cycle + 1}_tiles"), "rb"
+                        tempdir.joinpath(f"all_{cycle + 1}_tiles.cbcl"), "rb"
                     ) as in_handle:
                         out_handle.write(header)
                         out_handle.write(in_handle.read())
@@ -822,6 +825,15 @@ def main(args: argparse.Namespace) -> None:
     """Main function."""
     setup_logging(args)
     logging.info("Running fastrewind module...")
+
+    if args.instrument != "NovaSeqXPlus":
+        logging.warning(
+            "Unfortunately, only the 'NovaSeqXPlus' instrument is currently supported."
+        )
+        logging.warning(
+            "Please, re-run the command with the corresponding option, or use the default."
+        )
+        exit(1)
 
     # Get individual and total number of cycles
     total_cycles, cycles_dict = get_cycles(
@@ -902,6 +914,7 @@ def main(args: argparse.Namespace) -> None:
                     ),
                     cluster_count=len(cc),
                 )
+                # The control files are generated by instruments other than the NovaSeqXPlus
                 # # Naming convention: Data/Intensities/BaseCalls/<L00_prefixed_lane>/s_<single_digit_lane>_<tile>.control
                 # write_control(
                 #     args.output_path.joinpath(
@@ -913,19 +926,18 @@ def main(args: argparse.Namespace) -> None:
             if outer_break:
                 break
 
-        print(flowcell_unique_locs)
-
-        logging.debug("Writing LOCS file(s)...")
-        # Naming convention: Data/Intensities/s.locs
-        write_locs(
-            args.output_path.joinpath("Data/Intensities/s.locs"),
-            flowcell_unique_locs,
-        )
+    logging.debug("Writing LOCS file(s)...")
+    # Naming convention: Data/Intensities/s.locs
+    write_locs(
+        args.output_path.joinpath("Data/Intensities/s.locs"),
+        flowcell_unique_locs,
+    )
 
     (lane_count, surface_count, swath_count, tile_count), tile_names = (
         extract_flowcell_layout(tiles_by_lane)
     )
 
+    logging.debug("Writing RunInfo XML file...")
     write_run_info_xml(
         args.output_path.joinpath("RunInfo.xml"),
         cycles_dict,
