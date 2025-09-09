@@ -175,3 +175,13 @@ cython_debug/
 
 # MacOS
 **.DS_Store
+
+# Notebooks
+src/biomate/notebooks/*
+
+# Outputs
+**.*bcl
+**.filter
+**.control
+**.xml
+**.csv
