@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="Federico Agostini <federico.agostini@scilifelab.se>" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>FastRewind - BioMate</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "FastRewind";
+        var mkdocs_page_input_path = "fastrewind.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> BioMate
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="" href="../README.md">Home</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Sub-commands</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../blabber/">Blabber</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../dirstruct/">Dirstruct</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="..">Index</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">FastRewind</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#usage">Usage</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#options">Options</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#workflow-schematic-diagram">Workflow Schematic Diagram</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#notes-and-references">Notes and References</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#illumina-resources">Illumina Resources</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#encoding-bcl-header-and-nucleotides-examples">Encoding BCL Header and Nucleotides Examples</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#challenges-related-to-the-io">Challenges related to the I/O</a>
+    </li>
+        </ul>
+    </li>
+    </ul>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">BioMate</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Sub-commands</li>
+      <li class="breadcrumb-item active">FastRewind</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/fagostini/BioMate/edit/master/docs/fastrewind.md" class="icon icon-github"> Edit on GitHub</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="fastrewind">FastRewind</h1>
+<p>This module allows to convert a series of FASTQ files back into the Illumina NovaSeqXPlus instrument outputs. It can be used to re-generate the whole or a subset of the flowcell output folder to be used for demultiplex testing purposes.</p>
+<blockquote>
+<p><em><strong>IMPORTANT:</strong> Due to the way the data must be read, processed and written, the procedure is mainly I/O bound. On a standard laptop, it takes ~2 hours to convert a 100M paired-end reads back into BCL files. Nevertheless, the certain I/O operation can be sped up by providing more than the default single-thread to the <code>dnaio</code> package to compressed and decompress inputs and outputs; this can be done via the <code>--threads</code> option. Finally, there are probably some other tweaks that can be implemented to shift the trade-off between in-memory and on-disk operations, though these have not been included since the idea is that the module should be able to run even on machine with limited resources.</em></p>
+</blockquote>
+<h2 id="usage">Usage</h2>
+<p>The minimal command is <code>biomate fastrewind --input &lt;PATH&gt;</code>. This will search for FASTQ file(s) and the SampleSheet.csv file, from which it will extract the information regarding the run (mainly, the number of cycles, and how they are split between reads and indexes).</p>
+<h2 id="options">Options</h2>
+<ul>
+<li><code>--input-path</code>: Path to the input flowcell directory containing demultiplexed FASTQ files.</li>
+<li><code>--output-path</code>: Path to the output directory where the BCL structure will be created (default: current directory).</li>
+<li><code>--sample-sheet</code>: Path to the Sample Sheet file. If not provided, the script will look for SampleSheet.csv in the input directory.</li>
+<li><code>--total-cycles</code>: The total number of cycles. If this is larger than the sequences in the samples, shorter samples will be filled with Ns.</li>
+<li><code>--instrument</code>: The type of Illumina instrument, which will determine the type of outputs and folder structure. <em>Please, be aware that only the NovaSeqXPlus is currently supported.</em></li>
+<li><code>--threads</code>: Number of threads used by dnaio to read/write files. Default is 0, which corresponds to a single thread.</li>
+<li><code>--force</code>: Force overwrite of existing files in the output directory.</li>
+</ul>
+<h2 id="workflow-schematic-diagram">Workflow Schematic Diagram</h2>
+<p><img alt="FastRewind Diagram" src="../fastrewind.png" /></p>
+<h2 id="notes-and-references">Notes and References</h2>
+<p>The conversion between Python values and C structs represented as Python bytes objects was carried out using the <a href="https://docs.python.org/3/library/struct.html">struct</a> package.</p>
+<h3 id="illumina-resources">Illumina Resources</h3>
+<ul>
+<li><a href="https://support-docs.illumina.com/IN/NovaSeqX/Content/IN/NovaSeq/SequencingOutputFiles_fNV.htm">Sequencing Outputs</a></li>
+<li><a href="https://support-docs.illumina.com/IN/NovaSeqX/Content/IN/NovaSeqX/OutputFolderStructure.htm">Output Folder Structure</a></li>
+<li><a href="https://support-docs.illumina.com/IN/NovaSeqX/Content/IN/NovaSeqX/RTAOverview.htm">Quality Scores</a></li>
+<li><a href="https://support-docs.illumina.com/IN/NextSeq_550-500/Content/IN/NextSeq/FlowCell_Tiles_fNS.htm">Flowcell Components</a></li>
+<li><a href="https://support.illumina.com/content/dam/illumina-support/documents/documentation/software_documentation/bcl2fastq/bcl2fastq2-v2-20-software-guide-15051736-03.pdf">bcl2fastq</a></li>
+</ul>
+<h3 id="encoding-bcl-header-and-nucleotides-examples">Encoding BCL Header and Nucleotides Examples</h3>
+<ul>
+<li><a href="https://github.com/sstadick/bcl2fastr/blob/b9d990076ef58e1ca48552fc5b82dbf63e2ba734/pysrc/bcl2fastr/make_test_cbcls.py#L57">bcl2fastr</a></li>
+<li><a href="https://github.com/EdinburghGenomics/well_duplicates/blob/7d1a68dd359edf3c09937ca00a32ecd0b2549f58/bcl_direct_reader.py#L255">well_duplicates</a></li>
+<li><a href="https://github.com/broadinstitute/picard/blob/master/src/main/java/picard/illumina/parser/readers/BaseBclReader.java#L104">picard</a></li>
+</ul>
+<h3 id="challenges-related-to-the-io">Challenges related to the I/O</h3>
+<p>As mentioned above, the module is generating a lot of I/O pressure. This is due to the way the data must be transformed and aggregated, in order to re-create the original outputs.</p>
+<p>FASTQ files are constituted by entries of four lines that include the read identifier, sequence and quality strings. However, each of these lines collects its information content from one or more lanes, several tiles and one or more surfaces. Indeed, when the instrument outputs are produced, the data belonging to individual reads is stored into separate files, and is then aggregated into the final FASTQ entries after running the demultiplexing tools, such as BCL-convert or bcl2fastq.</p>
+<p>For example, the <code>Data/Intensities/BaseCalls</code> folder structure is organised in lanes sub-folders (e.g. <code>L001</code>, <code>L002</code>, etc.), and each of these contains cycle folders (e.g. <code>C1.1</code>, <code>C2.1</code>, <code>C3.1</code>, etc.). The latter contain a <code>.cbcl</code> file for each surface (e.g. <code>L001_1.cbcl</code>, <code>L001_2.cbcl</code>, etc.) that, in turn, encodes the nucleaotide and quality information for all tiles. This means that converting even a single read back into the files from which it derives would results in having to create and edit at least N (or N + N for paired-end reads) files, where N is the length of the read. The number of files can become as large as (N + N) _ T _ L * S, where T, L, and S are the numbers tiles, lanes and surfaces, respectively.</p>
+<p>Considering the type of structure, it seemed sensible to process the input files by lane, as this information is generally present in the FASTQ filename and, therefore, the inputs can be subset and grouped accordingly. Although one can think of sequentially working on and storing in-memory each lane data, this solution is rather unfeasible on non-HPC machines, such as laptops or workstations, due to the lower amout of memory at their disposal. So, the solution was to process all reads from FASTQ files belonging to one lane into separate files, then delete all the intermediate files and proceed with the next lane:</p>
+<p><code>Lane 1 --&gt; Generate intermediate files --&gt; Write to final outputs --&gt; Delete intermediate files</code></p>
+<p><code>Lane 2 --&gt; Generate intermediate files --&gt; Write to final outputs --&gt; Delete intermediate files</code></p>
+<p><code>Lane 3 --&gt; Generate intermediate files --&gt; Write to final outputs --&gt; Delete intermediate files</code></p>
+<p><code>...</code></p>
+<p>In addition, since the orginal data is produced without considering the experimental design, read pairs, indexes/barcodes and qualities must be merged into new reads. All sequences from the same read group are concatenated, as are all their qualities:</p>
+<pre><code class="language-text">&gt;Read_1:1
+CTAGCATG
++
+I#IIIIII
+
+&gt;Read_1:2
+CTAGCTCA
++
+I#9IIIII
+
+&gt;Merged_read_1
+CTAGCATGCTAGCTCA
++
+I#IIIIIII#9IIIII
+</code></pre>
+<p>Finally, to understand into which file the resulting merged read should be written, the information must be extracted from the read identifier, which has the following structure:</p>
+<p><code>&lt;instrument&gt;:&lt;run_number&gt;:&lt;flowcell_id&gt;:&lt;lane&gt;:&lt;tile&gt;:&lt;x_pos&gt;:&lt;y_pos&gt; &lt;read_index&gt;:&lt;is_filtered&gt;:&lt;control_number&gt;:&lt;index_sequence(s)&gt;</code></p>
+<p>while the 4-digit <code>tile</code> label can be further split into:</p>
+<p><code>&lt;surface_digit&gt;&lt;swath_digit&gt;&lt;tile_2digits&gt;</code></p>
+<p>Since the nucleotide information is stored by tile inside the compressed BCL files and there is one BCL file per surface, it seemed reasonable to split, group and dump the reads into <code>&lt;surface&gt;_&lt;tile&gt;.fastq.gz</code> files. In fact, in the final step, these files will be read one at the time, by surface and tile, and the tiles will be written sequentially to <code>all_&lt;cycle&gt;_tiles.cbcl</code> files. Also in this case, the latter represent intermediate files that are, however, necessary since the header of the final <code>.cbcl</code> includes the information about the decompressed and compressed size of the collected and individual tiles blocks and, therefore, it can only be added once all the latter have been generated.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href=".." class="btn btn-neutral float-left" title="Index"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/fagostini/BioMate" class="fa fa-github" style="color: #fcfcfc"> GitHub</a>
+        </span>
+    
+    
+      <span><a href=".." style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>
