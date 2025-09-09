@@ -8,7 +8,7 @@ To check the package information and available sub-commands, you can run `biomat
 
 - [Blabber](blabber.md) - FASTA, FASTQ or plain text sequence generator. It can be used to re-generate a demultiplexed flowcell folder using a sample sheet as input.
 - [Dirstruct](dirstruct.md) - Extract or create a directory structure. It can be used to simulate nested folder structures for testing purposes.
-- [Index](indexer.md) - Indexing tool for FASTA/FASTQ files. It can be used to search for expected indexes and get 'fuzzy' information.
+- [Indexer](indexer.md) - Indexing tool for FASTA/FASTQ files. It can be used to search for expected indexes and get 'fuzzy' information.
 - [FastRewind](fastrewind.md) - Convert a demultiplexed folder back into the Illumina NovaSeqXPlus output. It can be used to generate a subset for demultiplex testing.
 
 ## General options
