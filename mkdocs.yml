@@ -9,5 +9,6 @@ nav:
     - Blabber: blabber.md
     - Dirstruct: dirstruct.md
     - Index: index.md
+    - FastRewind: fastrewind.md
 theme:
   name: readthedocs
