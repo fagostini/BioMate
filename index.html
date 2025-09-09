@@ -3,17 +3,17 @@
 <head>
     <meta charset="utf-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="Federico Agostini <federico.agostini@scilifelab.se>" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="description" content="A collection of scripts and utility tools for everyday processing of biological data, conveniently gathered into a single Python package." /><meta name="author" content="Federico Agostini <federico.agostini@scilifelab.se>" />
       <link rel="shortcut icon" href="img/favicon.ico" />
-    <title>Index - BioMate</title>
+    <title>BioMate</title>
     <link rel="stylesheet" href="css/theme.css" />
     <link rel="stylesheet" href="css/theme_extra.css" />
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
     
       <script>
         // Current page data
-        var mkdocs_page_name = "Index";
-        var mkdocs_page_input_path = "index.md";
+        var mkdocs_page_name = "Home";
+        var mkdocs_page_input_path = "README.md";
         var mkdocs_page_url = null;
       </script>
     
@@ -39,25 +39,23 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
-              <ul>
-                <li class="toctree-l1"><a class="" href="README.md">Home</a>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Home</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#available-tools">Available tools</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#general-options">General options</a>
+    </li>
+    </ul>
                 </li>
               </ul>
               <p class="caption"><span class="caption-text">Sub-commands</span></p>
-              <ul class="current">
+              <ul>
                   <li class="toctree-l1"><a class="reference internal" href="blabber/">Blabber</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="dirstruct/">Dirstruct</a>
                   </li>
-                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Index</a>
-    <ul class="current">
-    <li class="toctree-l2"><a class="reference internal" href="#usage">Usage</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#options">Options</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#example-of-standard-output">Example of Standard Output</a>
-    </li>
-    </ul>
+                  <li class="toctree-l1"><a class="reference internal" href="indexer/">Index</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="fastrewind/">FastRewind</a>
                   </li>
@@ -76,10 +74,9 @@
         <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
   <ul class="wy-breadcrumbs">
     <li><a href="." class="icon icon-home" aria-label="Docs"></a></li>
-          <li class="breadcrumb-item">Sub-commands</li>
-      <li class="breadcrumb-item active">Index</li>
+      <li class="breadcrumb-item active">Home</li>
     <li class="wy-breadcrumbs-aside">
-          <a href="https://github.com/fagostini/BioMate/edit/master/docs/index.md" class="icon icon-github"> Edit on GitHub</a>
+          <a href="https://github.com/fagostini/BioMate/edit/master/docs/README.md" class="icon icon-github"> Edit on GitHub</a>
     </li>
   </ul>
   <hr/>
@@ -87,37 +84,31 @@
           <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
             <div class="section" itemprop="articleBody">
               
-                <h1 id="index">Index</h1>
-<p>This module allows you to scan a fastq file, either gzipped or uncompressed, and extract the sequences that match a given pattern, or a list of patterns.</p>
-<h2 id="usage">Usage</h2>
-<p>The command <code>biomate index</code> takes at least two arguments: the path to a FASTQ file (<code>--input</code>) and the pattern to search for. The pattern can be a single string or a regular expression (<code>--index-regex</code>), or a path to a file containing a list of patterns or regular expressions (<code>--index-file</code>). If no output (<code>--output</code>) is specified, only the statistics for each matched pattern will be printed to the standard output; otherwise, both the statistics for each matched pattern (<code>pattern&lt;INDEX&gt;_matches.txt</code>) and for each edit distance (<code>pattern&lt;INDEX&gt;_errors.txt</code>) will be written to files, where <code>&lt;INDEX&gt;</code> is the index of the pattern in the input file or <code>1</code> if a single pattern is provided.</p>
-<h2 id="options">Options</h2>
+                <h1 id="welcome-to-the-biomate">Welcome to the BioMate</h1>
+<p>BioMate represents a collection of scripts and utility tools for everyday processing of biological data, conveniently gathered into a single Python package.</p>
+<p>To check the package information and available sub-commands, you can run <code>biomate --help</code>.</p>
+<h2 id="available-tools">Available tools</h2>
 <ul>
-<li><code>--input</code>: Path to the input FASTQ file. It can be gzipped or uncompressed.</li>
-<li><code>--output</code>: Path to the output directory where the results will be saved. If not specified, the results will be printed to the standard output. The output directory will contain two files: <code>indexing_patterns.txt</code> with the statistics for each matched pattern, and <code>indexing_errors.txt</code> with the statistics for each edit distance.</li>
-<li><code>--index-regex</code>: Regular expression to search for in the sequences.</li>
-<li><code>--index-file</code>: Path to a file containing a list of patterns or regular expressions to search for in the sequences. Each line in the file should contain a single pattern or regular expression.</li>
-<li><code>--distance</code>: Maximum edit distance to consider when matching patterns. Default is 0 (exact match).</li>
-<li><code>--error-type</code>: Type of error to consider when calculating the edit distance. Can be insertions (<code>i</code>), deletions (<code>d</code>), substitutions (<code>s</code>), or any error (<code>e</code>). Default is <code>s</code>.</li>
+<li><a href="blabber/">Blabber</a> - FASTA, FASTQ or plain text sequence generator. It can be used to re-generate a demultiplexed flowcell folder using a sample sheet as input.</li>
+<li><a href="dirstruct/">Dirstruct</a> - Extract or create a directory structure. It can be used to simulate nested folder structures for testing purposes.</li>
+<li><a href="indexer/">Index</a> - Indexing tool for FASTA/FASTQ files. It can be used to search for expected indexes and get 'fuzzy' information.</li>
+<li><a href="fastrewind/">FastRewind</a> - Convert a demultiplexed folder back into the Illumina NovaSeqXPlus output. It can be used to generate a subset for demultiplex testing.</li>
 </ul>
-<h2 id="example-of-standard-output">Example of Standard Output</h2>
-<p>When no output is specified, the command will print the statistics for each matched pattern to the standard output. The output will look like this:</p>
-<pre><code class="language-text">0 CATGGGT 3902 0.39%%
-0 CATGGTG 3584 0.36%%
-0 CATGGTT 3471 0.35%%
-0 CATGTTT 2717 0.27%%
-0 CATGGGG 88 0.01%%
-0 CATGTGT 82 0.01%%
-0 CATGTGG 82 0.01%%
-0 CATGTTG 79 0.01%%
-</code></pre>
-<p>The first column is the edit distance, the second column is the matched pattern, the third column is the number of matches, and the fourth column is the percentage of matches relative to the total number of sequences in the FASTQ file.</p>
+<h2 id="general-options">General options</h2>
+<p>In addition to the <code>--version</code> option, which prints the current version of the BioMate package, the following options can be provided before any sub-command (<em>e.g.</em> <code>biomate &lt;OPTION&gt; &lt;SUBCOMMAND&gt;</code>), and they will be propagated to the sub-command execution:</p>
+<ul>
+<li><code>--verbose</code>: Increase verbosity of the output by setting the logging level to <code>DEBUG</code>. This will print additional information about the execution of the sub-command.</li>
+<li><code>--quiet</code>: Decrease verbosity of the output by setting the logging level to <code>WARNING</code>. This will suppress most of the output, only printing warnings and errors.</li>
+</ul>
+<blockquote>
+<p><em><strong>Note:</strong> By default, the logging level is set to <code>INFO</code>, which will print general information about the execution of the sub-command, but not the detailed debug information.</em></p>
+<p><em><strong>Important:</strong> In some cases (e.g. when the output will be printed to the standard output), the <code>--quiet</code> option will be applied automatically to avoid cluttering the output with unnecessary information. In such cases, the logging level will be set to <code>WARNING</code> regardless of the <code>--verbose</code> or <code>--quiet</code> options.</em></p>
+</blockquote>
               
             </div>
           </div><footer>
     <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
-        <a href="dirstruct/" class="btn btn-neutral float-left" title="Dirstruct"><span class="icon icon-circle-arrow-left"></span> Previous</a>
-        <a href="fastrewind/" class="btn btn-neutral float-right" title="FastRewind">Next <span class="icon icon-circle-arrow-right"></span></a>
+        <a href="blabber/" class="btn btn-neutral float-right" title="Blabber">Next <span class="icon icon-circle-arrow-right"></span></a>
     </div>
 
   <hr/>
@@ -144,10 +135,8 @@
         </span>
     
     
-      <span><a href="dirstruct/" style="color: #fcfcfc">&laquo; Previous</a></span>
     
-    
-      <span><a href="fastrewind/" style="color: #fcfcfc">Next &raquo;</a></span>
+      <span><a href="blabber/" style="color: #fcfcfc">Next &raquo;</a></span>
     
   </span>
 </div>
@@ -164,3 +153,8 @@
 
 </body>
 </html>
+
+<!--
+MkDocs version : 1.6.1
+Build Date UTC : 2025-09-09 14:06:46.362831+00:00
+-->
