@@ -8,7 +8,7 @@ nav:
   - Sub-commands:
     - Blabber: blabber.md
     - Dirstruct: dirstruct.md
-    - Index: index.md
+    - Index: indexer.md
     - FastRewind: fastrewind.md
 theme:
   name: readthedocs
