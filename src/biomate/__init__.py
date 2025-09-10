@@ -28,8 +28,11 @@ class CustomParser(argparse.ArgumentParser):
 
     def error(self, message):
         """Show the error and help."""
-        sys.stderr.write("error: %s\n" % message)
+        sys.stderr.write("\nError: %s\n\n\n" % message)
         self.print_help()
+        print(
+            "\nTo check the sub-commands help message use: biomate <sub-command> --help\n"
+        )
         sys.exit(2)
 
 
