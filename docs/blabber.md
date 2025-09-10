@@ -54,3 +54,7 @@ The input sample sheet will be copied to the flowcell folder as `SampleSheet.csv
 ### Simulating Mixed Design Recipes
 
 When generating sequences based on a sample sheet, it is possible to simulate cases in which multiple recipes are present on the same lane. Running the demux process sequentially for each recipe will result in the unassigned files containing redundant reads belonging to the other recipes. By using the `taint` option, the unassigned reads contain ~10% of the reads from each sample present in the shared lane.
+
+## Caveats
+
+When simulating a flowcell run, there are some assumptions and tricks that do not really allow us to create a real-case dataset. These are mainly represented by the random numbers used in reads naming. Specifically, there is no check for duplicate entries (e.g. although unlikely, two reads might end up having the same tile, x and y positions) or for distribution balance (e.g. the reads distribution across lanes and tiles might be very skewed). These issues will be addressed in the future, as for the time being they were not considered harmful for the type of testing we carried out.

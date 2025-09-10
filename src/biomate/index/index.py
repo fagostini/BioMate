@@ -176,5 +176,5 @@ def main(args: argparse.Namespace) -> None:
             for key, value in results.items():
                 for seq, cnt in value.most_common():
                     print(
-                        f"{key} {' '.join(list(seq))} {cnt} {cnt / total_records:.2%}%"
+                        f"{key} {' '.join(list(seq))} {cnt} {cnt / total_records:.2%}"
                     )
