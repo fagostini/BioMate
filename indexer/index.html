@@ -101,15 +101,30 @@
 <li><code>--error-type</code>: Type of error to consider when calculating the edit distance. Can be insertions (<code>i</code>), deletions (<code>d</code>), substitutions (<code>s</code>), or any error (<code>e</code>). Default is <code>s</code>.</li>
 </ul>
 <h2 id="example-of-standard-output">Example of Standard Output</h2>
-<p>When no output is specified, the command will print the statistics for each matched pattern to the standard output. The output will look like this:</p>
-<pre><code class="language-text">0 CATGGGT 3902 0.39%%
-0 CATGGTG 3584 0.36%%
-0 CATGGTT 3471 0.35%%
-0 CATGTTT 2717 0.27%%
-0 CATGGGG 88 0.01%%
-0 CATGTGT 82 0.01%%
-0 CATGTGG 82 0.01%%
-0 CATGTTG 79 0.01%%
+<p>When no output is specified, the command will print the statistics for each matched pattern to the standard output. As an example, the output of the command <code>biomate index --input Test_1M.fastq.gz --index-regex "AACGTGAT[CG]TG" --distance 1</code> would look like this:</p>
+<pre><code class="language-text">0 AACGTGATGTG 40 0.00%
+1 AAGGTGATGTG 3020 0.30%
+1 CACGTGATGTG 105 0.01%
+1 ATCGTGATGTG 89 0.01%
+1 AACGTGAAGTG 78 0.01%
+1 AACGTGATGTT 60 0.01%
+1 ACCGTGATGTG 37 0.00%
+1 AATGTGATGTG 36 0.00%
+1 AACGTGAACTG 24 0.00%
+1 AGCGTGATGTG 24 0.00%
+1 AAAGTGATGTG 16 0.00%
+1 AACGTGGTGTG 7 0.00%
+1 AACGTGGTCTG 5 0.00%
+1 GACGTGATGTG 5 0.00%
+1 AACGCGATGTG 5 0.00%
+1 AACGAGATGTG 4 0.00%
+1 AACGTGAGGTG 2 0.00%
+1 AACTTGATGTG 1 0.00%
+1 AACGTTATCTG 1 0.00%
+1 AACGTGATCTC 1 0.00%
+1 AACGCGATCTG 1 0.00%
+1 TACGTGATGTG 1 0.00%
+1 AACTTGATCTG 1 0.00%
 </code></pre>
 <p>The first column is the edit distance, the second column is the matched pattern, the third column is the number of matches, and the fourth column is the percentage of matches relative to the total number of sequences in the FASTQ file.</p>
               
