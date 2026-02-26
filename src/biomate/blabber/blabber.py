@@ -451,8 +451,6 @@ def main(args: argparse.Namespace) -> None:
                     if not output_files[0].parent.is_dir():
                         output_files[0].parent.mkdir(parents=True, exist_ok=True)
 
-                    print(output_files)
-
                     sampled_sequences = generate_dnaio_fastq_files(
                         output_files,
                         nucleotides,
