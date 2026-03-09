@@ -9,12 +9,19 @@ import string
 import tempfile
 from collections import defaultdict
 from datetime import datetime
-
+from itertools import product
 import dnaio
 import polars
+import numpy
 from numpy import random
 
 from biomate.setup import setup_logging
+
+TILE_WIDTH = 320  # 5120
+TILE_HEIGHT = 160  # 2879
+SURFACE_COUNT = 2
+SWATH_COUNT = 4
+TILE_COUNT = 16
 
 
 def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -235,8 +242,10 @@ def parse_sample_sheet(sample_sheet: pathlib.Path) -> tuple[str, dict]:
     # Read the temporary file using polars and process the data
     data = (
         polars.read_csv(tmp.name)
-        .with_columns(polars.col("Lane").cast(polars.String).str.zfill(3))
-        .with_columns(polars.col("Lane").str.pad_start(4, "L"))
+        .with_columns(
+            polars.col("Lane").cast(polars.String).str.zfill(3).alias("Lane_name")
+        )
+        .with_columns(polars.col("Lane_name").str.pad_start(4, "L"))
     )
 
     # Exit if the design is not present among the data columns
@@ -250,14 +259,27 @@ def parse_sample_sheet(sample_sheet: pathlib.Path) -> tuple[str, dict]:
         counter = 1
         for proj in data.get_column("Sample_Project").unique(maintain_order=True):
             sample_sheet_dict.setdefault(proj, defaultdict(list))
-            for lane, id, recipe, i1, i2 in (
+            for lane, name, id, recipe, i1, i2 in (
                 data.filter(polars.col("Sample_Project") == proj)
-                .select("Lane", "Sample_ID", "OverrideCycles", "index", "index2")
+                .select(
+                    "Lane",
+                    "Lane_name",
+                    "Sample_ID",
+                    "OverrideCycles",
+                    "index",
+                    "index2",
+                )
                 .iter_rows()
             ):
                 sample_sheet_dict[proj].setdefault(
                     id,
-                    tuple((f"S{counter}_{lane}", parse_sequence_mask(recipe, i1, i2))),
+                    tuple(
+                        (
+                            f"S{counter}_{name}",
+                            lane,
+                            parse_sequence_mask(recipe, i1, i2),
+                        )
+                    ),
                 )
                 counter += 1
         return (generate_flowcell_id(), sample_sheet_dict)
@@ -267,16 +289,17 @@ def parse_sample_sheet(sample_sheet: pathlib.Path) -> tuple[str, dict]:
         counter = 1
         for proj in data.get_column("Sample_Project").unique(maintain_order=True):
             sample_sheet_dict.setdefault(proj, defaultdict(list))
-            for lane, id, recipe in (
+            for lane, name, id, recipe in (
                 data.filter(polars.col("Sample_Project") == proj)
-                .select("Lane", "Sample_ID", "Recipe")
+                .select("Lane", "Lane_name", "Sample_ID", "Recipe")
                 .iter_rows()
             ):
                 sample_sheet_dict[proj].setdefault(
                     id,
                     tuple(
                         (
-                            f"S{counter}_{lane}",
+                            f"S{counter}_{name}",
+                            lane,
                             parse_sequence_mask("Y" + recipe.replace("-", "Y")),
                         )
                     ),
@@ -311,11 +334,22 @@ def generate_dnaio_fastq_files(
     recipe: list[int],
     prefix: str,
     extension: str,
+    tile: str = None,
     sample: bool = False,
     sequences: list = None,
 ) -> list:
     """Generate FASTQ sequence files using the dnaio library for I/O."""
     sampled_sequences = []
+    k = int(numpy.ceil(numpy.sqrt(seq_number)))
+    available_pos_x = [
+        str(x)
+        for x in random.choice(range(1000, TILE_WIDTH * 10 + 1), k, replace=False)
+    ]
+    available_pos_y = [
+        str(x)
+        for x in random.choice(range(1000, TILE_HEIGHT * 10 + 1), k, replace=False)
+    ]
+    available_tile_positions = product([tile], available_pos_x, available_pos_y)
     read1_len = recipe["R1"]
     read2_len = recipe["R2"]
     with dnaio.open(*output_files, mode="w", fileformat="fastq") as writer:
@@ -323,13 +357,7 @@ def generate_dnaio_fastq_files(
             if reads:
                 writer.write(*reads)
         for i in range(seq_number):
-            suffix = "".join(
-                [str(random.randint(10000))]
-                + [":"]
-                + [str(random.randint(10000))]
-                + [":"]
-                + [str(random.randint(10000))]
-            )
+            suffix = ":".join(next(available_tile_positions))
             reads = [
                 dnaio.SequenceRecord(
                     name=f"{prefix}:{suffix}{extension}",
@@ -351,6 +379,11 @@ def generate_dnaio_fastq_files(
             if sample and random.randint(10) == 0:
                 sampled_sequences.append(tuple(reads))
     return sampled_sequences
+
+
+def split(a, n):
+    k, m = divmod(len(a), n)
+    return (a[i * k + min(i, m) : (i + 1) * k + min(i + 1, m)] for i in range(n))
 
 
 def main(args: argparse.Namespace) -> None:
@@ -414,13 +447,38 @@ def main(args: argparse.Namespace) -> None:
                 + list(random.choice([x for x in string.ascii_uppercase], size=6))
             )
 
-        prefix += "".join([":"] + [str(random.randint(10))])
+        # prefix += "".join([":"] + [str(random.randint(1, 9))]) # Lane number
 
         if sample_sheet:
             # unique_lanes = defaultdict(set)
             taint_sequences = defaultdict(list)
+            available_tiles = [
+                "".join(x)
+                for x in product(
+                    [str(i + 1) for i in range(SURFACE_COUNT)],
+                    [str(i + 1) for i in range(SWATH_COUNT)],
+                    [f"{i + 1:02}" for i in range(TILE_COUNT)],
+                )
+            ]
+            random.shuffle(available_tiles)
+
+            partitioned_available_tiles = [
+                x
+                for x in split(
+                    available_tiles,
+                    len(
+                        [
+                            (proj, sample)
+                            for proj, samples in sample_sheet.items()
+                            for sample in samples
+                        ]
+                    ),
+                )
+            ]
+
             for proj, samples in sample_sheet.items():
-                for sample, (index, recipe) in samples.items():
+                for sample, (index, lane, recipe) in samples.items():
+                    proj_prefix = prefix + f":{lane}"  # Lane number
                     lane_key = re.sub(r"S\d+_", "S0_", index)
                     # unique_lanes.setdefault(lane_key, set()).add(recipe)
                     index1 = recipe["I1"]
@@ -451,13 +509,17 @@ def main(args: argparse.Namespace) -> None:
                     if not output_files[0].parent.is_dir():
                         output_files[0].parent.mkdir(parents=True, exist_ok=True)
 
+                    available_tiles = partitioned_available_tiles.pop()
+                    unique_tile = available_tiles.pop()
+
                     sampled_sequences = generate_dnaio_fastq_files(
                         output_files,
                         nucleotides,
                         args.seq_number,
                         recipe,
-                        prefix,
+                        proj_prefix,
                         extension,
+                        unique_tile,
                         args.taint,
                     )
                     taint_sequences.setdefault(lane_key, []).append(sampled_sequences)
@@ -507,11 +569,11 @@ def main(args: argparse.Namespace) -> None:
                 with dnaio.open(output_file, mode="w", fileformat="fastq") as writer:
                     for i, seq in enumerate(sequences):
                         suffix = "".join(
-                            [str(random.randint(10000))]
+                            [str(random.randint(10000))]  # Tile number
                             + [":"]
-                            + [str(random.randint(10000))]
+                            + [str(random.randint(10000))]  # X coordinate
                             + [":"]
-                            + [str(random.randint(10000))]
+                            + [str(random.randint(10000))]  # Y coordinate
                         )
                         writer.write(
                             dnaio.SequenceRecord(

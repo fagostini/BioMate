@@ -8,7 +8,8 @@ import struct
 import tempfile
 from collections import OrderedDict, defaultdict
 from datetime import datetime
-
+import numpy
+from itertools import product
 import dnaio
 import polars
 import regex as re
@@ -17,7 +18,11 @@ from fastavro import writer as avro_writer
 
 from biomate.setup import setup_logging
 
-NOVASEQXPLUS_IMAGE_SIZE = (5120, 2879)
+TILE_WIDTH = 320  # 5120
+TILE_HEIGHT = 160  # 2879
+SURFACE_COUNT = 2
+SWATH_COUNT = 4
+TILE_COUNT = 16
 
 
 def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -76,6 +81,15 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     return parser
 
 
+def clean_directory(directory: pathlib.Path) -> None:
+    if directory.is_file():
+        directory.unlink()
+    else:
+        for item in directory.iterdir():
+            clean_directory(item)  # Recursive deletion of all items
+        directory.rmdir()  # Remove the empty directory
+
+
 def validate_args(args) -> argparse.Namespace:
     """
     Validate the command line arguments.
@@ -99,11 +113,59 @@ def validate_args(args) -> argparse.Namespace:
         raise argparse.ArgumentTypeError(
             f"Sample sheet {args.sample_sheet} does not exist."
         )
-    if args.output_path.is_dir() and not args.force:
-        raise argparse.ArgumentTypeError(
-            f"Output directory {args.output_path} already exists. Use --force to overwrite."
-        )
+    if args.output_path.is_dir():
+        if not args.force:
+            raise argparse.ArgumentTypeError(
+                f"Output directory {args.output_path} already exists. Use --force to overwrite its content."
+            )
+        else:
+            logging.warning("Cleaning up the output directory before proceeding...")
+            clean_directory(args.output_path)
+    else:
+        logging.debug("The output directory does not exist! It will be created...")
     return args
+
+
+def parse_sequence_mask(
+    mask_string: str, index1: str = None, index2: str = None
+) -> dict:
+    """
+    Parse the sequence mask.
+    """
+    mask_split = re.findall(
+        r"[^\W\d_]+|\d+", mask_string
+    )  # Split characters from digits
+    mask_dict = {"R1": 0, "I1": 0, "I2": 0, "R2": 0}  # Create empty dict
+    key = "R1"  # Set the initial key value
+    for i in range(len(mask_split)):
+        if i % 2 == 0:  # Even positions should always be characters
+            if mask_split[i] == "I":
+                key = "I1" if mask_dict["I1"] == 0 else "I2"
+            elif (
+                mask_split[i] == "N"
+            ):  # Ns should change the key only if it is set to I
+                key = "R2" if key in ["I1", "I2"] else "R1"
+            elif mask_split[i] == "Y":
+                key = "R1" if mask_dict["I1"] == 0 and mask_dict["I2"] == 0 else "R2"
+            else:
+                raise ValueError(
+                    f"Invalid character found in sequence mask: {mask_split[i]}"
+                )
+        else:  # Odd positions should always be digits
+            if mask_split[i].isdigit():
+                # If specified, use the index sequence instead of the length
+                if index1 and key == "I1" and len(index1) == int(mask_split[i]):
+                    mask_dict[key] = index1
+                # If specified, use the index sequence instead of the length
+                elif index2 and key == "I2" and len(index2) == int(mask_split[i]):
+                    mask_dict[key] = index2
+                else:
+                    mask_dict[key] += int(mask_split[i])
+            else:
+                raise ValueError(
+                    f"Sequence mask characters must be followed by digits! {mask_split[i]}"
+                )
+    return mask_dict
 
 
 def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict]":
@@ -114,15 +176,17 @@ def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict]":
     with open(sample_sheet) as input_file:
         lines = input_file.readlines()
 
-    # Find the line where the FCID starts, where the actual data in CSV format starts
-    skip_lines = [i for i, line in enumerate(lines) if line.startswith("FCID")]
+    # Find the line where the 'BCLConvert_Data' or 'Data' section starts
+    skip_lines = [
+        i
+        for i, line in enumerate(lines)
+        if line.startswith("[BCLConvert_Data]") or line.startswith("[Data]")
+    ]
     if not skip_lines:
-        logging.error(
-            "No valid SampleSheet found! 'FCID' header not found in the file. "
-        )
+        logging.error("No valid SampleSheet found! Data section not found in the file.")
         exit(1)
     else:
-        skip_lines = skip_lines[0]
+        skip_lines = skip_lines[0] + 1
 
     # Write the lines to a temporary file, skipping the header lines
     tmp = tempfile.NamedTemporaryFile()
@@ -130,14 +194,37 @@ def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict]":
         for line in lines[skip_lines:]:
             _ = f.write(line)
 
-    # Read the temporary file using polars and process the data
-    data = polars.read_csv(tmp.name).with_columns(
-        [
-            polars.col("Recipe").str.split_exact("-", 1).struct.unnest(),
-            polars.col("index").str.len_chars().alias("index_length"),
-            polars.col("index2").str.len_chars().alias("index2_length"),
-        ]
-    )
+    data = polars.read_csv(tmp.name)
+
+    # Exit if the design is not present among the data columns
+    if "OverrideCycles" not in data.columns and "Recipe" not in data.columns:
+        raise RuntimeError("OverrideCycles or Recipe column not found in Data section!")
+
+    # SampleSheet version 2
+    if any([line.startswith("[BCLConvert_Data]") for line in lines]):
+        # Read the temporary file using polars and process the data
+        data = (
+            data.with_columns(
+                [
+                    polars.col("OverrideCycles")
+                    .map_elements(lambda x: parse_sequence_mask(x))
+                    .struct.unnest(),
+                    polars.col("index").str.len_chars().alias("index_length"),
+                    polars.col("index2").str.len_chars().alias("index2_length"),
+                ]
+            )
+            .rename({"R1": "field_0", "R2": "field_1"})
+            .drop(["I1", "I2"])
+        )
+    else:
+        # Read the temporary file using polars and process the data
+        data = data.with_columns(
+            [
+                polars.col("Recipe").str.split_exact("-", 1).struct.unnest(),
+                polars.col("index").str.len_chars().alias("index_length"),
+                polars.col("index2").str.len_chars().alias("index2_length"),
+            ]
+        )
     if "field_1" not in data.columns:
         data = data.with_columns(polars.lit("0").alias("field_1"))
     data = data.with_columns(
@@ -440,6 +527,9 @@ def parse_fastq_groups(
             tempdir.joinpath("tile_positions.avro"),
         )
         .unique()
+        .with_columns(
+            [polars.col("x").cast(polars.UInt16), polars.col("y").cast(polars.UInt16)]
+        )
         .sort(["tile", "x", "y"])
     ).partition_by("tile", as_dict=True, include_key=False)
 
@@ -451,15 +541,15 @@ def parse_fastq_groups(
     return tiles_and_locs
 
 
-def write_filter(filter_path: pathlib.Path, cluster_count: int):
+def write_filter(filter_path: pathlib.Path, cluster_filter: list) -> None:
     """Write the filter file."""
     filter_path.parent.mkdir(exist_ok=True, parents=True)
     with open(filter_path, "wb") as f_out:
-        f_out.write(struct.pack("<III", 0, 3, cluster_count))
-        f_out.write(bytes([1] * cluster_count))  # bit 0 is pass or failed filter
+        f_out.write(struct.pack("<III", 0, 3, len(cluster_filter)))
+        f_out.write(bytes(cluster_filter))  # bit 0 is pass or failed filter
 
 
-def write_control(control_path: pathlib.Path, cluster_count: int):
+def write_control(control_path: pathlib.Path, cluster_count: int) -> None:
     """Write the control file."""
     control_path.parent.mkdir(exist_ok=True, parents=True)
     with open(control_path, "wb") as f_out:
@@ -468,15 +558,15 @@ def write_control(control_path: pathlib.Path, cluster_count: int):
         f_out.write(bytes([0, 0] * cluster_count))
 
 
-def encode_loc_bytes(x_pos, y_pos):
+def encode_loc_bytes(x_pos, y_pos) -> bytes:
     """Pack the X and Y coordinates into bytes."""
     # In the read name, the smallest value for X and Y is 1000, so they are
     # re-scaled in order for them to start from 0, while the division by 10 for
     # converting them to float (not sure if needed or if the factor is correct)
-    return struct.pack("<ff", (int(x_pos) - 1000) / 10, (int(y_pos) - 1000) / 10)
+    return struct.pack("<ff", (x_pos - 1000) / 10, (y_pos - 1000) / 10)
 
 
-def write_locs(locs_path: pathlib.Path, unique_locs: set):
+def write_locs(locs_path: pathlib.Path, unique_locs: list) -> None:
     """Write the .locs file(s)."""
     locs_path.parent.mkdir(exist_ok=True, parents=True)
     # The locs file format is one 3 Illumina formats(pos, locs, and clocs) that stores position data exclusively.
@@ -489,7 +579,7 @@ def write_locs(locs_path: pathlib.Path, unique_locs: set):
     #     The remaining bytes of the file store the X and Y coordinates of the remaining clusters.
     with open(locs_path, "wb") as f_out:
         f_out.write(struct.pack("<IfI", 1, 1, len(unique_locs)))
-        for x_pos, y_pos in sorted(unique_locs, key=lambda x: (x[1], x[0])):
+        for x_pos, y_pos in unique_locs:
             f_out.write(encode_loc_bytes(x_pos, y_pos))
 
 
@@ -537,7 +627,7 @@ def extract_flowcell_layout(lane_tiles: dict) -> tuple:
     )
 
 
-def pack_cbcl_header(cycle: int, tiles_metrics: dict, quality_map: dict):
+def pack_cbcl_header(cycle: int, tiles_metrics: dict, quality_map: dict) -> bytes:
     h_version = 1
     # h_size = 6321 # Dynamically extracted based on the available tiles
     h_basebits = 2
@@ -579,7 +669,7 @@ def encode_cluster_bits(
     quality_map: dict,
     sequence_map: dict = {"A": "00", "C": "01", "G": "10", "T": "11"},
     phred_offset: int = 33,
-):
+) -> str:
     """Encode the bits corresponding to a base and its quality."""
     return sequence_map.get(record.sequence, "00") + quality_map.get(
         ord(record.qualities) - phred_offset,
@@ -595,7 +685,7 @@ def preprocess_and_write_bcls(
     threads: int = 0,
     instrument: str = "NovaSeqXPlus",
     quality_map={2: "00", 9: "01", 24: "10", 40: "11"},
-):
+) -> None:
     """Process the tile files and generate the final BCL file"""
     pattern = (
         f"{lane}/[1-2]_[1-2][1-2][0-9][0-9].fastq.gz"
@@ -660,7 +750,7 @@ def preprocess_and_write_bcls(
                             if i % 2 == 0:
                                 # Cycle through the sequence and quality positions and extract the corresponding bits,
                                 # adding them to those already stored in the buffer
-                                for cycle in range(total_cycles):
+                                for cycle in range(read_length):
                                     bits_string = buffer[cycle] + encode_cluster_bits(
                                         read.__getitem__(cycle),
                                         quality_map,
@@ -680,7 +770,7 @@ def preprocess_and_write_bcls(
                                 buffer = []
                             else:
                                 # Cycle through the sequence and quality positions and extract the corresponding bits
-                                for cycle in range(total_cycles):
+                                for cycle in range(read_length):
                                     buffer.append(
                                         encode_cluster_bits(
                                             read.__getitem__(cycle),
@@ -765,14 +855,14 @@ def preprocess_and_write_bcls(
 
 def write_run_info_xml(
     xml_path: pathlib.Path,
-    cycles_dict,
-    lane_count,
-    surface_count,
-    swath_count,
-    tile_count,
-    tile_names,
-    desc,
-):
+    cycles_dict: dict,
+    lane_count: int,
+    surface_count: int = None,
+    swath_count: int = None,
+    tile_count: int = None,
+    tile_names: str = None,
+    desc: str = None,
+) -> None:
     xml_path.parent.mkdir(exist_ok=True, parents=True)
     fields = parse_seqname_fields(desc)
     run_id = generate_run_id(desc)
@@ -780,7 +870,6 @@ def write_run_info_xml(
     flowcell_id = fields["flowcell_id"]
     instrument = fields["instrument"]
     date = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
-    tile_count = int(tile_count / surface_count / swath_count)
     with open(xml_path, "wt") as f_out:
         f_out.write(
             '<?xml version="1.0"?> \n'
@@ -798,7 +887,7 @@ def write_run_info_xml(
             )
         f_out.write(
             "    </Reads>\n"
-            f'    <FlowcellLayout LaneCount="{lane_count}" SurfaceCount="{surface_count}" SwathCount="{swath_count}" TileCount="{tile_count}" />\n'
+            f'    <FlowcellLayout LaneCount="{lane_count}" SurfaceCount="{surface_count}" SwathCount="{swath_count}" TileCount="{tile_count}">\n'
         )
         if tile_names:
             naming_convention = (
@@ -809,10 +898,10 @@ def write_run_info_xml(
             )
             for tile in tile_names:
                 f_out.write(f"          <Tile>{tile}</Tile>\n")
-            f_out.write("        <Tiles>\n      </TileSet>\n")
+            f_out.write("        </Tiles>\n      </TileSet>\n")
         f_out.write("    </FlowcellLayout>\n")
         f_out.write(
-            f'    <ImageDimensions Width="{NOVASEQXPLUS_IMAGE_SIZE[0]}" Height="{NOVASEQXPLUS_IMAGE_SIZE[1]}"/>\n'
+            f'    <ImageDimensions Width="{TILE_WIDTH}" Height="{TILE_HEIGHT}"/>\n'
         )
         f_out.write(
             "    <ImageChannels>\n      <Name>blue</Name>\n      <Name>green</Name>\n    </ImageChannels>\n"
@@ -861,13 +950,26 @@ def main(args: argparse.Namespace) -> None:
             sample_read = read.name
             break
 
-    # The next line is for debugging purposes
-    outer_break = False
+    # # The next line is for debugging purposes
+    # outer_break = False
     # Dictionary containing all unique tiles per lane
     tiles_by_lane = defaultdict(set)
     flowcell_unique_locs = set()
+    lanes_filter_dict = dict()
     for lane, files in lanes_dict.items():
         logging.info(f"Processing lane '{lane}'")
+        # Create a dictionary of numpy arrays to store the filter information
+        lanes_filter_dict[lane] = {
+            k: numpy.zeros((TILE_WIDTH * 10 + 1, TILE_HEIGHT * 10 + 1))
+            for k in [
+                "".join(t)
+                for t in product(
+                    [str(x + 1) for x in range(SURFACE_COUNT)],
+                    [str(x + 1) for x in range(SWATH_COUNT)],
+                    [f"{x + 1:02}" for x in range(TILE_COUNT)],
+                )
+            ]
+        }
         # Create a temporary directory where to put all intermediate files
         with tempfile.TemporaryDirectory(delete=True) as tempdir:
             tempdir = pathlib.Path(tempdir)
@@ -884,14 +986,17 @@ def main(args: argparse.Namespace) -> None:
                 )
 
                 for k, v in tiles_and_locs.items():
+                    logging.debug(f"Populating filter arrays with tile {k}")
+                    for coords in v:
+                        lanes_filter_dict[lane][k][coords] = 1
                     unique_locs_by_tile.setdefault(k, set()).update(v)
                     flowcell_unique_locs.update(v)
 
-                # Debugging code
-                outer_break = True
-                break
+                # # Debugging code
+                # outer_break = True
+                # break
 
-            logging.debug("Writing (C)BCL files...")
+            logging.info("Writing (c)BCL files...")
             preprocess_and_write_bcls(
                 args.output_path,
                 lane,
@@ -905,46 +1010,93 @@ def main(args: argparse.Namespace) -> None:
                 {x for x in unique_locs_by_tile.keys()}
             )
 
-            logging.debug("Writing FILTER files...")
-            for tile, cc in unique_locs_by_tile.items():
-                # Naming convention: Data/Intensities/BaseCalls/<L00_prefixed_lane>/s_<single_digit_lane>_<tile>.filter
-                write_filter(
-                    args.output_path.joinpath(
-                        f"Data/Intensities/BaseCalls/{lane}/s_{lane[-1]}_{tile}.filter"
-                    ),
-                    cluster_count=len(cc),
+            # logging.debug("Writing FILTER files...")
+            # for tile, cc in unique_locs_by_tile.items():
+            #     # Naming convention: Data/Intensities/BaseCalls/<L00_prefixed_lane>/s_<single_digit_lane>_<tile>.filter
+            #     write_filter(
+            #         args.output_path.joinpath(
+            #             f"Data/Intensities/BaseCalls/{lane}/s_{lane[-1]}_{tile}.filter"
+            #         ),
+            #         cluster_count=len(cc),
+            #     )
+            #     # The control files are generated by instruments other than the NovaSeqXPlus
+            #     # Naming convention: Data/Intensities/BaseCalls/<L00_prefixed_lane>/s_<single_digit_lane>_<tile>.control
+            #     write_control(
+            #         args.output_path.joinpath(
+            #             f"Data/Intensities/BaseCalls/{lane}/s_{lane[-1]}_{tile}.control"
+            #         ),
+            #         cluster_count=cc,
+            #     )
+
+            # if outer_break:
+            #     break
+
+    # Extract all the detected unique positions on the flowcell
+    unique_positions = polars.DataFrame(schema={"x": polars.UInt16, "y": polars.UInt16})
+    for lane, tiles in lanes_filter_dict.items():
+        for tile, matrix in tiles.items():
+            ones = numpy.nonzero(matrix)
+            unique_positions = unique_positions.vstack(
+                polars.DataFrame(
+                    {"x": ones[0] + 1, "y": ones[1] + 1},
+                    schema={"x": polars.UInt16, "y": polars.UInt16},
                 )
-                # The control files are generated by instruments other than the NovaSeqXPlus
-                # # Naming convention: Data/Intensities/BaseCalls/<L00_prefixed_lane>/s_<single_digit_lane>_<tile>.control
-                # write_control(
-                #     args.output_path.joinpath(
-                #         f"Data/Intensities/BaseCalls/{lane}/s_{lane[-1]}_{tile}.control"
-                #     ),
-                #     cluster_count=cc,
-                # )
+            ).unique()
+            # unique_positions.update([ (int(x+1), int(y+1)) for x,y in zip(ones[0], ones[1]) ])
 
-            if outer_break:
-                break
+    unique_positions = (
+        unique_positions.unique()
+        .sort(["y", "x"])
+        .select(polars.concat_list("x", "y").alias("coords"))
+    )
 
-    logging.debug("Writing LOCS file(s)...")
+    logging.info("Writing LOCS file...")
     # Naming convention: Data/Intensities/s.locs
     write_locs(
         args.output_path.joinpath("Data/Intensities/s.locs"),
-        flowcell_unique_locs,
+        unique_positions.get_column("coords").to_list(),  # flowcell_unique_locs,
     )
+
+    # Write the filter files
+    logging.info("Writing FILTER files...")
+    for lane, tiles in lanes_filter_dict.items():
+        for tile, matrix in tiles.items():
+            ones = numpy.nonzero(matrix)
+            df = (
+                polars.DataFrame(
+                    {"x": ones[0] + 1, "y": ones[1] + 1},
+                    schema={"x": polars.UInt16, "y": polars.UInt16},
+                )
+                .unique()
+                .select(polars.concat_list("x", "y").alias("filter"))
+            )
+            df = unique_positions.join(
+                df, left_on="coords", right_on="filter", how="full"
+            ).with_columns(
+                polars.when(polars.col("filter").is_null())
+                .then(polars.lit(0))
+                .otherwise(polars.lit(1))
+                .alias("filter")
+            )
+            write_filter(
+                args.output_path.joinpath(
+                    f"Data/Intensities/BaseCalls/{lane}/s_{lane[-1]}_{tile}.filter"
+                ),
+                cluster_filter=df.get_column("filter").to_list(),
+            )
 
     (lane_count, surface_count, swath_count, tile_count), tile_names = (
         extract_flowcell_layout(tiles_by_lane)
     )
 
-    logging.debug("Writing RunInfo XML file...")
+    logging.info("Writing RunInfo XML file...")
     write_run_info_xml(
         args.output_path.joinpath("RunInfo.xml"),
         cycles_dict,
         lane_count,
-        surface_count,
-        swath_count,
-        tile_count,
+        SURFACE_COUNT,
+        SWATH_COUNT,
+        TILE_COUNT,  # alternatevily, int(tile_count / surface_count / swath_count)
         tile_names,
         sample_read,
     )

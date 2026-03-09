@@ -180,6 +180,7 @@ cython_debug/
 src/biomate/notebooks/*
 
 # Outputs
+test/*
 **.*bcl
 **.filter
 **.control
