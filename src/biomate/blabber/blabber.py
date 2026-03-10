@@ -257,7 +257,9 @@ def parse_sample_sheet(sample_sheet: pathlib.Path) -> tuple[str, dict]:
         # Create a dictionary to store the sample sheet data
         sample_sheet_dict = defaultdict(dict)
         counter = 1
-        for proj in data.get_column("Sample_Project").unique(maintain_order=True):
+        for proj in (
+            data.get_column("Sample_Project").drop_nulls().unique(maintain_order=True)
+        ):
             sample_sheet_dict.setdefault(proj, defaultdict(list))
             for lane, name, id, recipe, i1, i2 in (
                 data.filter(polars.col("Sample_Project") == proj)
@@ -352,6 +354,9 @@ def generate_dnaio_fastq_files(
     available_tile_positions = product([tile], available_pos_x, available_pos_y)
     read1_len = recipe["R1"]
     read2_len = recipe["R2"]
+    logging.debug(
+        f"Generating sequence for {[x.name for x in output_files]} using tile(s): {tile}"
+    )
     with dnaio.open(*output_files, mode="w", fileformat="fastq") as writer:
         for reads in sequences or []:
             if reads:
@@ -475,7 +480,6 @@ def main(args: argparse.Namespace) -> None:
                     ),
                 )
             ]
-
             for proj, samples in sample_sheet.items():
                 for sample, (index, lane, recipe) in samples.items():
                     proj_prefix = prefix + f":{lane}"  # Lane number
