@@ -587,21 +587,26 @@ def write_locs(locs_path: pathlib.Path, unique_locs: list) -> None:
 def extract_flowcell_layout(lane_tiles: dict) -> tuple:
     """Extract some of the flowcell information from the tile names."""
     df = (
-        polars.from_dict({k: list(v) for k, v in lane_tiles.items()})
-        .unpivot()
+        polars.DataFrame(
+            {"Lane": lane_tiles.keys(), "Tile": [list(x) for x in lane_tiles.values()]}
+        )
+        .explode("Tile")
+        .group_by("Lane", maintain_order=True)
+        .agg(polars.col("Tile").sort())
+        .explode("Tile")
         .with_columns(
             [
-                polars.col("value").cast(polars.UInt16),
+                polars.col("Tile").cast(polars.UInt16),
                 polars.lit("A").alias("Flowcell"),
-                polars.col("variable").str.slice(3, 1).cast(polars.Int8).alias("Lane"),
-                polars.col("value").str.slice(0, 1).cast(polars.Int8).alias("Surface"),
-                polars.col("value").str.slice(1, 1).cast(polars.Int8).alias("Swath"),
+                polars.col("Lane").str.slice(3, 1).cast(polars.Int8),
+                polars.col("Tile").str.slice(0, 1).cast(polars.Int8).alias("Surface"),
+                polars.col("Tile").str.slice(1, 1).cast(polars.Int8).alias("Swath"),
             ]
         )
-        .sort(["Lane", "value"])
+        .sort(["Lane", "Tile"])
         .with_columns(
             polars.concat_str(
-                polars.col("Lane"), polars.col("value"), separator="_"
+                polars.col("Lane"), polars.col("Tile"), separator="_"
             ).alias("Name")
         )
     )
@@ -1005,6 +1010,11 @@ def main(args: argparse.Namespace) -> None:
                 {x for x in unique_locs_by_tile.keys()}
             )
 
+    logging.debug("Extracting floecell layout from tiles...")
+    (lane_count, surface_count, swath_count, tile_count), tile_names = (
+        extract_flowcell_layout(tiles_by_lane)
+    )
+
     # Extract all the detected unique positions on the flowcell
     unique_positions = polars.DataFrame(schema={"x": polars.UInt16, "y": polars.UInt16})
     for lane, tiles in lanes_filter_dict.items():
@@ -1058,10 +1068,6 @@ def main(args: argparse.Namespace) -> None:
                 ),
                 cluster_filter=df.get_column("filter").to_list(),
             )
-
-    (lane_count, surface_count, swath_count, tile_count), tile_names = (
-        extract_flowcell_layout(tiles_by_lane)
-    )
 
     logging.info("Writing RunInfo XML file...")
     write_run_info_xml(
