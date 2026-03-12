@@ -133,7 +133,20 @@ def parse_sequence_mask(
     """
     Parse the sequence mask.
     """
-    mask_dict = {"R1": 0, "I1": 0, "I2": 0, "R2": 0}  # Create empty dict
+    mask_dict = {
+        "R1B": 0,
+        "R1": 0,
+        "R1A": 0,
+        "I1B": 0,
+        "I1": 0,
+        "I1A": 0,
+        "I2B": 0,
+        "I2": 0,
+        "I2A": 0,
+        "R2B": 0,
+        "R2": 0,
+        "R2A": 0,
+    }  # Create empty dict
 
     mask_split = mask_string.split(";")
 
@@ -153,14 +166,20 @@ def parse_sequence_mask(
                     mask_dict["I1"] = int(value)
                 else:
                     mask_dict["I2"] = int(value)
+            else:
+                basekey = "R" if "Y" in submask_split else "I"
+                basekey += "2" if mask_dict["I2"] != 0 or mask_dict["R2"] != 0 else "1"
+                basekey += "B" if substring[0] == "N" else "A"
+                mask_dict[basekey] = int(value)
 
-    logging.debug(f"Mask '{mask_string}' parsed as {mask_dict}")
     return mask_dict
 
 
-def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict]":
+def extract_data_from_samplesheet(
+    sample_sheet: pathlib.Path,
+) -> "tuple[polars.DataTable, int]":
     """
-    Parse the sample sheet file and return the total number of cycles.
+    Parse the sample sheet file and return the Data section as DataTable.
     """
     # Read the sample sheet file and stores all lines in a list
     with open(sample_sheet) as input_file:
@@ -184,14 +203,122 @@ def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict]":
         for line in lines[skip_lines:]:
             _ = f.write(line)
 
+    version = 2 if any([line.startswith("[BCLConvert_Data]") for line in lines]) else 1
+
     data = polars.read_csv(tmp.name)
+    tmp.close()
 
     # Exit if the design is not present among the data columns
     if "OverrideCycles" not in data.columns and "Recipe" not in data.columns:
         raise RuntimeError("OverrideCycles or Recipe column not found in Data section!")
 
+    return data, version
+
+
+def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
+    """
+    Parse the sample sheet file, extract and process the masks for later use.
+    """
+    # Read the sample sheet file and stores all lines in a list
+    data, version = extract_data_from_samplesheet(sample_sheet)
+    data = (
+        data.with_row_index(name="Sample_Index", offset=1)
+        .with_columns(
+            [
+                polars.col("Lane")
+                .cast(polars.String)
+                .str.zfill(3)
+                .str.pad_start(4, "L")
+                + "_001",
+                polars.col("Sample_Index").cast(polars.String).str.pad_start(2, "S"),
+            ]
+        )
+        .with_columns(polars.col("Sample_Name"))
+        .with_columns(
+            polars.concat_str("Sample_Name", "Sample_Index", "Lane", separator="_")
+        )
+        .select(["Sample_Name", "index", "index2", "OverrideCycles"])
+    )
+    data = data.with_columns(
+        [
+            polars.col("OverrideCycles")
+            .map_elements(lambda x: parse_sequence_mask(x))
+            .struct.unnest(),
+            polars.col("index").str.len_chars().fill_null(0).alias("index_length"),
+            polars.col("index2").str.len_chars().fill_null(0).alias("index2_length"),
+        ]
+    ).drop("OverrideCycles")
+
+    if "R2" not in data.columns:
+        data = data.with_columns(polars.lit(0).alias("R1"))
+    if "index_length" in data.columns:
+        if data.filter(polars.col("index_length") != polars.col("I1")).height == 0:
+            data = data.with_columns(polars.col("index").alias("I1")).drop("index")
+            data = (
+                data.with_columns(
+                    [
+                        polars.Series(
+                            [x * "N" for x in data.get_column("I1B").to_list()]
+                        ).alias("I1B"),
+                        polars.Series(
+                            [x * "N" for x in data.get_column("I1A").to_list()]
+                        ).alias("I1A"),
+                    ]
+                )
+                .with_columns(polars.concat_str("I1B", "I1", "I1A").alias("I1"))
+                .drop(["I1B", "I1A", "index_length"])
+            )
+        else:
+            raise RuntimeError(
+                "One or more index 1 string do not match the value in the mask!"
+            )
+    if "index2_length" in data.columns:
+        if data.filter(polars.col("index2_length") != polars.col("I2")).height == 0:
+            data = data.with_columns(polars.col("index2").alias("I2")).drop("index2")
+            data = (
+                data.with_columns(
+                    [
+                        polars.Series(
+                            [x * "N" for x in data.get_column("I2B").to_list()]
+                        ).alias("I2B"),
+                        polars.Series(
+                            [x * "N" for x in data.get_column("I2A").to_list()]
+                        ).alias("I2A"),
+                    ]
+                )
+                .with_columns(polars.concat_str("I2B", "I2", "I2A").alias("I2"))
+                .drop(["I2B", "I2A", "index2_length"])
+            )
+        else:
+            raise RuntimeError(
+                "One or more index 2 string do not match the value in the mask!"
+            )
+
+    data = {
+        sn: {
+            "R1B": "N" * r1b,
+            "R1": r1,
+            "R1A": "N" * r1a,
+            "I1": i1,
+            "I2": i2,
+            "R2B": "N" * r2b,
+            "R2": r2,
+            "R2A": "N" * r2a,
+        }
+        for sn, r1b, r1, r1a, i1, i2, r2b, r2, r2a in data.iter_rows()
+    }
+
+    return data
+
+
+def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict]":
+    """
+    Parse the sample sheet file and return the total number of cycles.
+    """
+    data, version = extract_data_from_samplesheet(sample_sheet)
+
     # SampleSheet version 2
-    if any([line.startswith("[BCLConvert_Data]") for line in lines]):
+    if version == 2:
         # Read the temporary file using polars and process the data
         data = (
             data.with_columns(
@@ -307,8 +434,10 @@ def generate_run_id(name: str) -> str:
 
 
 def parse_fastq_groups(
+    lane: str,
     name: str,
     filenames: list,
+    masks_table: dict,
     tempdir: pathlib.Path,
     threads: int = 0,
     instrument: str = "NovaSeqXPlus",
@@ -349,7 +478,7 @@ def parse_fastq_groups(
         return defaultdict(list)
 
     if instrument == "NovaSeqXPlus":
-        tempdir = tempdir.joinpath(name)
+        tempdir = tempdir.joinpath(lane)
         tempdir.mkdir(parents=True, exist_ok=True)
 
     # Define the schema of the avro file for the positions
@@ -365,6 +494,8 @@ def parse_fastq_groups(
         }
     )
     avro_file = tempdir.joinpath("tile_positions.avro")
+
+    sample_recipe = masks_table[name]
 
     with dnaio.open(*sorted(filenames), open_threads=threads) as reader:
         # Procedure for single-end reads
@@ -407,8 +538,26 @@ def parse_fastq_groups(
         elif len(filenames) == 2:
             for buffer_counter, (r1, r2) in enumerate(reader, start=1):
                 split_name, indexes = process_read_name(r1.name)
-                r1.sequence += indexes + r2.sequence
-                r1.qualities += "I" * len(indexes) + r2.qualities
+                # Redefine the indexes to include 'N's, if any
+                indexes = f"{sample_recipe['I1']}{sample_recipe['I2']}"
+                r1.sequence = (
+                    sample_recipe["R1B"]
+                    + r1.sequence
+                    + sample_recipe["R1A"]
+                    + indexes
+                    + sample_recipe["R2B"]
+                    + r2.sequence
+                    + sample_recipe["R2A"]
+                )
+                r1.qualities = (
+                    "I" * len(sample_recipe["R1B"])
+                    + r1.qualities
+                    + "I" * len(sample_recipe["R1A"])
+                    + "I" * len(indexes)
+                    + "I" * len(sample_recipe["R2B"])
+                    + r2.qualities
+                    + "I" * len(sample_recipe["R2A"])
+                )
 
                 formatted_key = f"{split_name[4][0]}_{split_name[4]}"
 
@@ -421,6 +570,7 @@ def parse_fastq_groups(
                 )
 
                 buffer_container.setdefault(formatted_key, list()).append(r1)
+
                 if buffer_counter % buffer_size == 0:
                     logging.debug(
                         f"Processed {buffer_counter} reads. Dumping buffers to files..."
@@ -531,7 +681,9 @@ def parse_fastq_groups(
     for k, v in dt.items():
         tiles_and_locs.setdefault(k[0], set()).update(set(v.rows()))
 
-    logging.debug(f"Correctly processed {buffer_counter} clusters from sample '{name}'")
+    logging.debug(
+        f"Correctly processed {buffer_counter} clusters from sample '{name}' in lane '{lane}'"
+    )
     return tiles_and_locs
 
 
@@ -882,11 +1034,15 @@ def write_run_info_xml(
             f"    <Date>{date}</Date>\n"
             f"    <Reads>\n"
         )
-        for i, key in enumerate(cycles_dict.keys(), start=1):
+        i = 1
+        for key in cycles_dict.keys():
             is_index = "N" if key in ["R1", "R2"] else "Y"
-            f_out.write(
-                f'      <Read Number="{i}" NumCycles="{cycles_dict[key]}" IsIndexedRead="{is_index}" IsReverseComplement="N"/>\n'
-            )
+            if cycles_dict[key] != 0:
+                f_out.write(
+                    f'      <Read Number="{i}" NumCycles="{cycles_dict[key]}" IsIndexedRead="{is_index}" IsReverseComplement="N"/>\n'
+                )
+                i += 1
+
         f_out.write(
             "    </Reads>\n"
             f'    <FlowcellLayout LaneCount="{lane_count}" SurfaceCount="{surface_count}" SwathCount="{swath_count}" TileCount="{tile_count}">\n'
@@ -927,6 +1083,9 @@ def main(args: argparse.Namespace) -> None:
         exit(1)
 
     sample_sheet = args.sample_sheet or args.input_path.joinpath("SampleSheet.csv")
+
+    masks_table = generate_masks_table(sample_sheet)
+
     # Get individual and total number of cycles
     total_cycles, cycles_dict = get_cycles(sample_sheet)
 
@@ -980,7 +1139,13 @@ def main(args: argparse.Namespace) -> None:
                 logging.info(f"   Processing '{name}': {[x.name for x in filenames]}")
                 logging.debug("Parsing FASTQ files...")
                 tiles_and_locs = parse_fastq_groups(
-                    lane, filenames, tempdir, args.threads, args.instrument
+                    lane,
+                    name,
+                    filenames,
+                    masks_table,
+                    tempdir,
+                    args.threads,
+                    args.instrument,
                 )
 
                 for k, v in tiles_and_locs.items():
