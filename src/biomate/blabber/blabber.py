@@ -9,7 +9,7 @@ import string
 import tempfile
 from collections import defaultdict
 from datetime import datetime
-from itertools import product
+from itertools import product, batched
 import dnaio
 import polars
 import numpy
@@ -48,8 +48,8 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     group.add_argument(
         "--seq-mask",
         type=str,
-        default="Y100",
-        help="Structure mask (default: Y100)",
+        default=None,
+        help="Structure mask (format: R1;I1;I2;R2)",
     )
     parser.add_argument(
         "--index1",
@@ -89,6 +89,12 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         help="Path to a sample sheet file to use for generating sequences (default: None)",
     )
     parser.add_argument(
+        "--flowcell-id",
+        type=str,
+        default=None,
+        help="Use this flowcell id instead of generating a random string (default: None)",
+    )
+    parser.add_argument(
         "--taint",
         action="store_true",
         help="""Add to the undetermined files approximately 10%% of the sequences from each project
@@ -112,39 +118,42 @@ def parse_sequence_mask(
     """
     Parse the sequence mask.
     """
-    mask_split = re.findall(
-        r"[^\W\d_]+|\d+", mask_string
-    )  # Split characters from digits
     mask_dict = {"R1": 0, "I1": 0, "I2": 0, "R2": 0}  # Create empty dict
-    key = "R1"  # Set the initial key value
-    for i in range(len(mask_split)):
-        if i % 2 == 0:  # Even positions should always be characters
-            if mask_split[i] == "I":
-                key = "I1" if mask_dict["I1"] == 0 else "I2"
-            elif (
-                mask_split[i] == "N"
-            ):  # Ns should change the key only if it is set to I
-                key = "R2" if key in ["I1", "I2"] else "R1"
-            elif mask_split[i] == "Y":
-                key = "R1" if mask_dict["I1"] == 0 and mask_dict["I2"] == 0 else "R2"
-            else:
-                raise ValueError(
-                    f"Invalid character found in sequence mask: {mask_split[i]}"
-                )
-        else:  # Odd positions should always be digits
-            if mask_split[i].isdigit():
-                # If specified, use the index sequence instead of the length
-                if index1 and key == "I1" and len(index1) == int(mask_split[i]):
-                    mask_dict[key] = index1
-                # If specified, use the index sequence instead of the length
-                elif index2 and key == "I2" and len(index2) == int(mask_split[i]):
-                    mask_dict[key] = index2
+
+    mask_split = mask_string.split(";")
+
+    if len(mask_split) > 4:
+        raise ValueError(f"OverrideCycles mask has incorrect format: {mask_string}")
+
+    for substring in mask_split:
+        submask_split = re.findall(r"[^\W\d_]+|\d+", substring)
+        for label, value in batched(submask_split, 2):
+            if label == "Y":
+                if mask_dict["R1"] == 0:
+                    mask_dict["R1"] = int(value)
                 else:
-                    mask_dict[key] += int(mask_split[i])
-            else:
-                raise ValueError(
-                    f"Sequence mask characters must be followed by digits! {mask_split[i]}"
-                )
+                    mask_dict["R2"] = int(value)
+            elif label == "I":
+                if mask_dict["I1"] == 0:
+                    mask_dict["I1"] = int(value)
+                else:
+                    mask_dict["I2"] = int(value)
+
+    if index1 and len(index1) == mask_dict["I1"]:
+        mask_dict["I1"] = index1
+    else:
+        raise ValueError(
+            f"Error: Index 1 mask value ({mask_dict['I1']}) does not match the specified Index 1 length ({len(index1)})!"
+        )
+
+    if index2 and len(index2) == mask_dict["I2"]:
+        mask_dict["I2"] = index2
+    else:
+        raise ValueError(
+            f"Error: Index 2 mask value ({mask_dict['I2']}) does not match the specified Index 2 length ({len(index2)})!"
+        )
+
+    logging.debug(f"Mask '{mask_string}' parsed as {mask_dict}")
     return mask_dict
 
 
@@ -429,6 +438,8 @@ def main(args: argparse.Namespace) -> None:
             field2 = str(random.randint(100, 999))
             output_basepath = args.output.joinpath(
                 f"{field0}_{field1}_{field2:>04}_A{field3}"
+                if not args.flowcell_id
+                else args.flowcell_id
             )
             if not output_basepath.is_dir():
                 output_basepath.mkdir(parents=True, exist_ok=True)
