@@ -139,19 +139,21 @@ def parse_sequence_mask(
                 else:
                     mask_dict["I2"] = int(value)
 
-    if index1 and len(index1) == mask_dict["I1"]:
-        mask_dict["I1"] = index1
-    else:
-        raise ValueError(
-            f"Error: Index 1 mask value ({mask_dict['I1']}) does not match the specified Index 1 length ({len(index1)})!"
-        )
+    if index1:
+        if len(index1) == mask_dict["I1"]:
+            mask_dict["I1"] = index1
+        else:
+            raise ValueError(
+                f"Error: Index 1 mask value ({mask_dict['I1']}) does not match the specified Index 1 length ({len(index1)})!"
+            )
 
-    if index2 and len(index2) == mask_dict["I2"]:
-        mask_dict["I2"] = index2
-    else:
-        raise ValueError(
-            f"Error: Index 2 mask value ({mask_dict['I2']}) does not match the specified Index 2 length ({len(index2)})!"
-        )
+    if index2:
+        if len(index2) == mask_dict["I2"]:
+            mask_dict["I2"] = index2
+        else:
+            raise ValueError(
+                f"Error: Index 2 mask value ({mask_dict['I2']}) does not match the specified Index 2 length ({len(index2)})!"
+            )
 
     logging.debug(f"Mask '{mask_string}' parsed as {mask_dict}")
     return mask_dict
