@@ -9,7 +9,7 @@ import tempfile
 from collections import OrderedDict, defaultdict
 from datetime import datetime
 import numpy
-from itertools import product
+from itertools import product, batched
 import dnaio
 import polars
 import regex as re
@@ -114,14 +114,14 @@ def validate_args(args) -> argparse.Namespace:
         raise argparse.ArgumentTypeError(
             f"Sample sheet {args.sample_sheet} does not exist."
         )
-    if args.output_path.is_dir():
+    if args.output_path.joinpath("Data").is_dir():
         if not args.force:
             raise argparse.ArgumentTypeError(
-                f"Output directory {args.output_path} already exists. Use --force to overwrite its content."
+                f"Output directory {args.output_path.joinpath('Data')} already exists. Use --force to overwrite its content."
             )
         else:
             logging.warning("Cleaning up the output directory before proceeding...")
-            clean_directory(args.output_path)
+            clean_directory(args.output_path.joinpath("Data"))
     else:
         logging.debug("The output directory does not exist! It will be created...")
     return args
@@ -133,39 +133,28 @@ def parse_sequence_mask(
     """
     Parse the sequence mask.
     """
-    mask_split = re.findall(
-        r"[^\W\d_]+|\d+", mask_string
-    )  # Split characters from digits
     mask_dict = {"R1": 0, "I1": 0, "I2": 0, "R2": 0}  # Create empty dict
-    key = "R1"  # Set the initial key value
-    for i in range(len(mask_split)):
-        if i % 2 == 0:  # Even positions should always be characters
-            if mask_split[i] == "I":
-                key = "I1" if mask_dict["I1"] == 0 else "I2"
-            elif (
-                mask_split[i] == "N"
-            ):  # Ns should change the key only if it is set to I
-                key = "R2" if key in ["I1", "I2"] else "R1"
-            elif mask_split[i] == "Y":
-                key = "R1" if mask_dict["I1"] == 0 and mask_dict["I2"] == 0 else "R2"
-            else:
-                raise ValueError(
-                    f"Invalid character found in sequence mask: {mask_split[i]}"
-                )
-        else:  # Odd positions should always be digits
-            if mask_split[i].isdigit():
-                # If specified, use the index sequence instead of the length
-                if index1 and key == "I1" and len(index1) == int(mask_split[i]):
-                    mask_dict[key] = index1
-                # If specified, use the index sequence instead of the length
-                elif index2 and key == "I2" and len(index2) == int(mask_split[i]):
-                    mask_dict[key] = index2
+
+    mask_split = mask_string.split(";")
+
+    if len(mask_split) > 4:
+        raise ValueError(f"OverrideCycles mask has incorrect format: {mask_string}")
+
+    for substring in mask_split:
+        submask_split = re.findall(r"[^\W\d_]+|\d+", substring)
+        for label, value in batched(submask_split, 2):
+            if label == "Y":
+                if mask_dict["R1"] == 0:
+                    mask_dict["R1"] = int(value)
                 else:
-                    mask_dict[key] += int(mask_split[i])
-            else:
-                raise ValueError(
-                    f"Sequence mask characters must be followed by digits! {mask_split[i]}"
-                )
+                    mask_dict["R2"] = int(value)
+            elif label == "I":
+                if mask_dict["I1"] == 0:
+                    mask_dict["I1"] = int(value)
+                else:
+                    mask_dict["I2"] = int(value)
+
+    logging.debug(f"Mask '{mask_string}' parsed as {mask_dict}")
     return mask_dict
 
 
@@ -210,8 +199,14 @@ def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict]":
                     polars.col("OverrideCycles")
                     .map_elements(lambda x: parse_sequence_mask(x))
                     .struct.unnest(),
-                    polars.col("index").str.len_chars().alias("index_length"),
-                    polars.col("index2").str.len_chars().alias("index2_length"),
+                    polars.col("index")
+                    .str.len_chars()
+                    .fill_null(0)
+                    .alias("index_length"),
+                    polars.col("index2")
+                    .str.len_chars()
+                    .fill_null(0)
+                    .alias("index2_length"),
                 ]
             )
             .rename({"R1": "field_0", "R2": "field_1"})
@@ -228,17 +223,15 @@ def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict]":
         )
     if "field_1" not in data.columns:
         data = data.with_columns(polars.lit("0").alias("field_1"))
-    data = data.with_columns(
-        (
-            polars.col("field_0").cast(polars.Int16)
-            + polars.col("field_1").cast(polars.Int16)
-            + polars.col("index_length").cast(polars.Int16)
-            + polars.col("index2_length").cast(polars.Int16)
-        ).alias("total_cycles")
-    )
     cycles = (
-        data.filter(polars.col("total_cycles") == polars.col("total_cycles").max())
-        .head(1)
+        data.select(["field_0", "field_1", "index_length", "index2_length"])
+        .cast(polars.Int16)
+        .max()
+        .with_columns(
+            total_cycles=polars.sum_horizontal(
+                "field_0", "field_1", "index_length", "index2_length"
+            )
+        )
         .to_dicts()[0]
     )
     cycles_dict = {"R1": int(cycles["field_0"])}
