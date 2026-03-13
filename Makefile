@@ -13,7 +13,7 @@ NISS = assets/SampleSheet_NoIndex.csv
 SISS = assets/SampleSheet_SingleIndex.csv
 DISS = assets/SampleSheet_DualIndex.csv
 
-OUTPUT_DIR = temp
+TEMP_DIR = temp
 FLOWCELL_ID = 20260310_LM43899_0385_A12GGASZR5
 
 # Download and install uv
@@ -76,80 +76,89 @@ interrogate: $(UV)
 deploy:
 	@$(UV) run mkdocs gh-deploy
 
-$(OUTPUT_DIR):
-	@mkdir -p $(OUTPUT_DIR)
+$(TEMP_DIR):
+	@mkdir -p $(TEMP_DIR)
 
-copy_none: $(OUTPUT_DIR) $(NISS) clean_samplesheet
-	@cp $(NISS) $(OUTPUT_DIR)/SampleSheet.csv && echo "Copied SampleSheet (No Index) to working folder." || "Error copying SampleSheet to working folder!"
+copy_none: $(TEMP_DIR) $(NISS) clean_samplesheet
+	@cp $(NISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (No Index) to working folder." || "Error copying SampleSheet to working folder!"
 
-copy_single: $(OUTPUT_DIR) $(SISS) clean_samplesheet
-	@cp $(SISS) $(OUTPUT_DIR)/SampleSheet.csv && echo "Copied SampleSheet (Single Index) to working folder." || "Error copying SampleSheet to working folder!"
+copy_single: $(TEMP_DIR) $(SISS) clean_samplesheet
+	@cp $(SISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (Single Index) to working folder." || "Error copying SampleSheet to working folder!"
 
-copy_dual: $(OUTPUT_DIR) $(DISS) clean_samplesheet
-	@cp $(DISS) $(OUTPUT_DIR)/SampleSheet.csv && echo "Copied SampleSheet (Dual Indexes) to working folder." || "Error copying SampleSheet to working folder!"
+copy_dual: $(TEMP_DIR) $(DISS) clean_samplesheet
+	@cp $(DISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (Dual Indexes) to working folder." || "Error copying SampleSheet to working folder!"
 
-$(OUTPUT_DIR)/$(FLOWCELL_ID): $(UV) $(OUTPUT_DIR) clean_flowcell
-	@$(UV) run biomate --verbose blabber --format fastq --sample-sheet $(OUTPUT_DIR)/SampleSheet.csv --seq-number 10 --output $(OUTPUT_DIR) --flowcell-id $(FLOWCELL_ID) > $(OUTPUT_DIR)/blabber.out 2> $(OUTPUT_DIR)/blabber.err && echo "Blabber module executed successfully!" || "Error executing Blabber module!"
+$(TEMP_DIR)/$(FLOWCELL_ID): $(UV) $(TEMP_DIR) clean_flowcell
+	@$(UV) run biomate --verbose blabber --format fastq --sample-sheet $(TEMP_DIR)/SampleSheet.csv --seq-number 10 --output $(TEMP_DIR) --flowcell-id $(FLOWCELL_ID) > $(TEMP_DIR)/blabber.out 2> $(TEMP_DIR)/blabber.err && echo "Blabber module executed successfully!" || "Error executing Blabber module!"
 
 
-$(OUTPUT_DIR)/Data $(OUTPUT_DIR)/RunInfo.xml: $(UV) $(OUTPUT_DIR)/$(FLOWCELL_ID) clean_data
-	@$(UV) run biomate --verbose fastrewind --input-path $(OUTPUT_DIR) --output-path $(OUTPUT_DIR) > $(OUTPUT_DIR)/fastrewind.out 2> $(OUTPUT_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || "Error executing Fastrewind module!"
+$(TEMP_DIR)/Data $(TEMP_DIR)/RunInfo.xml: $(UV) $(TEMP_DIR)/$(FLOWCELL_ID) clean_data
+	@$(UV) run biomate --verbose fastrewind --input-path $(TEMP_DIR) --output-path $(TEMP_DIR) > $(TEMP_DIR)/fastrewind.out 2> $(TEMP_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || "Error executing Fastrewind module!"
 
-validate_samplesheet: $(BCLCONVERT) $(OUTPUT_DIR)/RunInfo.xml
-	@$(BCLCONVERT) --output-directory $(OUTPUT_DIR)/Demultiplexed --bcl-input-directory $(OUTPUT_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true --bcl-validate-sample-sheet-only true > $(OUTPUT_DIR)/bcl-validate.out 2> $(OUTPUT_DIR)/bcl-validate.err && echo "BCL-convert SampleSheet validation was successful!" || "Error executing BCL-convert SampleSheet validation!"
+validate_samplesheet: $(BCLCONVERT) $(TEMP_DIR)/RunInfo.xml
+	@$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true --bcl-validate-sample-sheet-only true > $(TEMP_DIR)/bcl-validate.out 2> $(TEMP_DIR)/bcl-validate.err && echo "BCL-convert SampleSheet validation was successful!" || "Error executing BCL-convert SampleSheet validation!"
 
-$(OUTPUT_DIR)/Demultiplexed: $(BCLCONVERT) $(OUTPUT_DIR)/RunInfo.xml clean_demux
-	@$(BCLCONVERT) --output-directory $(OUTPUT_DIR)/Demultiplexed --bcl-input-directory $(OUTPUT_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true > $(OUTPUT_DIR)/bcl-convert.out 2> $(OUTPUT_DIR)/bcl-convert.err && echo "BCL-convert executed successfully!" || "Error executing BCL-convert!"
+$(TEMP_DIR)/Demultiplexing: $(BCLCONVERT) $(TEMP_DIR)/RunInfo.xml clean_demux
+	@$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true > $(TEMP_DIR)/bcl-convert.out 2> $(TEMP_DIR)/bcl-convert.err && echo "BCL-convert executed successfully!" || "Error executing BCL-convert!"
 
 
 .PHONY: report_results
-report_results: $(OUTPUT_DIR)/Demultiplexed results_message
-	@find $(OUTPUT_DIR)/Demultiplexed -name "*.fastq.gz" | grep -v "Undetermined" | xargs zgrep -c ^@ || true
-	@find $(OUTPUT_DIR)/Demultiplexed -name "*.fastq.gz" | grep "Undetermined" | xargs zgrep -c ^@ || true
-	@echo "--------------------------------"
+report_results: $(TEMP_DIR)/Demultiplexing results_message
+	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep -v "Undetermined" | xargs zgrep -c ^@ || true
+	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep "Undetermined" | xargs zgrep -c ^@ || true
+
+compare_results: $(TEMP_DIR)/Demultiplexing comparison_message
+	@bash assets/compare_results.sh && echo "All files pairwise comparisons were successful!" || echo "Warning: Some pairwise comparisons yield different results!"
 
 
-test_none: deepclean run_message copy_none validate_samplesheet report_results
+test_none: deepclean run_message copy_none validate_samplesheet report_results compare_results
 
-test_single: deepclean run_message copy_single validate_samplesheet report_results
+test_single: deepclean run_message copy_single validate_samplesheet report_results compare_results
 
-test_dual: deepclean run_message copy_dual validate_samplesheet report_results
+test_dual: deepclean run_message copy_dual validate_samplesheet report_results compare_results
+
 
 .PHONY: cleanup_message
 cleanup_message:
-	@echo "--------------------------------"
-	@echo "- Past runs cleanup ------------"
-	@echo "--------------------------------"
+	@echo "-------------------------------------"
+	@echo "- Past runs cleanup -----------------"
+	@echo "-------------------------------------"
 
 .PHONY: run_message
 run_message:
-	@echo "--------------------------------"
-	@echo "- Executing tests --------------"
-	@echo "--------------------------------"
+	@echo "-------------------------------------"
+	@echo "- Executing tests -------------------"
+	@echo "-------------------------------------"
 
 .PHONY: results_message
 results_message:
-	@echo "--------------------------------"
-	@echo "- Test results -----------------"
-	@echo "--------------------------------"
+	@echo "-------------------------------------"
+	@echo "- Test results ----------------------"
+	@echo "-------------------------------------"
+
+.PHONY: comparison_message
+comparison_message:
+	@echo "-------------------------------------"
+	@echo "- Original vs artificial comparison -"
+	@echo "-------------------------------------"
 
 
 .PHONY: deepclean
 deepclean: cleanup_message clean_samplesheet clean_flowcell clean_data
-	if [[ -d $(OUTPUT_DIR) ]]; then rm -r $(OUTPUT_DIR); fi
+	if [[ -d $(TEMP_DIR) ]]; then rm -r $(TEMP_DIR); fi
 
 .PHONY: clean_samplesheet
 clean_samplesheet:
-	if [[ -f $(OUTPUT_DIR)/SampleSheet.csv ]]; then rm $(OUTPUT_DIR)/SampleSheet.csv; fi
+	if [[ -f $(TEMP_DIR)/SampleSheet.csv ]]; then rm $(TEMP_DIR)/SampleSheet.csv; fi
 
 .PHONY: clean_flowcell
 clean_flowcell:
-	if [[ -d $(OUTPUT_DIR)/$(FLOWCELL_ID) ]]; then rm -r $(OUTPUT_DIR)/$(FLOWCELL_ID); fi
+	if [[ -d $(TEMP_DIR)/$(FLOWCELL_ID) ]]; then rm -r $(TEMP_DIR)/$(FLOWCELL_ID); fi
 
 .PHONY: clean_data
 clean_data:
-	if [[ -d $(OUTPUT_DIR)/Data ]]; then rm -r $(OUTPUT_DIR)/Data; fi
+	if [[ -d $(TEMP_DIR)/Data ]]; then rm -r $(TEMP_DIR)/Data; fi
 
 .PHONY: clean_demux
 clean_demux:
-	@if [[ -d $(OUTPUT_DIR)/Demultiplexed ]]; then rm -r $(OUTPUT_DIR)/Demultiplexed; fi
+	@if [[ -d $(TEMP_DIR)/Demultiplexing ]]; then rm -r $(TEMP_DIR)/Demultiplexing; fi
