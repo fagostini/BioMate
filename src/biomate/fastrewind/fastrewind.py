@@ -230,30 +230,42 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
                 .str.zfill(3)
                 .str.pad_start(4, "L")
                 + "_001",
-                polars.col("Sample_Index").cast(polars.String).str.pad_start(2, "S"),
+                ("S" + polars.col("Sample_Index").cast(polars.String)).alias(
+                    "Sample_Index"
+                ),
             ]
         )
-        .with_columns(polars.col("Sample_Name"))
+        .filter(polars.col("Sample_Name").is_not_null())
         .with_columns(
             polars.concat_str("Sample_Name", "Sample_Index", "Lane", separator="_")
         )
         .select(["Sample_Name", "index", "index2", "OverrideCycles"])
     )
-    data = data.with_columns(
-        [
-            polars.col("OverrideCycles")
-            .map_elements(lambda x: parse_sequence_mask(x))
-            .struct.unnest(),
-            polars.col("index").str.len_chars().fill_null(0).alias("index_length"),
-            polars.col("index2").str.len_chars().fill_null(0).alias("index2_length"),
-        ]
-    ).drop("OverrideCycles")
+    data = (
+        data.with_columns(
+            [polars.col("index").fill_null(""), polars.col("index2").fill_null("")]
+        )
+        .with_columns(
+            [
+                polars.col("OverrideCycles")
+                .map_elements(lambda x: parse_sequence_mask(x))
+                .struct.unnest(),
+                polars.col("index").str.len_chars().fill_null(0).alias("index_length"),
+                polars.col("index2")
+                .str.len_chars()
+                .fill_null(0)
+                .alias("index2_length"),
+            ]
+        )
+        .drop("OverrideCycles")
+    )
 
     if "R2" not in data.columns:
-        data = data.with_columns(polars.lit(0).alias("R1"))
+        data = data.with_columns(polars.lit(0).alias("R2"))
     if "index_length" in data.columns:
         if data.filter(polars.col("index_length") != polars.col("I1")).height == 0:
             data = data.with_columns(polars.col("index").alias("I1")).drop("index")
+
             data = (
                 data.with_columns(
                     [
