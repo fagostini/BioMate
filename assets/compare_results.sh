@@ -1,6 +1,5 @@
 #!/usr/local/bin bash
 set -e
-set -o pipefail
 
 differences=0
 for sample in `find temp/Demultiplexing -name "*.fastq.gz" | grep -v Undetermined`; do
@@ -13,5 +12,7 @@ for sample in `find temp/Demultiplexing -name "*.fastq.gz" | grep -v Undetermine
     fi
     rm temp/a temp/b
 done
+
+echo ""
 
 if [[ $differences -gt 0 ]]; then exit 1; fi

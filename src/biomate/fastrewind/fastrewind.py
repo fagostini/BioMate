@@ -153,24 +153,35 @@ def parse_sequence_mask(
     if len(mask_split) > 4:
         raise ValueError(f"OverrideCycles mask has incorrect format: {mask_string}")
 
+    index_count = 0
     for substring in mask_split:
         submask_split = re.findall(r"[^\W\d_]+|\d+", substring)
         for label, value in batched(submask_split, 2):
-            if label == "Y":
-                if mask_dict["R1"] == 0:
-                    mask_dict["R1"] = int(value)
+            if "Y" not in submask_split and "I" not in submask_split:
+                if index_count == 0:
+                    mask_dict["I1B"] = int(value)
+                    index_count += 1
                 else:
-                    mask_dict["R2"] = int(value)
-            elif label == "I":
-                if mask_dict["I1"] == 0:
-                    mask_dict["I1"] = int(value)
-                else:
-                    mask_dict["I2"] = int(value)
+                    mask_dict["I2B"] = int(value)
             else:
-                basekey = "R" if "Y" in submask_split else "I"
-                basekey += "2" if mask_dict["I2"] != 0 or mask_dict["R2"] != 0 else "1"
-                basekey += "B" if substring[0] == "N" else "A"
-                mask_dict[basekey] = int(value)
+                if label == "Y":
+                    if mask_dict["R1"] == 0:
+                        mask_dict["R1"] = int(value)
+                    else:
+                        mask_dict["R2"] = int(value)
+                elif label == "I":
+                    if mask_dict["I1"] == 0:
+                        mask_dict["I1"] = int(value)
+                    else:
+                        mask_dict["I2"] = int(value)
+                    index_count += 1
+                else:
+                    basekey = "R" if "Y" in submask_split else "I"
+                    basekey += (
+                        "2" if mask_dict["I2"] != 0 or mask_dict["R2"] != 0 else "1"
+                    )
+                    basekey += "B" if substring[0] == "N" else "A"
+                    mask_dict[basekey] = int(value)
 
     return mask_dict
 
