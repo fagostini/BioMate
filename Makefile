@@ -12,9 +12,11 @@ SHELL=/bin/bash
 NISS = assets/SampleSheet_NoIndex.csv
 SISS = assets/SampleSheet_SingleIndex.csv
 DISS = assets/SampleSheet_DualIndex.csv
+MISS = assets/SampleSheet_MixedIndexes.csv
 
 TEMP_DIR = temp
 FLOWCELL_ID = 20260310_LM43899_0385_A12GGASZR5
+SEQ_NUM = 10
 
 # Download and install uv
 $(UV):
@@ -88,9 +90,11 @@ copy_single: $(TEMP_DIR) $(SISS) clean_samplesheet
 copy_dual: $(TEMP_DIR) $(DISS) clean_samplesheet
 	@cp $(DISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (Dual Indexes) to working folder." || "Error copying SampleSheet to working folder!"
 
-$(TEMP_DIR)/$(FLOWCELL_ID): $(UV) $(TEMP_DIR) clean_flowcell
-	@$(UV) run biomate --verbose blabber --format fastq --sample-sheet $(TEMP_DIR)/SampleSheet.csv --seq-number 10 --output $(TEMP_DIR) --flowcell-id $(FLOWCELL_ID) > $(TEMP_DIR)/blabber.out 2> $(TEMP_DIR)/blabber.err && echo "Blabber module executed successfully!" || "Error executing Blabber module!"
+copy_mix: $(TEMP_DIR) $(MISS) clean_samplesheet
+	@cp $(MISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (Mixed Indexes) to working folder." || "Error copying SampleSheet to working folder!"
 
+$(TEMP_DIR)/$(FLOWCELL_ID): $(UV) $(TEMP_DIR) clean_flowcell
+	@$(UV) run biomate --verbose blabber --format fastq --sample-sheet $(TEMP_DIR)/SampleSheet.csv --seq-number $(SEQ_NUM) --output $(TEMP_DIR) --flowcell-id $(FLOWCELL_ID) > $(TEMP_DIR)/blabber.out 2> $(TEMP_DIR)/blabber.err && echo "Blabber module executed successfully!" || "Error executing Blabber module!"
 
 $(TEMP_DIR)/Data $(TEMP_DIR)/RunInfo.xml: $(UV) $(TEMP_DIR)/$(FLOWCELL_ID) clean_data
 	@$(UV) run biomate --verbose fastrewind --input-path $(TEMP_DIR) --output-path $(TEMP_DIR) > $(TEMP_DIR)/fastrewind.out 2> $(TEMP_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || "Error executing Fastrewind module!"
@@ -107,8 +111,9 @@ report_results: $(TEMP_DIR)/Demultiplexing results_message
 	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep -v "Undetermined" | xargs zgrep -c ^@ || true
 	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep "Undetermined" | xargs zgrep -c ^@ || true
 
+
 compare_results: $(TEMP_DIR)/Demultiplexing comparison_message
-	@bash assets/compare_results.sh && echo "All files pairwise comparisons were successful!" || echo "Warning: Some pairwise comparisons yield different results!"
+	@bash assets/compare_results.sh && echo "All files pairwise comparisons were successful!" || echo "WARNING: Some pairwise comparisons yield different results!"
 
 
 test_none: deepclean run_message copy_none validate_samplesheet report_results compare_results
@@ -117,6 +122,7 @@ test_single: deepclean run_message copy_single validate_samplesheet report_resul
 
 test_dual: deepclean run_message copy_dual validate_samplesheet report_results compare_results
 
+test_mix: deepclean run_message copy_mix validate_samplesheet report_results compare_results
 
 .PHONY: cleanup_message
 cleanup_message:
@@ -133,7 +139,7 @@ run_message:
 .PHONY: results_message
 results_message:
 	@echo "-------------------------------------"
-	@echo "- Test results ----------------------"
+	@echo "- Test results ($(SEQ_NUM)) -----------------"
 	@echo "-------------------------------------"
 
 .PHONY: comparison_message
