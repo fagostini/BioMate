@@ -1,7 +1,7 @@
 [project]
 name = "biomate"
 version = "0.1.0"
-description = "Add your description here"
+description = "A collection of scripts and utility tools for everyday processing of biological data"
 readme = "docs/README.md"
 authors = [
     { name = "Federico Agostini", email = "federico.agostini@scilifelab.se" }
@@ -34,7 +34,16 @@ dev = [
     "pyarrow>=21.0.0",
     "interrogate==1.7.0",
     "ruff>=0.11.11",
+    "commitizen>=4.13.9",
 ]
 docs = [
     "mkdocs>=1.6.1",
 ]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "$version"
+version_scheme = "pep440"
+version_provider = "uv"
+update_changelog_on_bump = true
+major_version_zero = true
