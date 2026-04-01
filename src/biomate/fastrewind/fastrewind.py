@@ -187,7 +187,7 @@ def parse_sequence_mask(
 
 
 def extract_data_from_samplesheet(
-    sample_sheet: pathlib.Path,
+    sample_sheet: pathlib.Path, target_section: str = "[BCLConvert_Data]"
 ) -> "tuple[polars.DataTable, int]":
     """
     Parse the sample sheet file and return the Data section as DataTable.
@@ -196,12 +196,8 @@ def extract_data_from_samplesheet(
     with open(sample_sheet) as input_file:
         lines = input_file.readlines()
 
-    # Find the line where the 'BCLConvert_Data' or 'Data' section starts
-    skip_lines = [
-        i
-        for i, line in enumerate(lines)
-        if line.startswith("[BCLConvert_Data]") or line.startswith("[Data]")
-    ]
+    # Find the line where the 'BCLConvert_Data'
+    skip_lines = [i for i, line in enumerate(lines) if line.startswith(target_section)]
     if not skip_lines:
         logging.error("No valid SampleSheet found! Data section not found in the file.")
         exit(1)
@@ -212,18 +208,19 @@ def extract_data_from_samplesheet(
     tmp = tempfile.NamedTemporaryFile()
     with open(tmp.name, "w") as f:
         for line in lines[skip_lines:]:
+            # Stop writing when entering a new section
+            if line.startswith("["):
+                break
             _ = f.write(line)
 
-    version = 2 if any([line.startswith("[BCLConvert_Data]") for line in lines]) else 1
-
-    data = polars.read_csv(tmp.name)
+    data = (
+        polars.read_csv(tmp.name)
+        if target_section == "[BCLConvert_Data]"
+        else polars.read_csv(tmp.name, has_header=False)
+    )
     tmp.close()
 
-    # Exit if the design is not present among the data columns
-    if "OverrideCycles" not in data.columns and "Recipe" not in data.columns:
-        raise RuntimeError("OverrideCycles or Recipe column not found in Data section!")
-
-    return data, version
+    return data
 
 
 def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
@@ -231,7 +228,12 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
     Parse the sample sheet file, extract and process the masks for later use.
     """
     # Read the sample sheet file and stores all lines in a list
-    data, version = extract_data_from_samplesheet(sample_sheet)
+    data = extract_data_from_samplesheet(sample_sheet)
+
+    # Exit if the design is not present among the data columns
+    if "OverrideCycles" not in data.columns and "Recipe" not in data.columns:
+        raise RuntimeError("OverrideCycles or Recipe column not found in Data section!")
+
     data = (
         data.with_row_index(name="Sample_Index", offset=1)
         .with_columns(
@@ -338,61 +340,23 @@ def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict]":
     """
     Parse the sample sheet file and return the total number of cycles.
     """
-    data, version = extract_data_from_samplesheet(sample_sheet)
+    data = extract_data_from_samplesheet(sample_sheet, "[Reads]")
 
-    # SampleSheet version 2
-    if version == 2:
-        # Read the temporary file using polars and process the data
-        data = (
-            data.with_columns(
-                [
-                    polars.col("OverrideCycles")
-                    .map_elements(lambda x: parse_sequence_mask(x))
-                    .struct.unnest(),
-                    polars.col("index")
-                    .str.len_chars()
-                    .fill_null(0)
-                    .alias("index_length"),
-                    polars.col("index2")
-                    .str.len_chars()
-                    .fill_null(0)
-                    .alias("index2_length"),
-                ]
-            )
-            .rename({"R1": "field_0", "R2": "field_1"})
-            .drop(["I1", "I2"])
-        )
-    else:
-        # Read the temporary file using polars and process the data
-        data = data.with_columns(
-            [
-                polars.col("Recipe").str.split_exact("-", 1).struct.unnest(),
-                polars.col("index").str.len_chars().alias("index_length"),
-                polars.col("index2").str.len_chars().alias("index2_length"),
-            ]
-        )
-    if "field_1" not in data.columns:
-        data = data.with_columns(polars.lit("0").alias("field_1"))
-    cycles = (
-        data.select(["field_0", "field_1", "index_length", "index2_length"])
-        .cast(polars.Int16)
-        .max()
-        .with_columns(
-            total_cycles=polars.sum_horizontal(
-                "field_0", "field_1", "index_length", "index2_length"
-            )
-        )
-        .to_dicts()[0]
-    )
-    cycles_dict = {"R1": int(cycles["field_0"])}
-    if "index_length" in cycles:
-        cycles_dict.update({"I1": int(cycles["index_length"])})
-    if "index2_length" in cycles:
-        cycles_dict.update({"I2": int(cycles["index2_length"])})
-    if "field_1" in cycles:
-        cycles_dict.update({"R2": int(cycles["field_1"])})
+    total_cycles = data.get_column("column_2").sum()
 
-    return (cycles["total_cycles"], cycles_dict)
+    cycles_dict = {
+        k: v
+        for k, v in data.with_columns(
+            polars.col("column_1")
+            .str.replace("(ead|ndex)", "")
+            .str.replace("Cycles", "")
+        ).iter_rows()
+    }
+    cycles_dict = {
+        x: cycles_dict[x] for x in ["R1", "I1", "I2", "R2"] if x in cycles_dict.keys()
+    }
+
+    return (total_cycles, cycles_dict)
 
 
 def organise_fastq_files(path: pathlib.Path) -> OrderedDict:
@@ -429,7 +393,7 @@ def parse_seqname_fields(name: str) -> dict:
     match = re.match(
         r"(?P<instrument>[A-Za-z0-9_]+):"
         r"(?P<run_number>[0-9]+):"
-        r"(?P<flowcell_id>[-A-Za-z0-9]*):"
+        r"(?P<flowcell_id>[A-Za-z0-9]+):"
         r"(?P<lane>[0-9]+):"
         r"(?P<tile>[0-9]+):"
         r"(?P<x_pos>[0-9]+):"
@@ -1124,11 +1088,10 @@ def main(args: argparse.Namespace) -> None:
     lanes_dict = organise_fastq_files(args.input_path)
 
     # Get one read name to extract the run details
-    sample_read = ""
-    sample_lane = list(lanes_dict.keys())[0]
-    sample_name = list(lanes_dict[sample_lane].keys())[0]
+    sample_lane = list(lanes_dict)[0]
+    sample_name = list(lanes_dict[sample_lane])[0]
     sample_file = sorted(lanes_dict[sample_lane][sample_name])[0]
-    with dnaio.open(sample_file, open_threads=args.threads) as reader:
+    with dnaio.open(sample_file) as reader:
         for read in reader:
             sample_read = read.name
             break

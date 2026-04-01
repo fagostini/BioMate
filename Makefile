@@ -97,7 +97,7 @@ $(TEMP_DIR)/$(FLOWCELL_ID): $(UV) $(TEMP_DIR) clean_flowcell
 	@$(UV) run biomate --verbose blabber --format fastq --sample-sheet $(TEMP_DIR)/SampleSheet.csv --seq-number $(SEQ_NUM) --output $(TEMP_DIR) --flowcell-id $(FLOWCELL_ID) > $(TEMP_DIR)/blabber.out 2> $(TEMP_DIR)/blabber.err && echo "Blabber module executed successfully!" || "Error executing Blabber module!"
 
 $(TEMP_DIR)/Data $(TEMP_DIR)/RunInfo.xml: $(UV) $(TEMP_DIR)/$(FLOWCELL_ID) clean_data
-	@$(UV) run biomate --verbose fastrewind --input-path $(TEMP_DIR) --output-path $(TEMP_DIR) > $(TEMP_DIR)/fastrewind.out 2> $(TEMP_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || "Error executing Fastrewind module!"
+	@$(UV) run biomate --verbose fastrewind --input-path $(TEMP_DIR) --output-path $(TEMP_DIR) --threads 8 > $(TEMP_DIR)/fastrewind.out 2> $(TEMP_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || "Error executing Fastrewind module!"
 
 validate_samplesheet: $(BCLCONVERT) $(TEMP_DIR)/RunInfo.xml
 	@$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true --bcl-validate-sample-sheet-only true > $(TEMP_DIR)/bcl-validate.out 2> $(TEMP_DIR)/bcl-validate.err && echo "BCL-convert SampleSheet validation was successful!" || "Error executing BCL-convert SampleSheet validation!"
