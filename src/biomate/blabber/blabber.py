@@ -377,7 +377,8 @@ def generate_dnaio_fastq_files(
             reads = [
                 dnaio.SequenceRecord(
                     name=f"{prefix}:{suffix}{extension}",
-                    sequence="".join(random.choice(list(nucleotides), size=read1_len)),
+                    sequence="".join(random.choice(list(nucleotides),
+                                     size=read1_len)),
                     qualities="I" * read1_len,
                 )
             ]
