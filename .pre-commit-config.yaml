@@ -22,7 +22,7 @@ repos:
     id: name-tests-test
   - id: requirements-txt-fixer
   repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: v5.0.0
+  rev: v6.0.0
 - hooks:
   - args:
     - --skip
@@ -34,12 +34,12 @@ repos:
     types:
     - text
   repo: https://github.com/codespell-project/codespell
-  rev: v2.4.1
+  rev: v2.4.2
 - hooks:
   - exclude: Makefile*
     id: remove-tabs
   repo: https://github.com/Lucas-C/pre-commit-hooks
-  rev: v1.5.5
+  rev: v1.5.6
 - hooks:
   - args:
     - --fix
@@ -54,13 +54,13 @@ repos:
     - pyi
     - jupyter
   repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.11.0
+  rev: v0.15.12
 - hooks:
   - id: commitizen
     stages:
     - commit-msg
   repo: https://github.com/commitizen-tools/commitizen
-  rev: v4.4.1
+  rev: v4.15.1
 - hooks:
   - args:
     - --exclude
@@ -76,4 +76,4 @@ repos:
     - --all-packages
     id: uv-sync
   repo: https://github.com/astral-sh/uv-pre-commit
-  rev: 0.6.6
+  rev: 0.11.13
