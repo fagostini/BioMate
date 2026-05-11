@@ -1,3 +1,17 @@
+## 0.3.0 (2026-05-11)
+
+### Feat
+
+- Add `release` recipe to package the test case
+
+### Fix
+
+- Fix bash script to exclude index files from checks
+
+### Refactor
+
+- Refactor `parse_sequence_mask`
+
 ## 0.2.0 (2026-04-01)
 
 ### BREAKING CHANGE
