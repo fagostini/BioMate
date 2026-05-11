@@ -18,6 +18,8 @@ TEMP_DIR = temp
 FLOWCELL_ID = 20260310_LM43899_0385_A12GGASZR5
 SEQ_NUM = 10
 
+RELEASE_DATA = DemuxCasesData.tar.gz
+
 # Download and install uv
 $(UV):
 	curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -78,6 +80,17 @@ interrogate: $(UV)
 deploy:
 	@$(UV) run mkdocs gh-deploy
 
+
+.PHONY: release
+## Create a new release
+release: $(RELEASE_DATA)
+
+
+$(RELEASE_DATA): test_mix
+	mv $(TEMP_DIR) $(basename $(basename $(RELEASE_DATA)))
+	tar -czf $(RELEASE_DATA) $(basename $(basename $(RELEASE_DATA)))
+	@rm -r $(basename $(basename $(RELEASE_DATA)))
+
 $(TEMP_DIR):
 	@mkdir -p $(TEMP_DIR)
 
@@ -108,8 +121,8 @@ $(TEMP_DIR)/Demultiplexing: $(BCLCONVERT) $(TEMP_DIR)/RunInfo.xml clean_demux
 
 .PHONY: report_results
 report_results: $(TEMP_DIR)/Demultiplexing results_message
-	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep -v "Undetermined" | xargs zgrep -c ^@ || true
-	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep "Undetermined" | xargs zgrep -c ^@ || true
+	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep -v -e "Undetermined" -e "_I1_" -e "_I2_" | xargs zgrep -c ^@ || true
+	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep "Undetermined" | grep -v -e "_I1_" -e "_I2_" | xargs zgrep -c ^@ || true
 
 
 compare_results: $(TEMP_DIR)/Demultiplexing comparison_message
