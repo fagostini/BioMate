@@ -83,6 +83,7 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
 
 
 def clean_directory(directory: pathlib.Path) -> None:
+    """Recursively delete all files and subdirectories in the given directory."""
     if directory.is_file():
         directory.unlink()
     else:
@@ -127,19 +128,19 @@ def validate_args(args) -> argparse.Namespace:
     return args
 
 
-def parse_sequence_mask(
-    mask_string: str, index1: str = None, index2: str = None
-) -> dict:
+def parse_sequence_mask(mask_string: str) -> dict:
     """
     Parse the sequence mask.
     """
     mask_dict = {
+        "U1": 0,
         "R1B": 0,
         "R1": 0,
         "R1A": 0,
         "I1B": 0,
         "I1": 0,
         "I1A": 0,
+        "U2": 0,
         "I2B": 0,
         "I2": 0,
         "I2A": 0,
@@ -153,42 +154,30 @@ def parse_sequence_mask(
     if len(mask_split) > 4:
         raise ValueError(f"OverrideCycles mask has incorrect format: {mask_string}")
 
-    index_count = 0
-    for substring in mask_split:
+    for i_substring, substring in enumerate(mask_split):
+        substring_type = "R" if "Y" in substring else "I"
+        substring_index = i_substring // 2 + 1
         submask_split = re.findall(r"[^\W\d_]+|\d+", substring)
+
         for label, value in batched(submask_split, 2):
-            if "Y" not in submask_split and "I" not in submask_split:
-                if index_count == 0:
-                    mask_dict["I1B"] = int(value)
-                    index_count += 1
-                else:
-                    mask_dict["I2B"] = int(value)
+            suffix = ""
+            if label == "U":
+                substring_key = "U1" if mask_dict["U1"] == 0 else "U2"
+                mask_dict[substring_key] = int(value)
+            elif label in ["Y", "I"]:
+                mask_dict[f"{substring_type}{substring_index}"] = int(value)
             else:
-                if label == "Y":
-                    if mask_dict["R1"] == 0:
-                        mask_dict["R1"] = int(value)
-                    else:
-                        mask_dict["R2"] = int(value)
-                elif label == "I":
-                    if mask_dict["I1"] == 0:
-                        mask_dict["I1"] = int(value)
-                    else:
-                        mask_dict["I2"] = int(value)
-                    index_count += 1
-                else:
-                    basekey = "R" if "Y" in submask_split else "I"
-                    basekey += (
-                        "2" if mask_dict["I2"] != 0 or mask_dict["R2"] != 0 else "1"
-                    )
-                    basekey += "B" if substring[0] == "N" else "A"
-                    mask_dict[basekey] = int(value)
+                suffix += (
+                    "B" if mask_dict[f"{substring_type}{substring_index}"] == 0 else "A"
+                )
+                mask_dict[f"{substring_type}{substring_index}{suffix}"] = int(value)
 
     return mask_dict
 
 
 def extract_data_from_samplesheet(
     sample_sheet: pathlib.Path, target_section: str = "[BCLConvert_Data]"
-) -> "tuple[polars.DataTable, int]":
+) -> polars.DataFrame:
     """
     Parse the sample sheet file and return the Data section as DataTable.
     """
@@ -297,6 +286,7 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
             raise RuntimeError(
                 "One or more index 1 string do not match the value in the mask!"
             )
+
     if "index2_length" in data.columns:
         if data.filter(polars.col("index2_length") != polars.col("I2")).height == 0:
             data = data.with_columns(polars.col("index2").alias("I2")).drop("index2")
@@ -319,6 +309,20 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
                 "One or more index 2 string do not match the value in the mask!"
             )
 
+    assert data.columns == [
+        "Sample_Name",
+        "U1",
+        "R1B",
+        "R1",
+        "R1A",
+        "I1",
+        "U2",
+        "I2",
+        "R2B",
+        "R2",
+        "R2A",
+    ]
+
     data = {
         sn: {
             "R1B": "N" * r1b,
@@ -330,19 +334,19 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
             "R2": r2,
             "R2A": "N" * r2a,
         }
-        for sn, r1b, r1, r1a, i1, i2, r2b, r2, r2a in data.iter_rows()
+        for sn, u1, r1b, r1, r1a, i1, u2, i2, r2b, r2, r2a in data.iter_rows()
     }
 
     return data
 
 
-def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict]":
+def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict[str, int]]":
     """
     Parse the sample sheet file and return the total number of cycles.
     """
     data = extract_data_from_samplesheet(sample_sheet, "[Reads]")
 
-    total_cycles = data.get_column("column_2").sum()
+    total_cycles = int(data.get_column("column_2").sum())
 
     cycles_dict = {
         k: v
@@ -366,7 +370,13 @@ def organise_fastq_files(path: pathlib.Path) -> OrderedDict:
     for fastq_file in fastq_files:
         try:
             # Get the lane as first key
-            lane = re.search(r"_(L00[1-9])_", fastq_file.name).group(1)
+            lane = re.search(r"_(L00[1-9])_", fastq_file.name)
+            if lane:
+                lane = lane.group(1)
+            else:
+                raise ValueError(
+                    f"Lane information not found in file name {fastq_file.name}."
+                )
             lanes_dict.setdefault(lane, defaultdict(list))
         except AttributeError:
             logging.error(
@@ -391,17 +401,22 @@ def organise_fastq_files(path: pathlib.Path) -> OrderedDict:
 def parse_seqname_fields(name: str) -> dict:
     """Parse and create a dictionary from the read identifier."""
     match = re.match(
-        r"(?P<instrument>[A-Za-z0-9_]+):"
+        r"(?P<instrument>[A-Z0-9_]+):"
         r"(?P<run_number>[0-9]+):"
-        r"(?P<flowcell_id>[A-Za-z0-9]+):"
-        r"(?P<lane>[0-9]+):"
+        r"(?P<flowcell_id>[A-Z0-9]+):"
+        r"(?P<lane>[0-9]):"
         r"(?P<tile>[0-9]+):"
         r"(?P<x_pos>[0-9]+):"
-        r"(?P<y_pos>[0-9]+)"
-        r"( (?P<read>[12]):(?P<is_filtered>[YN]):(?P<control_number>[0-9]+):(?P<barcode_sequence>[A-Z]+(\+[A-Z]+)?))?",
+        r"(?P<y_pos>[0-9]+):?"
+        r"(?P<umi>[A-Z]+(\+[A-Z]+)?)?"
+        r"( (?P<read>[12]):(?P<is_filtered>[YN]):(?P<control_number>[0-9]+):?(?P<barcode_sequence>[A-Z]+(\+[A-Z]+)?))?",
         name,
     )
-    return match.groupdict(match)
+    if not match:
+        raise ValueError(f"Read name '{name}' does not match the expected format.")
+    match = match.groupdict(match)
+
+    return match
 
 
 def generate_run_id(name: str) -> str:
@@ -436,14 +451,19 @@ def parse_fastq_groups(
     buffer_counter = 0
     buffer_avro = []
 
-    def process_read_name(name: str) -> tuple[list, str]:
+    def process_read_name(name: str) -> tuple[list, str, list]:
         """Split the read name and return a list with the name parts and the indexes, if any."""
         split_name = name.split(" ")
         indexes = (
             split_name[1].split(":")[-1].replace("+", "") if len(split_name) > 1 else ""
         )
+        umis = (
+            split_name[0].split(":")[-1].split("+")
+            if re.match(r"[A-Z]+(\+[A-Z]+)?", split_name[0].split(":")[-1])
+            else ["", ""]
+        )
         split_name = split_name[0].split(":")
-        return (split_name, indexes)
+        return (split_name, indexes, umis)
 
     def dump_and_empty_buffer(
         buffer_container, output_path: pathlib.Path, threads: int = 0
@@ -488,8 +508,9 @@ def parse_fastq_groups(
         # Procedure for single-end reads
         if len(filenames) == 1:
             for buffer_counter, (r1) in enumerate(reader, start=1):
-                split_name, indexes = parse_seqname_fields(r1.name)
+                split_name, indexes, umis = process_read_name(r1.name)
                 # Assume the index is at the end
+                indexes = f"{sample_recipe['I1']}"
                 r1.sequence += indexes
                 r1.qualities += "I" * len(indexes)
 
@@ -524,28 +545,32 @@ def parse_fastq_groups(
         # Procedure for paired-end reads
         elif len(filenames) == 2:
             for buffer_counter, (r1, r2) in enumerate(reader, start=1):
-                split_name, indexes = process_read_name(r1.name)
+                split_name, indexes, umis = process_read_name(r1.name)
                 # Redefine the indexes to include 'N's, if any
+                umi1, umi2 = umis if len(umis) == 2 else [""] + umis
                 indexes = f"{sample_recipe['I1']}{sample_recipe['I2']}"
                 r1.sequence = (
                     sample_recipe["R1B"]
+                    + umi1
                     + r1.sequence
                     + sample_recipe["R1A"]
                     + indexes
                     + sample_recipe["R2B"]
+                    + umi2
                     + r2.sequence
                     + sample_recipe["R2A"]
                 )
                 r1.qualities = (
                     "I" * len(sample_recipe["R1B"])
-                    + r1.qualities
+                    + "I" * len(umi1)
+                    + str(r1.qualities)
                     + "I" * len(sample_recipe["R1A"])
                     + "I" * len(indexes)
                     + "I" * len(sample_recipe["R2B"])
-                    + r2.qualities
+                    + "I" * len(umi2)
+                    + str(r2.qualities)
                     + "I" * len(sample_recipe["R2A"])
                 )
-
                 formatted_key = f"{split_name[4][0]}_{split_name[4]}"
 
                 buffer_avro.append(
@@ -558,75 +583,6 @@ def parse_fastq_groups(
 
                 buffer_container.setdefault(formatted_key, list()).append(r1)
 
-                if buffer_counter % buffer_size == 0:
-                    logging.debug(
-                        f"Processed {buffer_counter} reads. Dumping buffers to files..."
-                    )
-                    buffer_container = dump_and_empty_buffer(
-                        buffer_container, tempdir, threads
-                    )
-                    avro_mode = "a+b" if avro_file.exists() else "wb"
-                    try:
-                        with open(avro_file, avro_mode) as out_handle:
-                            avro_writer(out_handle, avro_schema, buffer_avro)
-                    except IOError:
-                        logging.warning("Failed to write to avro file!")
-                    else:
-                        logging.debug("   Positions buffer correctly dumped!")
-                        buffer_avro = []
-
-        # For cases where more than 2 files are present, assume that the extra files are the indexes
-        elif len(filenames) == 3:
-            for buffer_counter, (r1, r2, r3) in enumerate(reader, start=1):
-                split_name, indexes = process_read_name(r1.name)
-                r1.sequence += r2.sequence + r3.sequence
-                r1.qualities += r2.qualities + r3.qualities
-
-                buffer_avro.append(
-                    {
-                        "tile": split_name[4],
-                        "x": split_name[5],
-                        "y": split_name[6],
-                    }
-                )
-
-                formatted_key = f"{split_name[4][0]}_{split_name[4]}"
-
-                buffer_container.setdefault(formatted_key, list()).append(r1)
-                if buffer_counter % buffer_size == 0:
-                    logging.debug(
-                        f"Processed {buffer_counter} reads. Dumping buffers to files..."
-                    )
-                    buffer_container = dump_and_empty_buffer(
-                        buffer_container, tempdir, threads
-                    )
-                    avro_mode = "a+b" if avro_file.exists() else "wb"
-                    try:
-                        with open(avro_file, avro_mode) as out_handle:
-                            avro_writer(out_handle, avro_schema, buffer_avro)
-                    except IOError:
-                        logging.warning("Failed to write to avro file!")
-                    else:
-                        logging.debug("   Positions buffer correctly dumped!")
-                        buffer_avro = []
-
-        else:
-            for buffer_counter, (r1, r2, r3, r4) in enumerate(reader, start=1):
-                split_name, indexes = process_read_name(r1.name)
-                r1.sequence += r2.sequence + r3.sequence + r4.sequence
-                r1.qualities += r2.qualities + r3.qualities + r4.qualities
-
-                buffer_avro.append(
-                    {
-                        "tile": split_name[4],
-                        "x": split_name[5],
-                        "y": split_name[6],
-                    }
-                )
-
-                formatted_key = f"{split_name[4][0]}_{split_name[4]}"
-
-                buffer_container.setdefault(formatted_key, list()).append(r1)
                 if buffer_counter % buffer_size == 0:
                     logging.debug(
                         f"Processed {buffer_counter} reads. Dumping buffers to files..."
@@ -766,6 +722,7 @@ def extract_flowcell_layout(lane_tiles: dict) -> tuple:
 
 
 def pack_cbcl_header(cycle: int, tiles_metrics: dict, quality_map: dict) -> bytes:
+    """Pack the header of the CBCL file."""
     h_version = 1
     # h_size = 6321 # Dynamically extracted based on the available tiles
     h_basebits = 2
@@ -812,7 +769,7 @@ def encode_cluster_bits(
     """Encode the bits corresponding to a base and its quality."""
     # Little endian means that the quality should go first and the base last
     return quality_map.get(
-        ord(record.qualities) - phred_offset,
+        ord(str(record.qualities)) - phred_offset,
         "00",
     ) + sequence_map.get(record.sequence, "00")
 
@@ -867,6 +824,7 @@ def preprocess_and_write_bcls(
                     fq.name.split("_")[1].replace(".fastq.gz", "") for fq in fq_sorted
                 ]
             }
+
             # Cycle through the tile files
             for fq in fq_sorted:
                 logging.debug(f"   {fq.name}")
@@ -897,9 +855,14 @@ def preprocess_and_write_bcls(
                                         quality_map,
                                     )
                                     # Convert the bits to a byte and write them to file
-                                    opened_files[cycle].write(
-                                        bytes([int(bits_string, 2)])
-                                    )
+                                    try:
+                                        opened_files[cycle].write(
+                                            bytes([int(bits_string, 2)])
+                                        )
+                                    except Exception:
+                                        raise RuntimeError(
+                                            f"Error: something went wrong while writing the byte to file!\nCycle: {cycle} File: {opened_files[cycle].name} Record: {read.qualities}"
+                                        )
                                 # Add N (00) with lowest quality (00) for the cycles beyond the read length
                                 if read_length < total_cycles:
                                     for cycle in range(read_length, total_cycles):
@@ -998,12 +961,13 @@ def write_run_info_xml(
     xml_path: pathlib.Path,
     cycles_dict: dict,
     lane_count: int,
-    surface_count: int = None,
-    swath_count: int = None,
-    tile_count: int = None,
-    tile_names: str = None,
-    desc: str = None,
+    surface_count: int | None = None,
+    swath_count: int | None = None,
+    tile_count: int | None = None,
+    tile_names: str | None = None,
+    desc: str | None = None,
 ) -> None:
+    """Write the RunInfo.xml file."""
     xml_path.parent.mkdir(exist_ok=True, parents=True)
     fields = parse_seqname_fields(desc)
     run_id = generate_run_id(desc)

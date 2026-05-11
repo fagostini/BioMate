@@ -118,26 +118,45 @@ def parse_sequence_mask(
     """
     Parse the sequence mask.
     """
-    mask_dict = {"R1": 0, "I1": 0, "I2": 0, "R2": 0}  # Create empty dict
+    mask_dict = {
+        "U1": 0,
+        "R1B": 0,
+        "R1": 0,
+        "R1A": 0,
+        "I1B": 0,
+        "I1": 0,
+        "I1A": 0,
+        "U2": 0,
+        "I2B": 0,
+        "I2": 0,
+        "I2A": 0,
+        "R2B": 0,
+        "R2": 0,
+        "R2A": 0,
+    }  # Create empty dict
 
     mask_split = mask_string.split(";")
 
     if len(mask_split) > 4:
         raise ValueError(f"OverrideCycles mask has incorrect format: {mask_string}")
 
-    for substring in mask_split:
+    for i_substring, substring in enumerate(mask_split):
+        substring_type = "R" if "Y" in substring else "I"
+        substring_index = i_substring // 2 + 1
         submask_split = re.findall(r"[^\W\d_]+|\d+", substring)
+
         for label, value in batched(submask_split, 2):
-            if label == "Y":
-                if mask_dict["R1"] == 0:
-                    mask_dict["R1"] = int(value)
-                else:
-                    mask_dict["R2"] = int(value)
-            elif label == "I":
-                if mask_dict["I1"] == 0:
-                    mask_dict["I1"] = int(value)
-                else:
-                    mask_dict["I2"] = int(value)
+            suffix = ""
+            if label == "U":
+                substring_key = "U1" if mask_dict["U1"] == 0 else "U2"
+                mask_dict[substring_key] = int(value)
+            elif label in ["Y", "I"]:
+                mask_dict[f"{substring_type}{substring_index}"] = int(value)
+            else:
+                suffix += (
+                    "B" if mask_dict[f"{substring_type}{substring_index}"] == 0 else "A"
+                )
+                mask_dict[f"{substring_type}{substring_index}{suffix}"] = int(value)
 
     if index1:
         if len(index1) == mask_dict["I1"]:
@@ -321,7 +340,7 @@ def parse_sample_sheet(sample_sheet: pathlib.Path) -> tuple[str, dict]:
         return (data.get_column("FCID").unique().item(), sample_sheet_dict)
 
 
-def generate_sequences_set(nucleotides: list, length: int, number: int) -> set:
+def generate_sequences_set(nucleotides: set, length: int, number: int) -> set:
     """
     Generate a set of random nucleotide sequences.
 
@@ -365,6 +384,8 @@ def generate_dnaio_fastq_files(
     available_tile_positions = product([tile], available_pos_x, available_pos_y)
     read1_len = recipe["R1"]
     read2_len = recipe["R2"]
+    umi1 = recipe["U1"]
+    umi2 = recipe["U2"]
     logging.debug(
         f"Generating sequence for {[x.name for x in output_files]} using tile(s): {tile}"
     )
@@ -374,11 +395,15 @@ def generate_dnaio_fastq_files(
                 writer.write(*reads)
         for i in range(seq_number):
             suffix = ":".join(next(available_tile_positions))
+            if umi1 != 0:
+                suffix += ":" + "".join(random.choice(list(nucleotides), size=umi1))
+            if umi2 != 0:
+                suffix += "+" if umi1 != 0 else ":"
+                suffix += "".join(random.choice(list(nucleotides), size=umi2))
             reads = [
                 dnaio.SequenceRecord(
                     name=f"{prefix}:{suffix}{extension}",
-                    sequence="".join(random.choice(list(nucleotides),
-                                     size=read1_len)),
+                    sequence="".join(random.choice(list(nucleotides), size=read1_len)),
                     qualities="I" * read1_len,
                 )
             ]
@@ -393,12 +418,14 @@ def generate_dnaio_fastq_files(
                     )
                 )
             writer.write(*reads)
-            if sample and random.randint(10) == 0:
-                sampled_sequences.append(tuple(reads))
+            # Tainting procedure
+            # if sample and random.randint(10) == 0:
+            #     sampled_sequences.append(tuple(reads))
     return sampled_sequences
 
 
 def split(a, n):
+    """Split a list into n approximately equal parts."""
     k, m = divmod(len(a), n)
     return (a[i * k + min(i, m) : (i + 1) * k + min(i + 1, m)] for i in range(n))
 
