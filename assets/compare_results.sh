@@ -2,7 +2,7 @@
 set -e
 
 differences=0
-for sample in `find temp/Demultiplexing -name "*.fastq.gz" | grep -v Undetermined`; do
+for sample in `find temp/Demultiplexing -name "*.fastq.gz" | grep -v -e Undetermined -e _I1_ -e _I2_`; do
     original=`echo $sample | sed 's/temp\//temp\/20260310_LM43899_0385_A12GGASZR5\//'`
     zcat "$original" | grep -v @ | grep -e G -e A -e T -e C | sort > temp/a
     zcat "$sample" | grep -v @ | grep -e G -e A -e T -e C | sort > temp/b
