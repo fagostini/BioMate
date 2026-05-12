@@ -93,9 +93,7 @@ def clean_directory(directory: pathlib.Path) -> None:
 
 
 def validate_args(args) -> argparse.Namespace:
-    """
-    Validate the command line arguments.
-    """
+    """Validate the command line arguments."""
     if not args.input_path.is_dir():
         raise argparse.ArgumentTypeError(
             f"Input path {args.input_path} is not a valid directory."
@@ -129,25 +127,23 @@ def validate_args(args) -> argparse.Namespace:
 
 
 def parse_sequence_mask(mask_string: str) -> dict:
-    """
-    Parse the sequence mask.
-    """
+    """Parse the sequence mask."""
     mask_dict = {
-        "U1": 0,
-        "R1B": 0,
-        "R1": 0,
-        "R1A": 0,
-        "I1B": 0,
-        "I1": 0,
-        "I1A": 0,
-        "U2": 0,
-        "I2B": 0,
-        "I2": 0,
-        "I2A": 0,
-        "R2B": 0,
-        "R2": 0,
-        "R2A": 0,
-    }  # Create empty dict
+        "U1": 0,  # UMI 1
+        "R1B": 0,  # Read 1 prefix
+        "R1": 0,  # Read 1
+        "R1A": 0,  # Read 1 suffix
+        "I1B": 0,  # Index 1 prefix
+        "I1": 0,  # Index 1
+        "I1A": 0,  # Index 1 suffix
+        "U2": 0,  # UMI 2
+        "I2B": 0,  # Index 2 prefix
+        "I2": 0,  # Index 2
+        "I2A": 0,  # Index 2 suffix
+        "R2B": 0,  # Read 2 prefix
+        "R2": 0,  # Read 2
+        "R2A": 0,  # Read 2 suffix
+    }
 
     mask_split = mask_string.split(";")
 
@@ -156,7 +152,9 @@ def parse_sequence_mask(mask_string: str) -> dict:
 
     for i_substring, substring in enumerate(mask_split):
         substring_type = "R" if "Y" in substring else "I"
+        # Determine the substring index based on the position in the mask (1 for R1/I1, 2 for R2/I2)
         substring_index = i_substring // 2 + 1
+        # Split the substring into letters and numbers
         submask_split = re.findall(r"[^\W\d_]+|\d+", substring)
 
         for label, value in batched(submask_split, 2):
@@ -202,6 +200,7 @@ def extract_data_from_samplesheet(
                 break
             _ = f.write(line)
 
+    # Read the temporary file into a DataFrame
     data = (
         polars.read_csv(tmp.name)
         if target_section == "[BCLConvert_Data]"
@@ -224,7 +223,9 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
         raise RuntimeError("OverrideCycles or Recipe column not found in Data section!")
 
     data = (
+        # Add a sample index column
         data.with_row_index(name="Sample_Index", offset=1)
+        # Convert the lane to the correct format and add the _001 suffix, and add the S prefix to the sample index
         .with_columns(
             [
                 polars.col("Lane")
@@ -244,9 +245,11 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
         .select(["Sample_Name", "index", "index2", "OverrideCycles"])
     )
     data = (
+        # Fill null values in the index columns with empty strings
         data.with_columns(
             [polars.col("index").fill_null(""), polars.col("index2").fill_null("")]
         )
+        # Parse the OverrideCycles column to extract the number of cycles for each read and index
         .with_columns(
             [
                 polars.col("OverrideCycles")
@@ -262,12 +265,13 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
         .drop("OverrideCycles")
     )
 
+    # Add missing columns for the read and index parts
     if "R2" not in data.columns:
         data = data.with_columns(polars.lit(0).alias("R2"))
     if "index_length" in data.columns:
         if data.filter(polars.col("index_length") != polars.col("I1")).height == 0:
             data = data.with_columns(polars.col("index").alias("I1")).drop("index")
-
+            # Convert the I1B and I1A columns to the correct format, by filling them with 'N's
             data = (
                 data.with_columns(
                     [
@@ -293,6 +297,7 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
             data = (
                 data.with_columns(
                     [
+                        # Convert the I2B and I2A columns to the correct format, by filling them with 'N's
                         polars.Series(
                             [x * "N" for x in data.get_column("I2B").to_list()]
                         ).alias("I2B"),
@@ -309,6 +314,7 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
                 "One or more index 2 string do not match the value in the mask!"
             )
 
+    # Check that all the expected columns are present
     assert data.columns == [
         "Sample_Name",
         "U1",
