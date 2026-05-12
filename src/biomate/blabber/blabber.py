@@ -117,6 +117,8 @@ def parse_sequence_mask(
 ) -> dict:
     """
     Parse the sequence mask.
+
+
     """
     mask_dict = {
         "U1": 0,
@@ -181,6 +183,7 @@ def parse_sequence_mask(
 def validate_args(args) -> argparse.Namespace:
     """
     Validate the command line arguments.
+
     """
     if not args.alphabet.isalpha():
         raise argparse.ArgumentTypeError("Letters must be alphabetic characters.")
@@ -226,15 +229,14 @@ def generate_flowcell_id(instrument: str = "NovaSeq") -> str:
     """
     Generate the flowcell identifier.
     """
-    if instrument == "NovaSeq":
-        return "".join(
-            [str(random.randint(10, 99))]
-            + [
-                string.ascii_letters[random.randint(len(string.ascii_letters))].upper()
-                for i in range(6)
-            ]
-            + [str(random.randint(10))]
-        )
+    return "".join(
+        [str(random.randint(10, 99))]
+        + [
+            string.ascii_letters[random.randint(len(string.ascii_letters))].upper()
+            for i in range(6)
+        ]
+        + [str(random.randint(10))]
+    )
 
 
 def parse_sample_sheet(sample_sheet: pathlib.Path) -> tuple[str, dict]:
