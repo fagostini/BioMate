@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "altair[all]>=6.1.0",
     "dnaio>=1.2.3",
     "fastavro>=1.12.0",
     "jellyfish>=1.2.1",
@@ -35,6 +36,7 @@ dev = [
     "interrogate==1.7.0",
     "ruff>=0.11.11",
     "commitizen>=4.13.9",
+    "vega>=4.1.0",
 ]
 docs = [
     "mkdocs>=1.6.1",
