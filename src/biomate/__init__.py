@@ -7,7 +7,7 @@ from importlib.metadata import version
 
 from rich.logging import RichHandler
 
-from biomate import blabber, dirstruct, fastrewind, index
+from biomate import blabber, dirstruct, fastrewind, index, strainer
 
 try:
     __version__ = version(__name__)
@@ -67,6 +67,7 @@ def main():
     dirstruct.dirstruct.init_parser(subparsers)
     index.index.init_parser(subparsers)
     fastrewind.fastrewind.init_parser(subparsers)
+    strainer.strainer.init_parser(subparsers)
 
     args = parser.parse_args()
     if not hasattr(args, "parse") or not hasattr(args, "run"):
