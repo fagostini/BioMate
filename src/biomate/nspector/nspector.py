@@ -96,3 +96,4 @@ def main(args: argparse.Namespace) -> None:
             ]
         )
     )
+    return data
