@@ -60,6 +60,16 @@ build: $(UV)
 ## Create a new virtual environment
 venv: .venv/bin/activate
 
+.PHONY: singularity
+## Create the Singularity image for the project
+singularity: remove_singularity singularity.sif
+
+singularity.sif: singularity.def
+	@singularity build --fakeroot --fix-perms --force --bind $(PROJECT_DIR):/mnt $@ $< > singularity_build.out 2> singularity_build.err && echo "Singularity image built successfully!" || echo "Error building Singularity image! Check singularity_build.err for details."
+
+remove_singularity:
+	@if [[ -f singularity.sif ]]; then rm singularity.sif; fi
+
 
 requirements.txt: $(UV) uv.lock
 	@$(UV) export --output-file requirements.txt
