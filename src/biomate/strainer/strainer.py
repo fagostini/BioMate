@@ -1,5 +1,6 @@
 """Strainer main script."""
 
+import csv
 import dnaio
 import polars
 import regex
@@ -12,7 +13,7 @@ from multiprocessing import Pool
 from biomate.setup import setup_logging
 
 
-def validate_args(args) -> argparse.Namespace:
+def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     """Validate the command line arguments."""
     if not args.input_path.is_dir():
         raise argparse.ArgumentTypeError(
@@ -22,10 +23,7 @@ def validate_args(args) -> argparse.Namespace:
         raise argparse.ArgumentTypeError(
             f"No FASTQ files found in the input directory {args.input_path}."
         )
-    if (
-        not args.input_path.joinpath("SampleSheet.csv").is_file()
-        and not args.sample_sheet
-    ):
+    if not (args.input_path / "SampleSheet.csv").is_file() and not args.sample_sheet:
         raise argparse.ArgumentTypeError(
             f"SampleSheet.csv not found in the input directory {args.input_path}."
         )
@@ -34,9 +32,12 @@ def validate_args(args) -> argparse.Namespace:
             f"Sample sheet {args.sample_sheet} does not exist."
         )
     if not args.output_path.is_dir():
-        raise argparse.ArgumentTypeError(
-            f"Output path {args.output_path} does not exist or is not a valid directory."
+        logging.info(
+            f"Output directory {args.output_path} does not exist. Creating it..."
         )
+        args.output_path.mkdir(parents=True, exist_ok=True)
+    if args.threads < 1:
+        raise argparse.ArgumentTypeError("--threads must be >= 1.")
     return args
 
 
@@ -88,23 +89,33 @@ def extract_indexes_from_sample_sheet(
     # Flag to track whether the header of the [Data] section has been parsed
     header_parsed = False
     with open(sample_sheet_path, "r") as infile:
-        for line in infile:
+        for fields in csv.reader(infile):
             if in_data_section:
                 if not header_parsed:
                     # Parse the header to find the column indices for Lane, Sample_Project, index, and index2
-                    header = line.strip().split(",")
-                    lane_idx = [i for i, x in enumerate(header) if x == "Lane"][0]
-                    sample_project_idx = [
-                        i for i, x in enumerate(header) if x == "Sample_Project"
-                    ][0]
-                    index_idx = [i for i, x in enumerate(header) if x == "index"][0]
+                    lane_idx = next(
+                        (i for i, x in enumerate(fields) if x == "Lane"), None
+                    )
+                    sample_project_idx = next(
+                        (i for i, x in enumerate(fields) if x == "Sample_Project"), None
+                    )
+                    index_idx = next(
+                        (i for i, x in enumerate(fields) if x == "index"), None
+                    )
                     index2_idx = next(
-                        (i for i, x in enumerate(header) if x == "index2"), None
+                        (i for i, x in enumerate(fields) if x == "index2"), None
                     )
                     header_parsed = True
+                    if (
+                        lane_idx is None
+                        or sample_project_idx is None
+                        or index_idx is None
+                    ):
+                        raise ValueError(
+                            "Could not find required columns 'Lane', 'Sample_Project', and 'index' in the Sample Sheet."
+                        )
                 else:
                     # Parse the data lines to extract the relevant information
-                    fields = line.strip().split(",")
                     df.append(
                         {
                             "Lane": fields[lane_idx],
@@ -116,9 +127,21 @@ def extract_indexes_from_sample_sheet(
                         }
                     )
             # Trigger for entering the [Data] (v1) or [BCLConvert_Data] (v2) section of the Sample Sheet
-            if line.startswith("[Data]") or line.startswith("[BCLConvert_Data]"):
+            if fields and fields[0].strip() in ["[Data]", "[BCLConvert_Data]"]:
                 in_data_section = True
                 continue
+
+    if not in_data_section:
+        raise ValueError(
+            "Could not find the [Data] or [BCLConvert_Data] section in the Sample Sheet."
+        )
+    if not header_parsed:
+        raise ValueError(
+            "Could not find the header line in the [Data] or [BCLConvert_Data] section of the Sample Sheet."
+        )
+
+    if not df:
+        raise ValueError("No data extracted from the Sample Sheet.")
 
     return polars.from_dicts(df).with_columns(
         polars.col("Lane").str.zfill(3).str.pad_start(4, "L")
@@ -131,14 +154,28 @@ def extract_indexes_from_undetermined_file(
     """Extract indexes information from an Undetermined FASTQ file."""
     # Extract lane information from the file name
     lane = undetermined_file_path.name.split("_")[2]
+    if not len(lane) >= 3 or not regex.match(r"^L\d{3}$", lane):
+        raise ValueError(
+            f"Could not extract lane information from file name {undetermined_file_path.name}."
+        )
     indexes = Counter()
     with dnaio.open(undetermined_file_path) as reader:
+        failed_split = False
         for record in reader:
-            idx = record.name.split(" ")[1].split(":")[-1]
+            split_name = record.name.split(" ")
+            if len(split_name) < 2:
+                failed_split = True
+                break
+            idx = split_name[1].split(":")[-1]
             if (
                 "GGGG" not in idx
-            ):  # Skip indexes with more than 4 consecutive Gs, which are likely to be sequencing errors
+            ):  # Skip indexes with 4 or more consecutive Gs, which are likely to be sequencing errors
                 indexes.update({idx})
+
+    if failed_split:
+        raise ValueError(
+            f"Could not extract index information from file {undetermined_file_path.name}."
+        )
 
     return [
         {"Lane": lane, "Index": idx, "Count": count}
@@ -150,17 +187,20 @@ def search_for_unexpected_indexes(
     sample_sheet_df: polars.DataFrame, undetermined_df: polars.DataFrame
 ) -> polars.DataFrame:
     """Search for unexpected indexes among the undetermined lanes."""
-    df = list()
-    # Iterate through each lane and index from the sample sheet
-    for lane, proj, i1, i2 in sample_sheet_df.iter_rows():
-        # Iterate through each lane and most common indexes from the undetermined data frame
-        for ln, i, c in undetermined_df.iter_rows():
-            # Allow for up to 1 mismatch in both index 1 and index 2
-            match_1 = regex.search(r"(" + i1 + "){s<=1}", i)
-            if i2 is not None:
-                match_2 = regex.search(r"(" + i2 + "){s<=1}", i)
-            if match_1 and (match_2 or i2 is None):
-                if lane != ln:
+    df = []
+    for lane in sample_sheet_df.get_column("Lane").unique():
+        ss_lane_df = sample_sheet_df.filter(polars.col("Lane") == lane)
+        und_lane_df = undetermined_df.filter(polars.col("Lane") != lane)
+        # Iterate through each lane and index from the sample sheet
+        for lane, proj, i1, i2 in ss_lane_df.iter_rows():
+            # Iterate through each lane and most common indexes from the undetermined data frame
+            for ln, i, c in und_lane_df.iter_rows():
+                match_2 = None
+                # Allow for up to 1 mismatch in both index 1 and index 2
+                match_1 = regex.search(r"(" + regex.escape(i1) + "){s<=1}", i)
+                if i2 is not None:
+                    match_2 = regex.search(r"(" + regex.escape(i2) + "){s<=1}", i)
+                if match_1 and (match_2 or i2 is None):
                     df.append(
                         {
                             "Lane": ln,
@@ -175,13 +215,13 @@ def search_for_unexpected_indexes(
     if not df:
         return polars.DataFrame(
             schema={
-                "Lane": polars.Utf8,
-                "Index": polars.Utf8,
+                "Lane": polars.String,
+                "Index": polars.String,
                 "Count": polars.Int64,
-                "Sample_Project": polars.Utf8,
-                "Lane_Project": polars.Utf8,
-                "index1": polars.Utf8,
-                "index2": polars.Utf8,
+                "Sample_Project": polars.String,
+                "Lane_Project": polars.String,
+                "index1": polars.String,
+                "index2": polars.String,
             }
         )
     return polars.from_dicts(df)
@@ -195,13 +235,13 @@ def main(args: argparse.Namespace) -> None:
     # Extract the flowcell name from the input path for logging and output file naming
     basename = args.input_path.name
     logging.debug(f"Processing flowcell: '{basename}'")
-    output_file = args.output_path.joinpath(f"{basename}_unexpected_indexes.csv")
+    output_file = args.output_path / f"{basename}_unexpected_indexes.csv"
     logging.debug(f"Output will be saved to: {output_file}")
     if args.threads > 1:
         logging.debug(f"Using {args.threads} threads for processing.")
 
     # Determine the sample sheet path, either from the command line argument or by looking for SampleSheet.csv in the input directory
-    sample_sheet = args.sample_sheet or args.input_path.joinpath("SampleSheet.csv")
+    sample_sheet = args.sample_sheet or args.input_path / "SampleSheet.csv"
     logging.debug(f"Using sample sheet: {sample_sheet}")
 
     # Extract indexes from the sample sheet
@@ -212,19 +252,29 @@ def main(args: argparse.Namespace) -> None:
     logging.debug(f"Found {len(undetermined_files)} undetermined FASTQ files.")
 
     logging.info("Extracting indexes from undetermined FASTQ files...")
-    undetermined_indexes = []
-    # Use multiprocessing to extract indexes from undetermined FASTQ files in parallel
-    with Pool(args.threads) as pool:
-        undetermined_indexes = pool.map(
-            extract_indexes_from_undetermined_file, undetermined_files
-        )
+    if args.threads > 1:
+        # Use multiprocessing to extract indexes from undetermined FASTQ files in parallel
+        with Pool(args.threads) as pool:
+            undetermined_indexes = pool.map(
+                extract_indexes_from_undetermined_file, undetermined_files
+            )
+    else:
+        undetermined_indexes = [
+            extract_indexes_from_undetermined_file(f) for f in undetermined_files
+        ]
+
+    logging.debug("Extracting indexes from undetermined FASTQ files completed.")
+
     # Flatten the list of lists of dictionaries into a single list of dictionaries and convert it to a Polars DataFrame
-    undetermined_indexes = polars.from_dicts(
-        [item for sublist in undetermined_indexes for item in sublist]
-    )
+    flat = [item for sublist in undetermined_indexes for item in sublist]
+    if not flat:
+        raise ValueError("No indexes extracted from undetermined FASTQ files.")
+    undetermined_indexes = polars.from_dicts(flat)
 
     logging.info("Searching for unexpected indexes...")
     results = search_for_unexpected_indexes(sample_sheet_indexes, undetermined_indexes)
+
+    logging.debug("Searching for unexpected indexes completed.")
 
     if results.is_empty():
         logging.info("No unexpected indexes found. Exiting.")
@@ -239,3 +289,5 @@ def main(args: argparse.Namespace) -> None:
         ).filter(polars.col("Sample_Project_right").is_null()).drop(
             ["Sample_Project_right"]
         ).write_csv(output_file)
+
+    logging.info(f"Results saved to {output_file}.")
