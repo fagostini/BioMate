@@ -187,3 +187,6 @@ test/*
 **.control
 **.xml
 **.csv
+
+# Containers
+*.sif
