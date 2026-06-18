@@ -92,7 +92,9 @@ def extract_indexes_from_sample_sheet(
                         i for i, x in enumerate(header) if x == "Sample_Project"
                     ][0]
                     index_idx = [i for i, x in enumerate(header) if x == "index"][0]
-                    index2_idx = [i for i, x in enumerate(header) if x == "index2"][0]
+                    index2_idx = next(
+                        (i for i, x in enumerate(header) if x == "index2"), None
+                    )
                     header_parsed = True
                 else:
                     fields = line.strip().split(",")
@@ -101,13 +103,9 @@ def extract_indexes_from_sample_sheet(
                             "Lane": fields[lane_idx],
                             "Sample_Project": fields[sample_project_idx],
                             "index": fields[index_idx],
-                            "index2": fields[index2_idx],
-                        }
-                        if index2_idx
-                        else {
-                            "Lane": fields[lane_idx],
-                            "Sample_Project": fields[sample_project_idx],
-                            "index": fields[index_idx],
+                            "index2": fields[index2_idx]
+                            if index2_idx is not None
+                            else None,
                         }
                     )
             if line.startswith("[Data]") or line.startswith("[BCLConvert_Data]"):
@@ -127,7 +125,9 @@ def extract_indexes_from_undetermined_file(
     with dnaio.open(undetermined_file_path, open_threads=threads) as reader:
         for record in reader:
             idx = record.name.split(" ")[1].split(":")[-1]
-            if "GGGG" not in indexes:
+            if (
+                "GGGG" not in idx
+            ):  # Skip indexes with more than 4 consecutive Gs, which are likely to be sequencing errors
                 indexes.update({idx})
 
     return indexes.most_common(1000)
@@ -140,9 +140,10 @@ def search_for_unexpected_indexes(
     df = list()
     for lane, proj, i1, i2 in sample_sheet_df.iter_rows():
         for l, i, c in undetermined_df.iter_rows():
-            if regex.search(r"(" + i1 + "){s<=1}", i) and regex.search(
-                r"(" + i2 + "){s<=1}", i
-            ):
+            match_1 = regex.search(r"(" + i1 + "){s<=1}", i)
+            if i2 is not None:
+                match_2 = regex.search(r"(" + i2 + "){s<=1}", i)
+            if match_1 and (match_2 or i2 is None):
                 if lane != l:
                     df.append(
                         {
@@ -170,11 +171,7 @@ def main(args: argparse.Namespace) -> None:
 
     sample_sheet_indexes = extract_indexes_from_sample_sheet(sample_sheet)
 
-    undetermined_files = list(
-        pathlib.Path("/home/agostif/Projects/BioMate/temp/Demultiplexing").glob(
-            "Undetermined*R1*.fastq.gz"
-        )
-    )
+    undetermined_files = list(args.input_path.glob("Undetermined*R1*.fastq.gz"))
     undetermined_indexes = []
     for un_file in undetermined_files:
         lane = un_file.name.split("_")[2]
