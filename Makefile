@@ -4,8 +4,8 @@ include Makefile.help
 # Makefile containing the project's variables
 PROJECT_NAME := BioMate
 PROJECT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
-UV=$(shell which uv)
-BCLCONVERT=$(shell which bcl-convert)
+UV ?= uv
+BCLCONVERT ?= bcl-convert
 SHELL=/bin/bash
 
 # Test assets and variables
@@ -19,19 +19,38 @@ FLOWCELL_ID = 20260310_LM43899_0385_A12GGASZR5
 SEQ_NUM = 10
 
 RELEASE_DATA = DemuxCasesData.tar.gz
+TEST_PATH ?= tests
+PYTEST_ARGS ?=
 
-# Download and install uv
-$(UV):
-	curl -LsSf https://astral.sh/uv/install.sh | sh
+.PHONY: check-uv
+check-uv:
+	@command -v $(UV) >/dev/null 2>&1 || { \
+		echo "Error: '$(UV)' not found in PATH."; \
+		echo "Install uv (https://docs.astral.sh/uv/) or set UV=/full/path/to/uv."; \
+		exit 1; \
+	}
+
+.PHONY: install-uv
+## Install uv using the official installer script
+install-uv:
+	@curl -LsSf https://astral.sh/uv/install.sh | sh
+
+.PHONY: check-bclconvert
+check-bclconvert:
+	@command -v $(BCLCONVERT) >/dev/null 2>&1 || { \
+		echo "Error: '$(BCLCONVERT)' not found in PATH."; \
+		echo "Install bcl-convert or set BCLCONVERT=/full/path/to/bcl-convert."; \
+		exit 1; \
+	}
 
 
 .PHONY: sync
 ## Sync the project's dependencies with the environment
-sync: $(UV)
+sync: check-uv
 	@$(UV) sync --all-extras --all-groups
 
 
-uv.lock: $(UV)
+uv.lock: check-uv
 	@$(UV) lock
 
 
@@ -42,17 +61,17 @@ lock: uv.lock
 
 .PHONY: upgrade
 ## Upgrade the project's dependencies
-upgrade: $(UV)
+upgrade: check-uv
 	@$(UV) lock --upgrade
 
 
 .PHONY: build
 ## Build the project into distribution archives
-build: $(UV)
+build: check-uv
 	@$(UV) build
 
 
-.venv/bin/activate: $(UV)
+.venv/bin/activate: check-uv
 	@$(UV) venv
 
 
@@ -64,6 +83,8 @@ venv: .venv/bin/activate
 ## Create the Singularity image for the project
 singularity: remove_singularity singularity.sif
 
+.PHONY: remove_singularity
+
 singularity.sif: singularity.def
 	@singularity build --fakeroot --fix-perms --force --bind $(PROJECT_DIR):/mnt $@ $< > singularity_build.out 2> singularity_build.err && echo "Singularity image built successfully!" || echo "Error building Singularity image! Check singularity_build.err for details."
 
@@ -71,7 +92,7 @@ remove_singularity:
 	@if [[ -f singularity.sif ]]; then rm singularity.sif; fi
 
 
-requirements.txt: $(UV) uv.lock
+requirements.txt: check-uv uv.lock
 	@$(UV) export --output-file requirements.txt
 
 
@@ -82,12 +103,30 @@ export: requirements.txt
 
 .PHONY: interrogate
 ## Run interrogate in verbose mode to check for code quality
-interrogate: $(UV)
+interrogate: check-uv
 	@$(UV)x interrogate --verbose
+
+
+.PHONY: test
+## Run the pytest test suite
+test: check-uv
+	@$(UV) run pytest $(TEST_PATH) $(PYTEST_ARGS)
+
+
+.PHONY: test_verbose
+## Run the pytest suite in verbose mode
+test_verbose: check-uv
+	@$(UV) run pytest -v --tb=short $(TEST_PATH) $(PYTEST_ARGS)
+
+
+.PHONY: test_failed
+## Re-run only tests that failed in the previous pytest run
+test_failed: check-uv
+	@$(UV) run pytest --lf -v --tb=short $(TEST_PATH) $(PYTEST_ARGS)
 
 .PHONY: deploy
 ## Deploy documentation on GitHub
-deploy:
+deploy: check-uv
 	@$(UV) run mkdocs gh-deploy
 
 
@@ -105,34 +144,34 @@ $(TEMP_DIR):
 	@mkdir -p $(TEMP_DIR)
 
 copy_none: $(TEMP_DIR) $(NISS) clean_samplesheet
-	@cp $(NISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (No Index) to working folder." || "Error copying SampleSheet to working folder!"
+	@cp $(NISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (No Index) to working folder." || { echo "Error copying SampleSheet to working folder!"; exit 1; }
 
 copy_single: $(TEMP_DIR) $(SISS) clean_samplesheet
-	@cp $(SISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (Single Index) to working folder." || "Error copying SampleSheet to working folder!"
+	@cp $(SISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (Single Index) to working folder." || { echo "Error copying SampleSheet to working folder!"; exit 1; }
 
 copy_dual: $(TEMP_DIR) $(DISS) clean_samplesheet
-	@cp $(DISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (Dual Indexes) to working folder." || "Error copying SampleSheet to working folder!"
+	@cp $(DISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (Dual Indexes) to working folder." || { echo "Error copying SampleSheet to working folder!"; exit 1; }
 
 copy_mix: $(TEMP_DIR) $(MISS) clean_samplesheet
-	@cp $(MISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (Mixed Indexes) to working folder." || "Error copying SampleSheet to working folder!"
+	@cp $(MISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (Mixed Indexes) to working folder." || { echo "Error copying SampleSheet to working folder!"; exit 1; }
 
-$(TEMP_DIR)/$(FLOWCELL_ID): $(UV) $(TEMP_DIR) clean_flowcell
-	@$(UV) run biomate --verbose blabber --format fastq --sample-sheet $(TEMP_DIR)/SampleSheet.csv --seq-number $(SEQ_NUM) --output $(TEMP_DIR) --flowcell-id $(FLOWCELL_ID) > $(TEMP_DIR)/blabber.out 2> $(TEMP_DIR)/blabber.err && echo "Blabber module executed successfully!" || "Error executing Blabber module!"
+$(TEMP_DIR)/$(FLOWCELL_ID): check-uv $(TEMP_DIR) clean_flowcell
+	@$(UV) run biomate --verbose blabber --format fastq --sample-sheet $(TEMP_DIR)/SampleSheet.csv --seq-number $(SEQ_NUM) --output $(TEMP_DIR) --flowcell-id $(FLOWCELL_ID) > $(TEMP_DIR)/blabber.out 2> $(TEMP_DIR)/blabber.err && echo "Blabber module executed successfully!" || { echo "Error executing Blabber module!"; exit 1; }
 
-$(TEMP_DIR)/Data $(TEMP_DIR)/RunInfo.xml: $(UV) $(TEMP_DIR)/$(FLOWCELL_ID) clean_data
-	@$(UV) run biomate --verbose fastrewind --input-path $(TEMP_DIR) --output-path $(TEMP_DIR) --threads 8 > $(TEMP_DIR)/fastrewind.out 2> $(TEMP_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || "Error executing Fastrewind module!"
+$(TEMP_DIR)/Data $(TEMP_DIR)/RunInfo.xml: check-uv $(TEMP_DIR)/$(FLOWCELL_ID) clean_data
+	@$(UV) run biomate --verbose fastrewind --input-path $(TEMP_DIR) --output-path $(TEMP_DIR) --threads 8 > $(TEMP_DIR)/fastrewind.out 2> $(TEMP_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || { echo "Error executing Fastrewind module!"; exit 1; }
 
-validate_samplesheet: $(BCLCONVERT) $(TEMP_DIR)/RunInfo.xml
-	@$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true --bcl-validate-sample-sheet-only true > $(TEMP_DIR)/bcl-validate.out 2> $(TEMP_DIR)/bcl-validate.err && echo "BCL-convert SampleSheet validation was successful!" || "Error executing BCL-convert SampleSheet validation!"
+validate_samplesheet: check-bclconvert $(TEMP_DIR)/RunInfo.xml
+	@$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true --bcl-validate-sample-sheet-only true > $(TEMP_DIR)/bcl-validate.out 2> $(TEMP_DIR)/bcl-validate.err && echo "BCL-convert SampleSheet validation was successful!" || { echo "Error executing BCL-convert SampleSheet validation!"; exit 1; }
 
-$(TEMP_DIR)/Demultiplexing: $(BCLCONVERT) $(TEMP_DIR)/RunInfo.xml clean_demux
-	@$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true > $(TEMP_DIR)/bcl-convert.out 2> $(TEMP_DIR)/bcl-convert.err && echo "BCL-convert executed successfully!" || "Error executing BCL-convert!"
+$(TEMP_DIR)/Demultiplexing: check-bclconvert $(TEMP_DIR)/RunInfo.xml clean_demux
+	@$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true > $(TEMP_DIR)/bcl-convert.out 2> $(TEMP_DIR)/bcl-convert.err && echo "BCL-convert executed successfully!" || { echo "Error executing BCL-convert!"; exit 1; }
 
 
 .PHONY: report_results
 report_results: $(TEMP_DIR)/Demultiplexing results_message
-	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep -v -e "Undetermined" -e "_I1_" -e "_I2_" | xargs zgrep -c ^@ || true
-	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep "Undetermined" | grep -v -e "_I1_" -e "_I2_" | xargs zgrep -c ^@ || true
+	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep -v -e "Undetermined" -e "_I1_" -e "_I2_" | xargs -r zgrep -c ^@ || true
+	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep "Undetermined" | grep -v -e "_I1_" -e "_I2_" | xargs -r zgrep -c ^@ || true
 
 
 compare_results: $(TEMP_DIR)/Demultiplexing comparison_message
@@ -146,6 +185,10 @@ test_single: deepclean run_message copy_single validate_samplesheet report_resul
 test_dual: deepclean run_message copy_dual validate_samplesheet report_results compare_results
 
 test_mix: deepclean run_message copy_mix validate_samplesheet report_results compare_results
+
+.PHONY: copy_none copy_single copy_dual copy_mix
+.PHONY: validate_samplesheet compare_results
+.PHONY: test_none test_single test_dual test_mix
 
 .PHONY: cleanup_message
 cleanup_message:
