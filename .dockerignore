@@ -1,0 +1,56 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Documentation (keep docs/ for README.md needed by build)
+README.md
+CHANGELOG.md
+LICENSE
+
+# Development
+.venv
+.env
+.env.local
+*.pyc
+__pycache__
+*.egg-info
+.pytest_cache
+.coverage
+.mypy_cache
+.tox
+
+# Editor
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+Dockerfile.dev
+docker-compose.yml
+docker-compose.dev.yml
+.dockerignore
+
+# Test and build artifacts
+temp/
+.cache/
+site/
+dist/
+build/
+
+# Notebooks
+notebooks/
+
+# Assets (sample sheets, etc)
+assets/
+
+# mkdocs
+mkdocs.yml
+Makefile*
