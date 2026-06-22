@@ -10,5 +10,7 @@ nav:
     - Dirstruct: dirstruct.md
     - Indexer: indexer.md
     - FastRewind: fastrewind.md
+    - Nspector: nspector.md
+    - Strainer: strainer.md
 theme:
   name: readthedocs
