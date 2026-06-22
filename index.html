@@ -59,6 +59,10 @@
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="fastrewind/">FastRewind</a>
                   </li>
+                  <li class="toctree-l1"><a class="reference internal" href="nspector/">Nspector</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="strainer/">Strainer</a>
+                  </li>
               </ul>
       </div>
     </div>
@@ -93,16 +97,18 @@
 <li><a href="dirstruct/">Dirstruct</a> - Extract or create a directory structure. It can be used to simulate nested folder structures for testing purposes.</li>
 <li><a href="indexer/">Indexer</a> - Indexing tool for FASTA/FASTQ files. It can be used to search for expected indexes and get 'fuzzy' information.</li>
 <li><a href="fastrewind/">FastRewind</a> - Convert a demultiplexed folder back into the Illumina NovaSeqXPlus output. It can be used to generate a subset for demultiplex testing.</li>
+<li><a href="nspector/">Nspector</a> - Inspect FASTQ files for N-base content and their distribution across flowcell tiles and sequencing cycles.</li>
+<li><a href="strainer/">Strainer</a> - Evaluate index mixing across flowcell lanes by identifying sample indexes from one lane appearing in undetermined reads of another.</li>
 </ul>
 <h2 id="general-options">General options</h2>
 <p>In addition to the <code>--version</code> option, which prints the current version of the BioMate package, the following options can be provided before any sub-command (<em>e.g.</em> <code>biomate &lt;OPTION&gt; &lt;SUBCOMMAND&gt;</code>), and they will be propagated to the sub-command execution:</p>
 <ul>
 <li><code>--verbose</code>: Increase verbosity of the output by setting the logging level to <code>DEBUG</code>. This will print additional information about the execution of the sub-command.</li>
-<li><code>--quiet</code>: Decrease verbosity of the output by setting the logging level to <code>WARNING</code>. This will suppress most of the output, only printing warnings and errors.</li>
+<li><code>--quiet</code>: Decrease verbosity of the output by setting the logging level to <code>ERROR</code>. This will suppress most of the output, only printing errors.</li>
 </ul>
 <blockquote>
 <p><em><strong>Note:</strong> By default, the logging level is set to <code>INFO</code>, which will print general information about the execution of the sub-command, but not the detailed debug information.</em></p>
-<p><em><strong>Important:</strong> In some cases (e.g. when the output will be printed to the standard output), the <code>--quiet</code> option will be applied automatically to avoid cluttering the output with unnecessary information. In such cases, the logging level will be set to <code>WARNING</code> regardless of the <code>--verbose</code> or <code>--quiet</code> options.</em></p>
+<p><em><strong>Important:</strong> In some cases (e.g. when the output will be printed to the standard output), the <code>--quiet</code> option will be applied automatically to avoid cluttering the output with unnecessary information. In such cases, the logging level will be set to <code>ERROR</code> regardless of the <code>--verbose</code> or <code>--quiet</code> options.</em></p>
 </blockquote>
               
             </div>
@@ -156,5 +162,5 @@
 
 <!--
 MkDocs version : 1.6.1
-Build Date UTC : 2025-09-10 07:34:54.722754+00:00
+Build Date UTC : 2026-06-22 08:06:28.245660+00:00
 -->
