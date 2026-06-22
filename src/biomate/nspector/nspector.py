@@ -158,9 +158,11 @@ def main(args: argparse.Namespace) -> None:
                 width=1024, height=480, title="Distribution of N counts per sequence"
             )
         )
-        chart.save(args.output / f"{input_file.stem}_n_count_distribution.html")
+        chart.save(args.output / f"{input_file.stem}_n_count_distribution.png")
 
-        filler = generate_cycles_filler(data, int(data.get_column("cycles").max()))
+        filler = generate_cycles_filler(
+            data, int(max(data.get_column("cycles").to_list()))
+        )
         chart = (
             data.group_by(["cycles", "tile"])
             .agg(polars.len().alias("n_sequences"))
@@ -191,6 +193,6 @@ def main(args: argparse.Namespace) -> None:
                 title="Distribution of N-containing sequences across cycles and tiles",
             )
         )
-        chart.save(args.output / f"{input_file.stem}_n_cycle_tile_distribution.html")
+        chart.save(args.output / f"{input_file.stem}_n_cycle_tile_distribution.png")
 
     logging.info("Nspector module finished.")
