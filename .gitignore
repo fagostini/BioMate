@@ -177,7 +177,7 @@ cython_debug/
 **.DS_Store
 
 # Notebooks
-src/biomate/notebooks/*
+notebooks/*
 
 # Outputs
 temp/*
