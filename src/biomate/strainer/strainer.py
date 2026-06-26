@@ -183,6 +183,25 @@ def extract_indexes_from_undetermined_file(
     ]
 
 
+def parallel_extract_indexes_from_undetermined_files(
+    undetermined_files: list[pathlib.Path], threads: int
+) -> list[dict[str, str | int]]:
+    """Extract indexes information from multiple Undetermined FASTQ files in parallel."""
+    if threads > 1:
+        with Pool(threads) as pool:
+            results = pool.map(
+                extract_indexes_from_undetermined_file, undetermined_files
+            )
+    else:
+        results = [
+            extract_indexes_from_undetermined_file(f) for f in undetermined_files
+        ]
+
+    # Flatten the list of lists of dictionaries into a single list of dictionaries
+    flat_results = [item for sublist in results for item in sublist]
+    return flat_results
+
+
 def search_for_unexpected_indexes(
     sample_sheet_df: polars.DataFrame, undetermined_df: polars.DataFrame
 ) -> polars.DataFrame:
@@ -196,7 +215,7 @@ def search_for_unexpected_indexes(
             # Iterate through each lane and most common indexes from the undetermined data frame
             for ln, i, c in und_lane_df.iter_rows():
                 match_2 = None
-                # Allow for up to 1 mismatch in both index 1 and index 2
+                # Allow for up to 1 mismatch in each index
                 match_1 = regex.search(r"(" + regex.escape(i1) + "){s<=1}", i)
                 if i2 is not None:
                     match_2 = regex.search(r"(" + regex.escape(i2) + "){s<=1}", i)
@@ -227,6 +246,22 @@ def search_for_unexpected_indexes(
     return polars.from_dicts(df)
 
 
+def clean_results(
+    results: polars.DataFrame, sample_sheet_df: polars.DataFrame
+) -> polars.DataFrame:
+    """Clean the results by filtering out expected indexes."""
+    return (
+        results.join(
+            sample_sheet_df,
+            left_on=["Lane", "index1", "index2"],
+            right_on=["Lane", "index", "index2"],
+            how="left",
+        )
+        .filter(polars.col("Sample_Project_right").is_null())
+        .drop(["Sample_Project_right"])
+    )
+
+
 def main(args: argparse.Namespace) -> None:
     """Main function."""
     setup_logging(args)
@@ -252,24 +287,17 @@ def main(args: argparse.Namespace) -> None:
     logging.debug(f"Found {len(undetermined_files)} undetermined FASTQ files.")
 
     logging.info("Extracting indexes from undetermined FASTQ files...")
-    if args.threads > 1:
-        # Use multiprocessing to extract indexes from undetermined FASTQ files in parallel
-        with Pool(args.threads) as pool:
-            undetermined_indexes = pool.map(
-                extract_indexes_from_undetermined_file, undetermined_files
-            )
-    else:
-        undetermined_indexes = [
-            extract_indexes_from_undetermined_file(f) for f in undetermined_files
-        ]
+    undetermined_indexes = parallel_extract_indexes_from_undetermined_files(
+        undetermined_files, args.threads
+    )
+
+    if not undetermined_indexes:
+        logging.info("No indexes extracted from undetermined FASTQ files. Exiting.")
+        return
 
     logging.debug("Extracting indexes from undetermined FASTQ files completed.")
 
-    # Flatten the list of lists of dictionaries into a single list of dictionaries and convert it to a Polars DataFrame
-    flat = [item for sublist in undetermined_indexes for item in sublist]
-    if not flat:
-        raise ValueError("No indexes extracted from undetermined FASTQ files.")
-    undetermined_indexes = polars.from_dicts(flat)
+    undetermined_indexes = polars.from_dicts(undetermined_indexes)
 
     logging.info("Searching for unexpected indexes...")
     results = search_for_unexpected_indexes(sample_sheet_indexes, undetermined_indexes)
@@ -278,16 +306,12 @@ def main(args: argparse.Namespace) -> None:
 
     if results.is_empty():
         logging.info("No unexpected indexes found. Exiting.")
-        results.write_csv(output_file)
     else:
         # Sort results by lane and count, and filter out indexes that are expected in the lane
-        results.sort(["Lane", "Count"], descending=[False, True]).join(
+        results = clean_results(
+            results.sort(["Lane", "Count"], descending=[False, True]),
             sample_sheet_indexes,
-            left_on=["Lane", "index1", "index2"],
-            right_on=["Lane", "index", "index2"],
-            how="left",
-        ).filter(polars.col("Sample_Project_right").is_null()).drop(
-            ["Sample_Project_right"]
-        ).write_csv(output_file)
+        )
+    results.write_csv(output_file)
 
     logging.info(f"Results saved to {output_file}.")
