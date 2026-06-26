@@ -190,3 +190,5 @@ test/*
 
 # Containers
 *.sif
+*_build.err
+*_build.out
