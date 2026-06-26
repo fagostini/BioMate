@@ -7,14 +7,14 @@ from importlib.metadata import version
 
 from rich.logging import RichHandler
 
-from biomate import blabber, dirstruct, fastrewind, index, strainer
+from biomate import blabber, dirstruct, fastrewind, index, nspector, strainer
 
 try:
     __version__ = version(__name__)
-except Exception as e:
-    raise e
+except Exception:
+    __version__ = "unknown"
 
-__all__ = ["__version__", "biomate"]
+__all__ = ["__version__", "main"]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,12 +28,8 @@ class CustomParser(argparse.ArgumentParser):
 
     def error(self, message):
         """Show the error and help."""
-        sys.stderr.write("\nError: %s\n\n\n" % message)
-        self.print_help()
-        print(
-            "\nTo check the sub-commands help message use: biomate <sub-command> --help\n"
-        )
-        sys.exit(2)
+        self.print_usage(sys.stderr)
+        self.exit(2, f"error: {message}\n")
 
 
 def main():
@@ -67,9 +63,17 @@ def main():
     dirstruct.dirstruct.init_parser(subparsers)
     index.index.init_parser(subparsers)
     fastrewind.fastrewind.init_parser(subparsers)
+    nspector.nspector.init_parser(subparsers)
     strainer.strainer.init_parser(subparsers)
 
     args = parser.parse_args()
+
+    # Configure logging based on verbosity flags
+    from biomate.setup import setup_logging
+
+    if hasattr(args, "verbose") or hasattr(args, "quiet"):
+        setup_logging(args)
+
     if not hasattr(args, "parse") or not hasattr(args, "run"):
         parser.print_help()
     else:

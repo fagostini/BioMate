@@ -1,16 +1,51 @@
 """Strainer main script."""
 
+import argparse
 import csv
+import logging
+import pathlib
+from collections import Counter
+from multiprocessing import Pool
+from typing import cast
+
 import dnaio
 import polars
 import regex
-import pathlib
-from collections import Counter
-import argparse
-import logging
-from multiprocessing import Pool
 
 from biomate.setup import setup_logging
+
+# Module-level constants
+POLY_G_ARTIFACT = "GGGG"  # Sequence pattern indicating likely sequencing errors
+RESULTS_SCHEMA = {
+    "Lane": polars.String,
+    "Undetermined_Index": polars.String,
+    "Count": polars.Int64,
+    "Fraction": polars.Float32,
+    "Sample_Project": polars.String,
+    "Lane_Project": polars.String,
+    "index1": polars.String,
+    "index2": polars.String,
+}
+REQUIRED_COLUMNS = ["Lane", "Sample_Project", "index"]
+DATA_SECTION_MARKERS = ["[Data]", "[BCLConvert_Data]"]
+
+
+def _find_column_indices(
+    header: list[str], required_columns: list[str]
+) -> dict[str, int | None]:
+    """Find column indices for specified columns in a header row.
+
+    Args:
+        header: List of column names
+        required_columns: List of column names to find
+
+    Returns:
+        Dictionary mapping column names to their indices (None if not found)
+    """
+    return {
+        col: next((i for i, x in enumerate(header) if x == col), None)
+        for col in required_columns
+    }
 
 
 def validate_args(args: argparse.Namespace) -> argparse.Namespace:
@@ -82,110 +117,117 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
 def extract_indexes_from_sample_sheet(
     sample_sheet_path: pathlib.Path,
 ) -> polars.DataFrame:
-    """Extract indexes information from the Sample Sheet."""
-    df = []
-    # Flag to track whether we are in the [Data] section of the Sample Sheet
+    """Extract indexes information from the Sample Sheet.
+
+    Expects a CSV file with [Data] or [BCLConvert_Data] section containing
+    Lane, Sample_Project, index, and optional index2 columns.
+    """
+    data_rows = []
     in_data_section = False
-    # Flag to track whether the header of the [Data] section has been parsed
-    header_parsed = False
+    column_indices = {}
+
     with open(sample_sheet_path, "r") as infile:
         for fields in csv.reader(infile):
-            if in_data_section:
-                if not header_parsed:
-                    # Parse the header to find the column indices for Lane, Sample_Project, index, and index2
-                    lane_idx = next(
-                        (i for i, x in enumerate(fields) if x == "Lane"), None
-                    )
-                    sample_project_idx = next(
-                        (i for i, x in enumerate(fields) if x == "Sample_Project"), None
-                    )
-                    index_idx = next(
-                        (i for i, x in enumerate(fields) if x == "index"), None
-                    )
-                    index2_idx = next(
-                        (i for i, x in enumerate(fields) if x == "index2"), None
-                    )
-                    header_parsed = True
-                    if (
-                        lane_idx is None
-                        or sample_project_idx is None
-                        or index_idx is None
-                    ):
-                        raise ValueError(
-                            "Could not find required columns 'Lane', 'Sample_Project', and 'index' in the Sample Sheet."
-                        )
-                else:
-                    # Parse the data lines to extract the relevant information
-                    df.append(
-                        {
-                            "Lane": fields[lane_idx],
-                            "Sample_Project": fields[sample_project_idx],
-                            "index": fields[index_idx],
-                            "index2": fields[index2_idx]
-                            if index2_idx is not None
-                            else None,
-                        }
-                    )
-            # Trigger for entering the [Data] (v1) or [BCLConvert_Data] (v2) section of the Sample Sheet
-            if fields and fields[0].strip() in ["[Data]", "[BCLConvert_Data]"]:
+            # Check for section markers
+            if fields and fields[0].strip() in DATA_SECTION_MARKERS:
                 in_data_section = True
                 continue
 
+            if not in_data_section or not fields:
+                continue
+
+            # Parse header row to find column indices
+            if not column_indices:
+                column_indices = _find_column_indices(
+                    fields, REQUIRED_COLUMNS + ["index2"]
+                )
+                if any(column_indices.get(col) is None for col in REQUIRED_COLUMNS):
+                    missing = [
+                        col
+                        for col in REQUIRED_COLUMNS
+                        if column_indices.get(col) is None
+                    ]
+                    raise ValueError(
+                        f"Sample Sheet missing required columns: {', '.join(missing)}"
+                    )
+                continue
+
+            # Parse data rows (column_indices is guaranteed to have all required columns at this point)
+            lane_idx = cast(int, column_indices["Lane"])
+            proj_idx = cast(int, column_indices["Sample_Project"])
+            idx1_idx = cast(int, column_indices["index"])
+            idx2_idx = column_indices.get("index2")
+
+            data_rows.append(
+                {
+                    "Lane": fields[lane_idx],
+                    "Sample_Project": fields[proj_idx],
+                    "index1": fields[idx1_idx],
+                    "index2": fields[idx2_idx] if idx2_idx is not None else None,
+                }
+            )
+
     if not in_data_section:
         raise ValueError(
-            "Could not find the [Data] or [BCLConvert_Data] section in the Sample Sheet."
-        )
-    if not header_parsed:
-        raise ValueError(
-            "Could not find the header line in the [Data] or [BCLConvert_Data] section of the Sample Sheet."
+            f"Could not find data section ({' or '.join(DATA_SECTION_MARKERS)}) in Sample Sheet."
         )
 
-    if not df:
-        raise ValueError("No data extracted from the Sample Sheet.")
+    if not data_rows:
+        raise ValueError("No data rows found in Sample Sheet data section.")
 
-    return polars.from_dicts(df).with_columns(
+    return polars.from_dicts(data_rows).with_columns(
         polars.col("Lane").str.zfill(3).str.pad_start(4, "L")
     )
 
 
 def extract_indexes_from_undetermined_file(
     undetermined_file_path: pathlib.Path,
-) -> list[dict[str, str | int]]:
-    """Extract indexes information from an Undetermined FASTQ file."""
+) -> list[dict[str, str | int | float]]:
+    """Extract indexes information from an Undetermined FASTQ file.
+
+    Reads the file header to extract index information, filtering out
+    poly-G artifacts which indicate likely sequencing errors.
+    """
     # Extract lane information from the file name
     lane = undetermined_file_path.name.split("_")[2]
-    if not len(lane) >= 3 or not regex.match(r"^L\d{3}$", lane):
+    if not regex.match(r"^L\d{3}$", lane):
         raise ValueError(
-            f"Could not extract lane information from file name {undetermined_file_path.name}."
+            f"Invalid lane format in file name: {undetermined_file_path.name}. Expected format: *_*_LXXX_*"
         )
+
+    total_records = 0
     indexes = Counter()
     with dnaio.open(undetermined_file_path) as reader:
-        failed_split = False
         for record in reader:
-            split_name = record.name.split(" ")
-            if len(split_name) < 2:
-                failed_split = True
-                break
-            idx = split_name[1].split(":")[-1]
-            if (
-                "GGGG" not in idx
-            ):  # Skip indexes with 4 or more consecutive Gs, which are likely to be sequencing errors
+            total_records += 1
+            # Expected format: name parts separated by space, index in second part after last colon
+            name_parts = record.name.split(" ")
+            if len(name_parts) < 2:
+                raise ValueError(
+                    f"Invalid read name format in {undetermined_file_path.name}: {record.name}"
+                )
+
+            # Extract index from second part (format: control:barcode)
+            idx = name_parts[1].split(":")[-1]
+
+            # Skip indexes with poly-G artifacts (likely sequencing errors)
+            if POLY_G_ARTIFACT not in idx:
                 indexes.update({idx})
 
-    if failed_split:
-        raise ValueError(
-            f"Could not extract index information from file {undetermined_file_path.name}."
-        )
-
     return [
-        {"Lane": lane, "Index": idx, "Count": count}
+        {
+            "Lane": lane,
+            "Undetermined_Index": idx,
+            "Count": count,
+            "Fraction": count / total_records,
+        }
         for idx, count in indexes.most_common(1000)
     ]
 
 
 def parallel_extract_indexes_from_undetermined_files(
     undetermined_files: list[pathlib.Path], threads: int
-) -> list[dict[str, str | int]]:
+) -> list[dict[str, str | int | float]]:
     """Extract indexes information from multiple Undetermined FASTQ files in parallel."""
     if threads > 1:
         with Pool(threads) as pool:
@@ -205,60 +247,93 @@ def parallel_extract_indexes_from_undetermined_files(
 def search_for_unexpected_indexes(
     sample_sheet_df: polars.DataFrame, undetermined_df: polars.DataFrame
 ) -> polars.DataFrame:
-    """Search for unexpected indexes among the undetermined lanes."""
-    df = []
+    """Search for unexpected indexes among the undetermined lanes.
+
+    Compares undetermined indexes with expected indexes from the sample sheet,
+    allowing up to 1 mismatch per index.
+    """
+    results = []
+
     for lane in sample_sheet_df.get_column("Lane").unique():
         ss_lane_df = sample_sheet_df.filter(polars.col("Lane") == lane)
         und_lane_df = undetermined_df.filter(polars.col("Lane") != lane)
-        # Iterate through each lane and index from the sample sheet
-        for lane, proj, i1, i2 in ss_lane_df.iter_rows():
-            # Iterate through each lane and most common indexes from the undetermined data frame
-            for ln, i, c in und_lane_df.iter_rows():
+
+        # Iterate through each sample in the sample sheet for this lane
+        for ss_lane, ss_project, ss_index1, ss_index2 in ss_lane_df.iter_rows():
+            # Iterate through undetermined indexes from other lanes
+            for und_lane, und_index, und_count, und_fraction in und_lane_df.iter_rows():
+                # Allow up to 1 mismatch in each index
+                match_1 = regex.search(
+                    r"(" + regex.escape(ss_index1) + "){s<=1}", und_index
+                )
                 match_2 = None
-                # Allow for up to 1 mismatch in each index
-                match_1 = regex.search(r"(" + regex.escape(i1) + "){s<=1}", i)
-                if i2 is not None:
-                    match_2 = regex.search(r"(" + regex.escape(i2) + "){s<=1}", i)
-                if match_1 and (match_2 or i2 is None):
-                    df.append(
+                if ss_index2 is not None:
+                    match_2 = regex.search(
+                        r"(" + regex.escape(ss_index2) + "){s<=1}", und_index
+                    )
+
+                # If both indices match (or index2 is not required), record as potential mixing
+                if match_1 and (match_2 or ss_index2 is None):
+                    results.append(
                         {
-                            "Lane": ln,
-                            "Index": i,
-                            "Count": c,
-                            "Sample_Project": proj,
-                            "Lane_Project": lane,
-                            "index1": i1,
-                            "index2": i2,
+                            "Lane": und_lane,
+                            "Undetermined_Index": und_index,
+                            "Count": und_count,
+                            "Fraction": und_fraction,
+                            "Sample_Project": ss_project,
+                            "Lane_Project": ss_lane,
+                            "index1": ss_index1,
+                            "index2": ss_index2,
                         }
                     )
-    if not df:
-        return polars.DataFrame(
-            schema={
-                "Lane": polars.String,
-                "Index": polars.String,
-                "Count": polars.Int64,
-                "Sample_Project": polars.String,
-                "Lane_Project": polars.String,
-                "index1": polars.String,
-                "index2": polars.String,
-            }
-        )
-    return polars.from_dicts(df)
+
+    if not results:
+        return polars.DataFrame(schema=RESULTS_SCHEMA)
+
+    return polars.from_dicts(results)
 
 
 def clean_results(
     results: polars.DataFrame, sample_sheet_df: polars.DataFrame
 ) -> polars.DataFrame:
-    """Clean the results by filtering out expected indexes."""
+    """Clean the results by filtering out expected indexes.
+
+    Removes indexes that match the expected indexes from the sample sheet,
+    keeping only truly unexpected indexes that indicate potential sample mixing.
+    """
+    # Join with sample sheet to identify expected indexes
+    joined = results.join(
+        sample_sheet_df,
+        left_on=["Lane", "index1", "index2"],
+        right_on=["Lane", "index1", "index2"],
+        how="left",
+        suffix="_expected",
+    )
+
+    # Keep only rows where the expected columns are null (i.e., unexpected indexes)
     return (
-        results.join(
-            sample_sheet_df,
-            left_on=["Lane", "index1", "index2"],
-            right_on=["Lane", "index", "index2"],
-            how="left",
+        joined.filter(polars.col("Sample_Project_expected").is_null())
+        .drop("Sample_Project_expected")
+        .sort(["Lane", "Count"], descending=[False, True])
+    )
+
+
+def aggregate_results_by_lane(results: polars.DataFrame) -> polars.DataFrame:
+    """Aggregate results by lane, summing counts and fractions for each lane."""
+    return (
+        results.group_by(["Lane", "Undetermined_Index"])
+        .agg(
+            polars.col("Count").first(),
+            polars.col("Fraction").first(),
+            polars.col("Sample_Project"),
+            polars.col("Lane_Project"),
         )
-        .filter(polars.col("Sample_Project_right").is_null())
-        .drop(["Sample_Project_right"])
+        .group_by("Lane")
+        .agg(
+            polars.col("Count").sum().alias("Lane_Count"),
+            polars.col("Fraction").sum().alias("Lane_Fraction"),
+        )
+        .sort("Lane")
     )
 
 
@@ -312,6 +387,12 @@ def main(args: argparse.Namespace) -> None:
             results.sort(["Lane", "Count"], descending=[False, True]),
             sample_sheet_indexes,
         )
-    results.write_csv(output_file)
+        results.write_csv(output_file)
+        logging.info(f"Results saved to {output_file}.")
 
-    logging.info(f"Results saved to {output_file}.")
+        aggregate_results_by_lane(results).write_csv(
+            args.output_path / f"{basename}_lane_summary.csv"
+        )
+        logging.info(
+            f"Lane summary saved to {args.output_path / f'{basename}_lane_summary.csv'}."
+        )
