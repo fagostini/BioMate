@@ -88,19 +88,19 @@ def main(args: argparse.Namespace) -> None:
         # Resolve the source path to ensure it is absolute
         args.source_path = args.source_path.resolve()
         # Walk through the directory structure
-        for dir, _, files in pathlib.Path(args.source_path).walk():
+        for current_dir, _, files in pathlib.Path(args.source_path).walk():
             # Get the relative path of the directory to the source path
-            dir = dir.relative_to(args.source_path.parent)
+            current_dir = current_dir.relative_to(args.source_path.parent)
             # Case in which no output file is specified, just print to standard output
             if not args.output_file:
                 if args.no_tags:
-                    print(f"{dir}")
+                    print(f"{current_dir}")
                     for file in files:
-                        print(f"  {dir.joinpath(file)}")
+                        print(f"  {current_dir.joinpath(file)}")
                 else:
-                    print(f"{dir}\tdir")
+                    print(f"{current_dir}\tdir")
                     for file in files:
-                        print(f"  {dir.joinpath(file)}\tfile")
+                        print(f"  {current_dir.joinpath(file)}\tfile")
             # Write the directory structure to it
             else:
                 # Create the parent directory if it does not exist
@@ -109,13 +109,13 @@ def main(args: argparse.Namespace) -> None:
                 # Write the directory structure to the output file
                 with args.output_file.open("a") as output_file:
                     if args.no_tags:
-                        output_file.write(f"{dir}\n")
+                        output_file.write(f"{current_dir}\n")
                         for file in files:
-                            output_file.write(f"  {dir.joinpath(file)}\n")
+                            output_file.write(f"  {current_dir.joinpath(file)}\n")
                     else:
-                        output_file.write(f"{dir}\tdir\n")
+                        output_file.write(f"{current_dir}\tdir\n")
                         for file in files:
-                            output_file.write(f"{dir.joinpath(file)}\tfile\n")
+                            output_file.write(f"{current_dir.joinpath(file)}\tfile\n")
 
     elif args.command == "create":
         if args.output_path:
@@ -126,37 +126,41 @@ def main(args: argparse.Namespace) -> None:
                 args.output_path.mkdir(parents=True, exist_ok=True)
         with args.source_file.open("r") as input_file:
             for line in input_file:
-                destination_type = line.split("\t")[-1].strip()
-                destination_type = (
-                    "file"
-                    if destination_type == "file"
-                    else "dir"
-                    if destination_type == "dir"
-                    else None
-                )
-                destination = args.output_path.joinpath(line.split("\t")[0].strip())
-                # If the type is not specified, try to guess it based on the file extension
-                if destination_type is None:
-                    # Warning: This will not correctly handle files with no extension
-                    if destination.suffix == "" or destination.name != ".DS_Store":
+                line = line.strip()
+                if not line:
+                    continue  # Skip empty lines
+
+                # Parse line into path and optional type tag
+                parts = line.split("\t")
+                destination_path_str = parts[0].strip()
+                destination_type_str = parts[-1].strip() if len(parts) > 1 else ""
+
+                # Normalize destination type
+                type_map = {"file": "file", "dir": "dir"}
+                destination_type = type_map.get(destination_type_str, None)
+
+                destination = args.output_path.joinpath(destination_path_str)
+
+                # Create destination based on type
+                try:
+                    if destination_type == "file":
+                        # Create parent directories and then the file
+                        if not destination.parent.is_dir():
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                        destination.touch(exist_ok=True)
+                    elif destination_type == "dir":
+                        # Create the directory
                         destination.mkdir(parents=True, exist_ok=True)
                     else:
-                        try:
-                            destination.touch(exist_ok=True)
-                        except NotADirectoryError:
-                            # If the destination is a file, create the parent directory if it does not exist
+                        # No type specified: infer from file extension
+                        # Files with an extension or special files (.DS_Store) are treated as files
+                        if destination.suffix != "" or destination.name == ".DS_Store":
+                            # Has extension or is .DS_Store - treat as file
                             if not destination.parent.is_dir():
                                 destination.parent.mkdir(parents=True, exist_ok=True)
                             destination.touch(exist_ok=True)
-                elif destination_type == "dir":
-                    # Create the directory if it does not exist
-                    destination.mkdir(parents=True, exist_ok=True)
-                elif destination_type == "file":
-                    # Create the file if it does not exist
-                    if not destination.parent.is_dir():
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                    destination.touch(exist_ok=True)
-                else:
-                    raise ValueError(
-                        f"Unknown destination type '{destination_type}' in line: {line.strip()}"
-                    )
+                        else:
+                            # No extension and not .DS_Store - treat as directory
+                            destination.mkdir(parents=True, exist_ok=True)
+                except OSError as e:
+                    raise OSError(f"Failed to create '{destination}': {e}") from e
