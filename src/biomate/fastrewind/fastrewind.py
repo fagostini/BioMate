@@ -513,7 +513,7 @@ def parse_fastq_groups(
     with dnaio.open(*sorted(filenames), open_threads=threads) as reader:
         # Procedure for single-end reads
         if len(filenames) == 1:
-            for buffer_counter, (r1) in enumerate(reader, start=1):
+            for buffer_counter, r1 in enumerate(reader, start=1):
                 split_name, indexes, umis = process_read_name(r1.name)
                 # Assume the index is at the end
                 indexes = f"{sample_recipe['I1']}"
@@ -865,10 +865,10 @@ def preprocess_and_write_bcls(
                                         opened_files[cycle].write(
                                             bytes([int(bits_string, 2)])
                                         )
-                                    except Exception:
+                                    except (ValueError, OSError) as e:
                                         raise RuntimeError(
                                             f"Error: something went wrong while writing the byte to file!\nCycle: {cycle} File: {opened_files[cycle].name} Record: {read.qualities}"
-                                        )
+                                        ) from e
                                 # Add N (00) with lowest quality (00) for the cycles beyond the read length
                                 if read_length < total_cycles:
                                     for cycle in range(read_length, total_cycles):
@@ -974,6 +974,10 @@ def write_run_info_xml(
     desc: str | None = None,
 ) -> None:
     """Write the RunInfo.xml file."""
+    if desc is None:
+        raise ValueError(
+            "desc (sample read name) is required for generating RunInfo.xml"
+        )
     xml_path.parent.mkdir(exist_ok=True, parents=True)
     fields = parse_seqname_fields(desc)
     run_id = generate_run_id(desc)
@@ -1061,10 +1065,13 @@ def main(args: argparse.Namespace) -> None:
     sample_lane = list(lanes_dict)[0]
     sample_name = list(lanes_dict[sample_lane])[0]
     sample_file = sorted(lanes_dict[sample_lane][sample_name])[0]
+    sample_read = None
     with dnaio.open(sample_file) as reader:
         for read in reader:
             sample_read = read.name
             break
+    if sample_read is None:
+        raise ValueError(f"No reads found in sample file {sample_file}")
 
     # Dictionary containing all unique tiles per lane
     tiles_by_lane = defaultdict(set)
@@ -1190,7 +1197,7 @@ def main(args: argparse.Namespace) -> None:
         lane_count,
         SURFACE_COUNT,
         SWATH_COUNT,
-        TILE_COUNT,  # alternatevily, int(tile_count / surface_count / swath_count)
+        TILE_COUNT,  # alternatively: int(tile_count / surface_count / swath_count)
         tile_names,
         sample_read,
     )

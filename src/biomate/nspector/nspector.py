@@ -11,29 +11,42 @@ import altair as alt
 from biomate.setup import setup_logging
 
 
-def validate_args(args: argparse.Namespace) -> argparse.Namespace:
-    """
-    Validate the command line arguments.
+def extract_tile_coordinates(read_name: str) -> tuple[int, int, int] | None:
+    """Extract tile and x, y coordinates from Illumina read name.
 
+    Illumina read name format: instrument:run:flowcell:lane:tile:x:y
+    Returns (tile, x, y) or None if name format is invalid.
     """
+    try:
+        # Get the first part before any spaces (some formats have additional info)
+        base_name = read_name.split(" ")[0]
+        parts = base_name.split(":")
+        if len(parts) < 7:
+            return None
+        return (int(parts[4]), int(parts[5]), int(parts[6]))
+    except (IndexError, ValueError):
+        return None
+
+
+def validate_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Validate the command line arguments."""
     for input_file in args.input:
         if not input_file.exists():
             raise argparse.ArgumentTypeError(f"Input file {input_file} does not exist.")
         elif not input_file.is_file():
             raise argparse.ArgumentTypeError(f"Input path {input_file} is not a file.")
 
-    if not args.output.exists():
+    if args.output.exists() and not args.output.is_dir():
+        raise argparse.ArgumentTypeError(
+            f"Output path {args.output} must be a directory."
+        )
+    elif not args.output.exists():
         logging.info(f"Output directory {args.output} does not exist. Creating it...")
         args.output.mkdir(parents=True, exist_ok=True)
     else:
-        if not args.output.is_dir():
-            raise argparse.ArgumentTypeError(
-                f"Output path {args.output} must be a directory."
-            )
-        else:
-            logging.warning(
-                f"Output directory {args.output} already exists. Results may be overwritten."
-            )
+        logging.warning(
+            f"Output directory {args.output} already exists. Results may be overwritten."
+        )
     return args
 
 
@@ -92,52 +105,52 @@ def main(args: argparse.Namespace) -> None:
 
     for input_file in args.input:
         logging.debug(f"Processing file: {input_file}")
-        tiles = []
-        x_coords = []
-        y_coords = []
-        cycles = []
-        skip_file = False
+        records_with_n = []
+        has_format_error = False
+
         with dnaio.open(input_file) as reader:
             for record in reader:
-                matches = [i for i, c in enumerate(record.sequence) if c == "N"]
-                if matches:
-                    # Illumina read name format: instrument:run:flowcell:lane:tile:x:y
-                    parts = record.name.split(" ")[0].split(":")
-                    if len(parts) < 7:
-                        skip_file = True
+                n_positions = [i for i, c in enumerate(record.sequence) if c == "N"]
+                if n_positions:
+                    coords = extract_tile_coordinates(record.name)
+                    if coords is None:
+                        logging.warning(
+                            f"Skipping file {input_file.name} due to read name format issues."
+                        )
+                        has_format_error = True
                         break
-                    tiles.append(int(parts[4]))
-                    x_coords.append(int(parts[5]))
-                    y_coords.append(int(parts[6]))
-                    cycles.append(matches)
+                    tile, x, y = coords
+                    records_with_n.append(
+                        {
+                            "tile": tile,
+                            "x": x,
+                            "y": y,
+                            "cycles": n_positions,
+                        }
+                    )
 
-        if skip_file:
-            logging.warning(
-                f"Skipping file {input_file.name} due to read name format issues."
-            )
+        # Skip if we encountered format errors
+        if has_format_error:
             continue
 
-        if not tiles:
+        if not records_with_n:
             logging.warning(f"No N bases found in {input_file}. Skipping analysis.")
             continue
 
-        logging.debug(f"Found {len(tiles)} reads with N bases in {input_file}.")
+        logging.debug(
+            f"Found {len(records_with_n)} reads with N bases in {input_file}."
+        )
 
         data = (
-            polars.DataFrame(
-                {
-                    "tile": tiles,
-                    "x": x_coords,
-                    "y": y_coords,
-                    "cycles": cycles,
-                }
-            )
+            polars.DataFrame(records_with_n)
             .explode("cycles")
             .with_columns(
-                polars.col("tile").cast(polars.UInt16),
-                polars.col("x").cast(polars.UInt32),
-                polars.col("y").cast(polars.UInt32),
-                polars.col("cycles").cast(polars.UInt16),
+                [
+                    polars.col("tile").cast(polars.UInt16),
+                    polars.col("x").cast(polars.UInt32),
+                    polars.col("y").cast(polars.UInt32),
+                    polars.col("cycles").cast(polars.UInt16),
+                ]
             )
         )
 
@@ -175,11 +188,15 @@ def main(args: argparse.Namespace) -> None:
                 polars.when(polars.col("n_sequences").is_not_null())
                 .then(polars.col("n_sequences"))
                 .otherwise(polars.col("n_filler"))
-                .alias("n_sequences"),
-                polars.col("cycles_right").alias("cycles").cast(polars.UInt16),
-                polars.col("tile_right").alias("tile").cast(polars.UInt16),
+                .alias("n_sequences_filled")
             )
-            .select(["cycles", "tile", "n_sequences"])
+            .select(
+                [
+                    "cycles",
+                    "tile",
+                    polars.col("n_sequences_filled").alias("n_sequences"),
+                ]
+            )
             .plot.line(
                 x=alt.X("cycles", title="Cycle"),
                 y=alt.Y("n_sequences", title="Number of Sequences").scale(

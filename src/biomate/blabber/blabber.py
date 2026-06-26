@@ -113,14 +113,14 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
 
 
 def parse_sequence_mask(
-    mask_string: str, index1: str = None, index2: str = None
+    mask_string: str, index1: str | None = None, index2: str | None = None
 ) -> dict:
     """
     Parse the sequence mask.
 
 
     """
-    mask_dict = {
+    mask_dict: dict[str, int | str] = {
         "U1": 0,
         "R1B": 0,
         "R1": 0,
@@ -365,12 +365,12 @@ def generate_dnaio_fastq_files(
     output_files: list[pathlib.Path],
     nucleotides: set,
     seq_number: int,
-    recipe: list[int],
+    recipe: dict[str, int | str],
     prefix: str,
     extension: str,
-    tile: str = None,
+    tile: str | None = None,
     sample: bool = False,
-    sequences: list = None,
+    sequences: list | None = None,
 ) -> list:
     """Generate FASTQ sequence files using the dnaio library for I/O."""
     sampled_sequences = []
@@ -383,11 +383,12 @@ def generate_dnaio_fastq_files(
         str(x)
         for x in random.choice(range(1000, TILE_HEIGHT * 10 + 1), k, replace=False)
     ]
+    assert tile is not None, "tile must be provided"
     available_tile_positions = product([tile], available_pos_x, available_pos_y)
-    read1_len = recipe["R1"]
-    read2_len = recipe["R2"]
-    umi1 = recipe["U1"]
-    umi2 = recipe["U2"]
+    read1_len = int(recipe["R1"])
+    read2_len = int(recipe["R2"])
+    umi1 = int(recipe["U1"])
+    umi2 = int(recipe["U2"])
     logging.debug(
         f"Generating sequence for {[x.name for x in output_files]} using tile(s): {tile}"
     )
@@ -420,9 +421,7 @@ def generate_dnaio_fastq_files(
                     )
                 )
             writer.write(*reads)
-            # Tainting procedure
-            # if sample and random.randint(10) == 0:
-            #     sampled_sequences.append(tuple(reads))
+            # TODO: implement tainting (append reads to sampled_sequences when --taint is set)
     return sampled_sequences
 
 
@@ -439,7 +438,7 @@ def main(args: argparse.Namespace) -> None:
     setup_logging(args)
     logging.info("Running blabber module...")
 
-    random.seed(args.random_seed) if args.random_seed else random.seed()
+    random.seed(args.random_seed)
     nucleotides = {x for x in args.alphabet.upper()}
 
     if args.format == "fasta":
@@ -485,17 +484,15 @@ def main(args: argparse.Namespace) -> None:
             prefix = f"{field1}:{field2}:{field3}"
         else:
             sample_sheet = None
-            prefix = "".join(
-                list(random.choice([x for x in string.ascii_uppercase], size=2))
-                + [str(random.randint(10000, 99999))]
-                + [":"]
-                + [str(random.randint(100, 999))]
-                + [":"]
-                + [str(random.randint(10, 99))]
-                + list(random.choice([x for x in string.ascii_uppercase], size=6))
+            field1 = "".join(random.choice(list(string.ascii_uppercase), size=2)) + str(
+                random.randint(10000, 99999)
             )
-
-        # prefix += "".join([":"] + [str(random.randint(1, 9))]) # Lane number
+            field2 = str(random.randint(100, 999))
+            field3 = str(random.randint(10, 99)) + "".join(
+                random.choice(list(string.ascii_uppercase), size=6)
+            )
+            prefix = f"{field1}:{field2}:{field3}"
+            extension = f" 1:N:0:{'N' * 8}" if args.format == "fastq-ext" else ""
 
         if sample_sheet:
             # unique_lanes = defaultdict(set)
@@ -570,36 +567,7 @@ def main(args: argparse.Namespace) -> None:
                         args.taint,
                     )
                     taint_sequences.setdefault(lane_key, []).append(sampled_sequences)
-            # taint_sequences = {
-            #     key: value
-            #     for key, values in taint_sequences.items()
-            #     if len(unique_lanes[key]) > 1
-            #     for value in values
-            #     if value
-            # }
-            # if args.taint and taint_sequences:
-            #     for lane, sequences in taint_sequences.items():
-            #         logging.debug(
-            #             f"Adding {len(sequences)} sequences to the undetermined files for lane {lane}."
-            #         )
-            # for lane in unique_lanes:
-            #     recipe = [
-            #         int(x) for x in sorted(list(unique_lanes[lane]))[0].split("-")
-            #     ]
-            #     output_files = [
-            #         output_basepath.joinpath(f"Undetermined_{lane}_R{i}_001.fastq.gz")
-            #         for i, _ in enumerate(recipe, start=1)
-            #     ]
-
-            #     _ = generate_dnaio_fastq_files(
-            #         output_files,
-            #         nucleotides,
-            #         args.seq_number,
-            #         recipe,
-            #         prefix,
-            #         extension,
-            #         sequences=taint_sequences.get(lane, []),
-            #     )
+            # TODO: generate Undetermined FASTQ files with taint_sequences when --taint is implemented
 
         else:
             sequences = set()
