@@ -13,6 +13,15 @@ from jellyfish import levenshtein_distance
 from biomate.setup import setup_logging
 
 
+def _detect_input_type(filename: str) -> str | None:
+    """Detect the input file type based on filename."""
+    if re.match(r".*\.f(ast)?q(.gz)$", filename):
+        return "FASTQ"
+    elif re.match(r".*\.f(ast)?a(.gz)?$", filename):
+        return "FASTA"
+    return None
+
+
 def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Initialise module subparser."""
     parser = subparsers.add_parser(
@@ -166,12 +175,12 @@ def expand_regex(string: str) -> set[str]:
     return set("".join(x) for x in product(*elements_list))
 
 
-def validate_indexes_distance(patterns: list, distance: int) -> list[str, int]:
+def validate_indexes_distance(patterns: list, distance: int) -> None:
     """Check all indexes for compatible distances."""
     for query in patterns:
         expanded_query = expand_regex(query)
         for subject in patterns:
-            print(f"Processing: {query} {subject}")
+            logging.debug(f"Validating: {query} vs {subject}")
             if subject == query:
                 continue
             expanded_subject = expand_regex(subject)
@@ -183,35 +192,32 @@ def validate_indexes_distance(patterns: list, distance: int) -> list[str, int]:
                         for s in expanded_subject
                     ]
                 ):
-                    raise Exception(
+                    raise ValueError(
                         f"Conflicting patterns '{query}' and '{subject}' at Levenshtein distance {distance}!"
                     )
-                else:
-                    print("No conflicts found!")
+                logging.debug(f"No conflicts found for {query} vs {subject}")
             else:
                 all_ok = False
                 valid_distance = distance
                 while not all_ok and valid_distance >= 0:
-                    all_ok = all(
-                        [
-                            levenshtein_distance(q, s) > valid_distance
-                            for q in expanded_query
-                            for s in expanded_subject
-                        ]
-                    )
-                    print(
-                        f"{expanded_query} {subject} {[levenshtein_distance(q, s) for q in expanded_query for s in expanded_subject]}"
+                    distances = [
+                        levenshtein_distance(q, s)
+                        for q in expanded_query
+                        for s in expanded_subject
+                    ]
+                    all_ok = all(d > valid_distance for d in distances)
+                    logging.debug(
+                        f"Patterns: {query} vs {subject}, distances: {distances}, threshold: {valid_distance}"
                     )
                     if not all_ok:
                         valid_distance -= 1
-                        print(f"Lowering distance to {valid_distance}")
-                print(f"{all_ok} {valid_distance}")
                 if valid_distance < 0:
-                    raise Exception(
+                    raise ValueError(
                         f"Conflicting patterns '{query}' and '{subject}' at Levenshtein distance 0!"
                     )
-                else:
-                    print(f"New distance: {valid_distance}")
+                logging.debug(
+                    f"Minimum safe distance between {query} and {subject}: {valid_distance}"
+                )
 
 
 def main(args: argparse.Namespace) -> None:
@@ -221,14 +227,8 @@ def main(args: argparse.Namespace) -> None:
     setup_logging(args)
 
     logging.info(f"Input file: {args.input}")
-    input_type = (
-        "FASTQ"
-        if re.match(r".*\.f(ast)?q(.gz)$", args.input.name)
-        else "FASTA"
-        if re.match(r".*\.f(ast)?a(.gz)?$", args.input.name)
-        else None
-    )
-    logging.info(f"Output type: {input_type}")
+    input_type = _detect_input_type(args.input.name)
+    logging.info(f"Input type: {input_type}")
     logging.info(f"Output file: {args.output}")
     patterns_list = []
     if args.index_regex:
@@ -270,6 +270,6 @@ def main(args: argparse.Namespace) -> None:
         else:
             for key, value in results.items():
                 for seq, cnt in value.most_common():
-                    print(
+                    logging.info(
                         f"{key} {' '.join(list(seq))} {cnt} {cnt / total_records:.2%}"
                     )
