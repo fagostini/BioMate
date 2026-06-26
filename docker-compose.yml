@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  biomate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: biomate:latest
+    container_name: biomate
+    volumes:
+      - ./data:/data
+      - ./results:/results
+      - ./inputs:/inputs
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - biomate-network
+    # Uncomment to run interactively
+    # stdin_open: true
+    # tty: true
+
+networks:
+  biomate-network:
+    driver: bridge
