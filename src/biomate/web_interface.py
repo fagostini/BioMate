@@ -474,13 +474,13 @@ def validate_module_name(module_name: str) -> bool:
 
 def validate_command_args(args: List[str]) -> bool:
     """Validate command arguments to prevent injection attacks.
-    
+
     Ensures arguments don't contain shell metacharacters that would bypass
     subprocess.run's protection.
     """
     # Dangerous patterns that could indicate shell injection attempts
     dangerous_patterns = [";", "|", "&", "$", "`", "\n", "\r", "&&", "||"]
-    
+
     for arg in args:
         for pattern in dangerous_patterns:
             if pattern in arg:
@@ -490,7 +490,7 @@ def validate_command_args(args: List[str]) -> bool:
 
 def run_biomate(module_name: str, args: List[str]) -> Dict[str, Any]:
     """Run a biomate subcommand and return stdout / stderr / returncode.
-    
+
     Validates module name and arguments to prevent injection attacks.
     """
     # Validate module name
@@ -501,7 +501,7 @@ def run_biomate(module_name: str, args: List[str]) -> Dict[str, Any]:
             "stdout": "",
             "stderr": f"Invalid module name: {module_name}",
         }
-    
+
     # Validate arguments
     if not validate_command_args(args):
         return {
@@ -510,7 +510,7 @@ def run_biomate(module_name: str, args: List[str]) -> Dict[str, Any]:
             "stdout": "",
             "stderr": "Invalid arguments detected. Command injection prevented.",
         }
-    
+
     cmd = ["biomate", module_name] + args
     try:
         proc = subprocess.run(
@@ -586,11 +586,15 @@ _loader = None
 
 class ParamDict(dict):
     """A dict subclass that supports attribute access for Tornado templates."""
+
     def __getattr__(self, key):
         try:
             return self[key]
         except KeyError:
-            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{key}'")
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '{key}'"
+            )
+
     def __setattr__(self, key, value):
         self[key] = value
 
@@ -603,10 +607,13 @@ def _module_list() -> list:
         for p in m["parameters"]:
             if "is_path" not in p:
                 text = " ".join(
-                    p.get(k, "")
-                    for k in ("label", "cli_name", "form_name", "help")
+                    p.get(k, "") for k in ("label", "cli_name", "form_name", "help")
                 ).lower()
-                params.append(ParamDict({**p, "is_path": any(kw in text for kw in _path_keywords)}))
+                params.append(
+                    ParamDict(
+                        {**p, "is_path": any(kw in text for kw in _path_keywords)}
+                    )
+                )
             else:
                 params.append(ParamDict(p))
         result.append({**m, "parameters": params})
@@ -627,7 +634,7 @@ def get_loader() -> tornado.template.Loader:
 
 class SecurityHeadersMixin(tornado.web.RequestHandler):
     """Mixin to add security headers to all responses."""
-    
+
     def set_default_headers(self):
         """Set security-related HTTP headers."""
         # Prevent MIME type sniffing
@@ -637,9 +644,14 @@ class SecurityHeadersMixin(tornado.web.RequestHandler):
         # Enable XSS protection in older browsers
         self.set_header("X-XSS-Protection", "1; mode=block")
         # Strict Transport Security (if using HTTPS)
-        self.set_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        self.set_header(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
         # Content Security Policy - strict by default
-        self.set_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
+        self.set_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+        )
         # Referrer Policy
         self.set_header("Referrer-Policy", "strict-origin-when-cross-origin")
 
@@ -675,10 +687,11 @@ class ModuleHandler(SecurityHeadersMixin):
                 "is_boolean": p.get("param_type") == "boolean",
             }
         from json import dumps
+
         self.write(
             t.generate(
                 module=mod,
-                param_meta=json.dumps(param_meta).encode('utf-8'),
+                param_meta=json.dumps(param_meta).encode("utf-8"),
                 result=None,
                 gs_version="0.3.0",
                 modules=all_modules,
@@ -738,7 +751,7 @@ class ModuleHandler(SecurityHeadersMixin):
         self.write(
             t.generate(
                 module=mod,
-                param_meta=json.dumps(param_meta).encode('utf-8'),
+                param_meta=json.dumps(param_meta).encode("utf-8"),
                 result=result,
                 gs_version="0.3.0",
                 modules=all_modules,
@@ -758,9 +771,7 @@ class ModuleHandler(SecurityHeadersMixin):
 # ---------------------------------------------------------------------------
 
 
-def make_app(
-    host: str = "localhost", port: int = 8080
-) -> tornado.web.Application:
+def make_app(host: str = "localhost", port: int = 8080) -> tornado.web.Application:
     """Create and return the Tornado application with security settings."""
     return tornado.web.Application(
         [
@@ -846,7 +857,9 @@ def main(args: argparse.Namespace) -> None:
         context.load_cert_chain(certfile, keyfile)
         http_server = tornado.httpserver.HTTPServer(app, ssl_options=context)
         http_server.listen(args.port, address=args.host)
-        print(f"BioMate Web Interface (HTTPS) running at https://{args.host}:{args.port}")
+        print(
+            f"BioMate Web Interface (HTTPS) running at https://{args.host}:{args.port}"
+        )
     else:
         http_server = tornado.httpserver.HTTPServer(app)
         http_server.listen(args.port, address=args.host)
