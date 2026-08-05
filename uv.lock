@@ -261,6 +261,7 @@ dependencies = [
     { name = "polars" },
     { name = "regex" },
     { name = "rich" },
+    { name = "tornado" },
 ]
 
 [package.dev-dependencies]
@@ -291,6 +292,7 @@ requires-dist = [
     { name = "polars", specifier = ">=1.30.0" },
     { name = "regex", specifier = ">=2024.11.6" },
     { name = "rich", specifier = ">=14.0.0" },
+    { name = "tornado", specifier = ">=6.5.5" },
 ]
 
 [package.metadata.requires-dev]

@@ -20,11 +20,14 @@ RUN BUILD_TIME=$(date) && \
 # Install build package
 RUN python3 -m pip install --break-system-packages build
 
-# Install BioMate package
+# Install BioMate package from local source
 COPY . /app
 WORKDIR /app
 RUN python3 -m pip install --break-system-packages .
 
-# Set the default command
+# Expose the web interface port
+EXPOSE 8080
+
+# Run the web interface
 ENTRYPOINT ["biomate"]
-CMD ["--help"]
+CMD ["web-interface", "--host", "0.0.0.0", "--port", "8080"]

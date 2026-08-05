@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+
+{% block title %}BioMate - {{ module['title'] }}{% end %}
+
+{% block stuff %}
+<div class="row">
+  <div class="col-lg-8">
+    <h1 class="mt-3">{{ module['title'] }}</h1>
+    <p>{{ module['description'] }}</p>
+
+    <form method="POST" action="/module/{{ module['name'] }}" class="mt-4" id="module-form">
+      <table class="table table-striped">
+        {% for param in module['parameters'] %}
+        {% set sw = param.get('show_when', {}) %}
+        <tr data-param-name="{{ param['form_name'] }}"
+            data-show-when-param="{{ sw.get('parameter', '') }}" data-show-when-value="{{ sw.get('value', '') }}"
+            style="display:{% if not sw.get('parameter') %}table-row{% else %}none{% end %};">
+          <th scope="row" class="text-end" style="width:30%;">
+            <label for="{{ param['form_name'] }}" class="mb-0">
+              {{ param['label'] }}
+              {% if param.get('help', '') %}
+              <br><small class="text-muted"><i>{{ param['help'] }}</i></small>
+              {% end %}
+            </label>
+          </th>
+          <td>
+            {% if param['param_type'] == 'select' %}
+            <select class="form-select" id="{{ param['form_name'] }}" name="{{ param['form_name'] }}">
+              {% for opt in param.get('options', []) %}
+              <option value="{{ opt }}"{% if (opt == param_overrides.get(param['form_name'], '')) %} selected{% end %}>{{ opt }}</option>
+              {% end %}
+            </select>
+            {% elif param['param_type'] == 'boolean' %}
+            <div class="form-check form-switch mt-1">
+              <input type="checkbox" class="form-check-input" id="{{ param['form_name'] }}" name="{{ param['form_name'] }}" value="true" {% if param_overrides.get(param['form_name'], '') == 'true' %}checked{% end %}>
+              <label class="form-check-label" for="{{ param['form_name'] }}">{{ 'Yes' if param_overrides.get(param['form_name'], '') == 'true' else 'No' }}</label>
+            </div>
+            {% elif param['param_type'] == 'number' %}
+            <input type="number"
+                    class="form-control"
+                    id="{{ param['form_name'] }}"
+                    name="{{ param['form_name'] }}"
+                    value="{{ param_overrides.get(param['form_name'], param.get('default', '')) }}">
+            {% elif param.is_path %}
+            <div class="input-group path-control">
+              <input type="text"
+                     class="form-control"
+                     id="{{ param['form_name'] }}"
+                     name="{{ param['form_name'] }}"
+                     value="{{ param_overrides.get(param['form_name'], param.get('default', '')) }}"
+                     placeholder="Enter or select a path">
+              <button type="button"
+                      class="btn btn-outline-secondary pick-folder"
+                      data-param="{{ param['form_name'] }}">
+                Browse
+              </button>
+            </div>
+            {% else %}
+            <input type="text"
+                   class="form-control"
+                   id="{{ param['form_name'] }}"
+                   name="{{ param['form_name'] }}"
+                   value="{{ param_overrides.get(param['form_name'], param.get('default', '')) }}">
+            {% end %}
+          </td>
+        </tr>
+        {% end %}
+      </table>
+
+      <div id="command-preview" class="alert alert-light border mt-3 mb-3" style="display:none;">
+        <div class="text-muted small mb-1">Command</div>
+        <code id="command-text" class="fw-semibold"></code>
+      </div>
+
+      <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-primary btn-lg">Run Tool</button>
+        <button type="button" class="btn btn-outline-secondary btn-lg" id="reset-params">Reset Parameters</button>
+      </div>
+    </form>
+
+    {% if result %}
+    <div class="alert alert-{% if result['success'] %}success{% else %}danger{% end %} mt-4" role="alert">
+      <h4 class="alert-heading">
+        {% if result['success'] %}Success{% else %}Error{% end %}
+      </h4>
+      <p>Return code: {{ result['returncode'] }}</p>
+      <hr>
+      {% if result.get('stdout', '') %}
+      <h5>Output:</h5>
+      <pre class="bg-light p-3">{{ result['stdout'] }}</pre>
+      {% end %}
+      {% if result.get('stderr', '') %}
+      <h5>Errors:</h5>
+      <p class="text-danger">{{ result['stderr'] }}</p>
+      {% end %}
+    </div>
+    {% end %}
+  </div>
+</div>
+{% end %}
+
+{% block js %}
+<script id="param-raw-data" type="application/json">{{ param_meta }}</script>
+<script>
+$(document).ready(function() {
+  function decodeHtmlEntities(str) {
+    var textarea = document.createElement('textarea');
+    textarea.innerHTML = str;
+    return textarea.value;
+  }
+  try {
+    var paramMeta = JSON.parse(decodeHtmlEntities($('#param-raw-data').text()));
+  } catch(e) {
+    console.error('Failed to parse param meta:', e);
+    var paramMeta = {};
+  }
+  var values = {};
+
+  function getValues() {
+    var v = {};
+    document.querySelectorAll('select, input:not([type="file"]:not([type="range"]))').forEach(function(el) {
+      var name = el.name || el.id;
+      if (name && name !== '') {
+        v[name] = el.type === 'checkbox'
+          ? (el.checked ? 'true' : '')
+          : el.value;
+      }
+    });
+    return v;
+  }
+
+  function updateVisibility() {
+    values = getValues();
+    $('[data-show-when-param]').each(function() {
+      var param = $(this).attr('data-show-when-param');
+      var value = $(this).attr('data-show-when-value');
+      if (value && values[param] === value && param) $(this).show();
+      else if (param && value) $(this).hide();
+    });
+  }
+
+  function updatePreview() {
+    values = getValues();
+    var parts = ['biomate', '{{ module['name'] }}'];
+
+    for (var formName in paramMeta) {
+      var meta = paramMeta[formName];
+      var val = values[formName];
+      var defaultVal = meta.default;
+
+      // Subcommands: emit the value directly (no --prefix)
+      if (meta.cli_name === '_subcommand' && val && !val.startsWith('-')) {
+        var subIdx = parts.indexOf(val);
+        if (subIdx !== -1) parts.splice(subIdx, 1);
+        parts.push(val);
+        continue;
+      }
+
+      if (meta.is_boolean) {
+        // Boolean params: show flag only when checked (true = "true")
+        if (val === 'true') {
+          var cmdIdx = parts.indexOf('--' + meta.cli_name);
+          if (cmdIdx === -1) parts.push('--' + meta.cli_name);
+        }
+      } else {
+        // text / number / select params: show arg when value is set
+        if (!val && defaultVal) {
+          val = defaultVal;
+        }
+        if (val) {
+          var cmdIdx = parts.indexOf('--' + meta.cli_name);
+          if (cmdIdx !== -1) {
+            parts.splice(cmdIdx, 2);
+          }
+          parts.push('--' + meta.cli_name);
+          parts.push(shlexQuote(val));
+        }
+      }
+    }
+
+    var cmd = parts.filter(function(p) { return p !== ''; }).join(' ');
+    $('#command-text').text(cmd);
+    $('#command-preview').show();
+  }
+
+  function shlexQuote(s) {
+    if (s === '') return "''";
+    if (/^[a-zA-Z0-9_.\-/:]+$/.test(s)) return s;
+    return "'" + s.replace(/'/g, "'\\''") + "'";
+  }
+
+  updateVisibility();
+  updatePreview();
+  $(document).on('change input', 'select, input[type="text"], input[type="number"], input[type="checkbox"]', function() {
+    updateVisibility();
+    updatePreview();
+  });
+
+  // Reset button - revert all fields to their default values
+  $('#reset-params').on('click', function() {
+    for (var formName in paramMeta) {
+      var meta = paramMeta[formName];
+      var defaultVal = meta.default;
+      if (meta.is_boolean) {
+        var $chk = $('#' + formName);
+        $chk.prop('checked', defaultVal === 'true');
+        $chk.closest('.form-check').find('label').text(defaultVal === 'true' ? 'Yes' : 'No');
+      } else if (formName === '_subcommand') {
+        // select: set dropdown to default
+        $('#' + formName).val(defaultVal);
+      } else {
+        $('#' + formName).val(defaultVal);
+      }
+    }
+  });
+
+  // Folder picker - uses Web File System Access API when available
+  // (Chrome/Edge) with manual path entry as fallback.
+  $(document).on('click', '.pick-folder', async function() {
+    var $btn = $(this);
+    var paramName = $btn.data('param');
+    var $field = $('#' + paramName);
+
+    // Try the Web File System Access API (Chrome/Edge)
+    if ('showDirectoryPicker' in window) {
+      try {
+        var dirHandle = await window.showDirectoryPicker();
+        var dirName = dirHandle.name;
+        // Try to get the full path - we only get the directory name
+        // The user may need to type the full path manually
+        $field.val(dirName);
+      } catch (e) {
+        // User cancelled or API failed - do nothing
+        return;
+      }
+    } else {
+      // For browsers without showDirectoryPicker, use a hidden file input
+      // placed outside the form so it won't upload
+      $('<input type="file" webkitdirectory style="display:none">')
+        .on('change', function() {
+          var files = this.files;
+          if (!files || files.length === 0) return;
+
+          var first = files[0];
+          var relPath = first.webkitRelativePath || first.name;
+          var parts = relPath.split('/');
+          parts.pop();
+          $field.val(parts.length > 0 ? parts.join('/') : relPath);
+          $(this).remove();
+        })
+        .appendTo('body')
+        .trigger('click');
+    }
+  });
+});
+</script>
+{% end %}
