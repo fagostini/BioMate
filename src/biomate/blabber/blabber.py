@@ -391,7 +391,7 @@ def generate_dnaio_fastq_files(
         List of sampled sequences for tainting (if taint=True), empty list otherwise
     """
     sampled_sequences = []
-    k = int(numpy.ceil(numpy.sqrt(seq_number)))
+    k = int(np.ceil(np.sqrt(seq_number)))
     available_pos_x = [
         str(x)
         for x in rng.choice(range(1000, TILE_WIDTH * 10 + 1), size=k, replace=False)
