@@ -371,10 +371,25 @@ def generate_dnaio_fastq_files(
     prefix: str,
     extension: str,
     tile: str | None = None,
-    sample: bool = False,
+    taint: bool = False,
     sequences: list | None = None,
 ) -> list:
-    """Generate FASTQ sequence files using the dnaio library for I/O."""
+    """Generate FASTQ sequence files using the dnaio library for I/O.
+    
+    Args:
+        output_files: List of output file paths
+        nucleotides: Set of allowed nucleotides
+        seq_number: Number of sequences to generate
+        recipe: Recipe dict with R1, R2, U1, U2 lengths
+        prefix: Read name prefix
+        extension: Read name extension
+        tile: Tile identifier
+        taint: If True, return ~10% of sequences for contamination simulation
+        sequences: Pre-generated sequences to use
+    
+    Returns:
+        List of sampled sequences for tainting (if taint=True), empty list otherwise
+    """
     sampled_sequences = []
     k = int(numpy.ceil(numpy.sqrt(seq_number)))
     available_pos_x = [
@@ -423,7 +438,11 @@ def generate_dnaio_fastq_files(
                     )
                 )
             writer.write(*reads)
-            # TODO: implement tainting (append reads to sampled_sequences when --taint is set)
+            
+            # Collect ~10% of reads for taint contamination if enabled
+            if taint and rng.random() < 0.1:
+                sampled_sequences.append(reads)
+    
     return sampled_sequences
 
 
@@ -431,6 +450,65 @@ def split(a, n):
     """Split a list into n approximately equal parts."""
     k, m = divmod(len(a), n)
     return (a[i * k + min(i, m) : (i + 1) * k + min(i + 1, m)] for i in range(n))
+
+
+def generate_undetermined_files(
+    output_basepath: pathlib.Path,
+    taint_sequences: dict[str, list],
+    taint_rate: float = 0.1,
+) -> None:
+    """Generate Undetermined FASTQ files with tainted sequences from other samples.
+    
+    Creates Undetermined_R1_001.fastq.gz and Undetermined_R2_001.fastq.gz in each lane
+    directory, containing approximately taint_rate*100% reads from other samples.
+    This simulates index hopping/cross-project contamination (~10% by default).
+    
+    Args:
+        output_basepath: Base output path containing lane directories
+        taint_sequences: Dict mapping lane_key to list of read samples from all projects
+        taint_rate: Fraction of reads to include in undetermined files (default 0.1 = 10%)
+    """
+    for lane_key, sample_sequences in taint_sequences.items():
+        # Extract lane number from key (format: S0_L001)
+        lane_match = re.search(r"L(\d+)", lane_key)
+        if not lane_match:
+            logging.warning(f"Could not extract lane number from {lane_key}")
+            continue
+        
+        lane_num = int(lane_match.group(1))
+        
+        # Pool sequences from all samples in this lane
+        all_reads = []
+        for sample_list in sample_sequences:
+            for reads in sample_list:
+                all_reads.extend(reads if isinstance(reads, list) else [reads])
+        
+        if not all_reads:
+            logging.debug(f"No taint sequences for lane {lane_num}")
+            continue
+        
+        # Shuffle and take taint_rate fraction
+        rng.shuffle(all_reads)
+        n_taint = max(1, int(len(all_reads) * taint_rate))
+        taint_pool = all_reads[:n_taint]
+        
+        logging.info(f"Writing {len(taint_pool)} tainted sequences to Undetermined files for lane {lane_num}")
+        
+        # Write undetermined files to the parent directory
+        undetermined_dir = output_basepath.parent / "Demultiplexing"
+        undetermined_r1 = undetermined_dir / f"Undetermined_S0_L{lane_num:03d}_R1_001.fastq.gz"
+        undetermined_r2 = undetermined_dir / f"Undetermined_S0_L{lane_num:03d}_R2_001.fastq.gz"
+        
+        undetermined_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Write undetermined files
+        with dnaio.open(str(undetermined_r1), str(undetermined_r2), mode="w", fileformat="fastq") as writer:
+            for read_pair in taint_pool:
+                # read_pair is a list of SequenceRecord(s), typically [R1, R2] or [R1]
+                if isinstance(read_pair, list):
+                    writer.write(*read_pair)
+                else:
+                    writer.write(read_pair)
 
 
 def main(args: argparse.Namespace) -> None:
@@ -570,7 +648,10 @@ def main(args: argparse.Namespace) -> None:
                         args.taint,
                     )
                     taint_sequences.setdefault(lane_key, []).append(sampled_sequences)
-            # TODO: generate Undetermined FASTQ files with taint_sequences when --taint is implemented
+            
+            # Generate Undetermined FASTQ files with tainted sequences if --taint is enabled
+            if args.taint and taint_sequences:
+                generate_undetermined_files(output_basepath, taint_sequences)
 
         else:
             sequences = set()
