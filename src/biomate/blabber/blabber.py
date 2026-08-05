@@ -12,8 +12,7 @@ from datetime import datetime
 from itertools import product, batched
 import dnaio
 import polars
-import numpy
-from numpy import random
+import numpy as np
 
 from biomate.setup import setup_logging
 
@@ -22,6 +21,9 @@ TILE_HEIGHT = 160  # 2879
 SURFACE_COUNT = 2
 SWATH_COUNT = 4
 TILE_COUNT = 16
+
+# Module-level random number generator (initialized in main())
+rng = np.random.default_rng()
 
 
 def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -230,12 +232,12 @@ def generate_flowcell_id(instrument: str = "NovaSeq") -> str:
     Generate the flowcell identifier.
     """
     return "".join(
-        [str(random.randint(10, 99))]
+        [str(rng.integers(10, 100))]
         + [
-            string.ascii_letters[random.randint(len(string.ascii_letters))].upper()
+            string.ascii_letters[rng.integers(len(string.ascii_letters))].upper()
             for i in range(6)
         ]
-        + [str(random.randint(10))]
+        + [str(rng.integers(0, 10))]
     )
 
 
@@ -356,7 +358,7 @@ def generate_sequences_set(nucleotides: set, length: int, number: int) -> set:
     """
     sequences = set()
     while len(sequences) < number:
-        seq = "".join(random.choice(list(nucleotides), size=length))
+        seq = "".join(rng.choice(list(nucleotides), size=length))
         sequences.add(seq)
     return sequences
 
@@ -377,11 +379,11 @@ def generate_dnaio_fastq_files(
     k = int(numpy.ceil(numpy.sqrt(seq_number)))
     available_pos_x = [
         str(x)
-        for x in random.choice(range(1000, TILE_WIDTH * 10 + 1), k, replace=False)
+        for x in rng.choice(range(1000, TILE_WIDTH * 10 + 1), size=k, replace=False)
     ]
     available_pos_y = [
         str(x)
-        for x in random.choice(range(1000, TILE_HEIGHT * 10 + 1), k, replace=False)
+        for x in rng.choice(range(1000, TILE_HEIGHT * 10 + 1), size=k, replace=False)
     ]
     assert tile is not None, "tile must be provided"
     available_tile_positions = product([tile], available_pos_x, available_pos_y)
@@ -399,14 +401,14 @@ def generate_dnaio_fastq_files(
         for i in range(seq_number):
             suffix = ":".join(next(available_tile_positions))
             if umi1 != 0:
-                suffix += ":" + "".join(random.choice(list(nucleotides), size=umi1))
+                suffix += ":" + "".join(rng.choice(list(nucleotides), size=umi1))
             if umi2 != 0:
                 suffix += "+" if umi1 != 0 else ":"
-                suffix += "".join(random.choice(list(nucleotides), size=umi2))
+                suffix += "".join(rng.choice(list(nucleotides), size=umi2))
             reads = [
                 dnaio.SequenceRecord(
                     name=f"{prefix}:{suffix}{extension}",
-                    sequence="".join(random.choice(list(nucleotides), size=read1_len)),
+                    sequence="".join(rng.choice(list(nucleotides), size=read1_len)),
                     qualities="I" * read1_len,
                 )
             ]
@@ -415,7 +417,7 @@ def generate_dnaio_fastq_files(
                     dnaio.SequenceRecord(
                         name=f"{prefix}:{suffix}{extension.replace(' 1', ' 2')}",
                         sequence="".join(
-                            random.choice(list(nucleotides), size=read2_len)
+                            rng.choice(list(nucleotides), size=read2_len)
                         ),
                         qualities="I" * read2_len,
                     )
@@ -433,12 +435,13 @@ def split(a, n):
 
 def main(args: argparse.Namespace) -> None:
     """Main function."""
+    global rng
     if not args.output:
         args.quiet = False
     setup_logging(args)
     logging.info("Running blabber module...")
 
-    random.seed(args.random_seed)
+    rng = np.random.default_rng(args.random_seed)
     nucleotides = {x for x in args.alphabet.upper()}
 
     if args.format == "fasta":
@@ -463,10 +466,10 @@ def main(args: argparse.Namespace) -> None:
             field3, sample_sheet = parse_sample_sheet(args.sample_sheet)
             field0 = datetime.today().strftime("%Y%m%d")
             field1 = "".join(
-                list(random.choice([x for x in string.ascii_uppercase], size=2))
-                + [str(random.randint(10000, 99999))]
+                list(rng.choice([x for x in string.ascii_uppercase], size=2))
+                + [str(rng.integers(10000, 100000))]
             )
-            field2 = str(random.randint(100, 999))
+            field2 = str(rng.integers(100, 1000))
             output_basepath = args.output.joinpath(
                 f"{field0}_{field1}_{field2:>04}_A{field3}"
                 if not args.flowcell_id
@@ -484,12 +487,12 @@ def main(args: argparse.Namespace) -> None:
             prefix = f"{field1}:{field2}:{field3}"
         else:
             sample_sheet = None
-            field1 = "".join(random.choice(list(string.ascii_uppercase), size=2)) + str(
-                random.randint(10000, 99999)
+            field1 = "".join(rng.choice(list(string.ascii_uppercase), size=2)) + str(
+                rng.integers(10000, 100000)
             )
-            field2 = str(random.randint(100, 999))
-            field3 = str(random.randint(10, 99)) + "".join(
-                random.choice(list(string.ascii_uppercase), size=6)
+            field2 = str(rng.integers(100, 1000))
+            field3 = str(rng.integers(10, 100)) + "".join(
+                rng.choice(list(string.ascii_uppercase), size=6)
             )
             prefix = f"{field1}:{field2}:{field3}"
             extension = f" 1:N:0:{'N' * 8}" if args.format == "fastq-ext" else ""
@@ -505,7 +508,7 @@ def main(args: argparse.Namespace) -> None:
                     [f"{i + 1:02}" for i in range(TILE_COUNT)],
                 )
             ]
-            random.shuffle(available_tiles)
+            rng.shuffle(available_tiles)
 
             partitioned_available_tiles = [
                 x
@@ -572,7 +575,7 @@ def main(args: argparse.Namespace) -> None:
         else:
             sequences = set()
             while len(sequences) < args.seq_number:
-                seq = "".join(random.choice(list(nucleotides), size=args.seq_length))
+                seq = "".join(rng.choice(list(nucleotides), size=args.seq_length))
                 sequences.add(seq)
 
             if args.output:
@@ -584,11 +587,11 @@ def main(args: argparse.Namespace) -> None:
                 with dnaio.open(output_file, mode="w", fileformat="fastq") as writer:
                     for i, seq in enumerate(sequences):
                         suffix = "".join(
-                            [str(random.randint(10000))]  # Tile number
+                            [str(rng.integers(0, 10000))]  # Tile number
                             + [":"]
-                            + [str(random.randint(10000))]  # X coordinate
+                            + [str(rng.integers(0, 10000))]  # X coordinate
                             + [":"]
-                            + [str(random.randint(10000))]  # Y coordinate
+                            + [str(rng.integers(0, 10000))]  # Y coordinate
                         )
                         writer.write(
                             dnaio.SequenceRecord(
@@ -600,11 +603,11 @@ def main(args: argparse.Namespace) -> None:
             else:
                 for seq in sequences:
                     suffix = "".join(
-                        [str(random.randint(10000))]
+                        [str(rng.integers(0, 10000))]
                         + [":"]
-                        + [str(random.randint(10000))]
+                        + [str(rng.integers(0, 10000))]
                         + [":"]
-                        + [str(random.randint(10000))]
+                        + [str(rng.integers(0, 10000))]
                     )
                     print(
                         f"@{prefix}:{suffix}{extension}\n{seq}\n+\n{'I' * args.seq_length}"
@@ -612,7 +615,7 @@ def main(args: argparse.Namespace) -> None:
     else:
         sequences = set()
         while len(sequences) < args.seq_number:
-            seq = "".join(random.choice(list(nucleotides), size=args.seq_length))
+            seq = "".join(rng.choice(list(nucleotides), size=args.seq_length))
             sequences.add(seq)
         for seq in sequences:
             if args.output:
