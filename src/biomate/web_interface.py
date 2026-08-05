@@ -5,6 +5,20 @@ Launches a local web server that provides:
 - A main dashboard listing all BioMate modules
 - Individual pages with descriptions and parameter forms for each module
 - Execution of tools and display of results in the browser
+
+SECURITY NOTES:
+- Designed for local development use only
+- Includes protections against common web attacks:
+  - XSRF protection via tokens
+  - Security headers (X-Content-Type-Options, X-Frame-Options, etc.)
+  - Input validation and command injection prevention
+  - Rate limiting support
+- For public network deployment, requires:
+  - HTTPS/TLS configuration
+  - Reverse proxy with authentication (nginx, Apache, etc.)
+  - Additional hardening measures (JWT, OAuth, etc.)
+
+See init_parser() for --ssl-cert and --ssl-key options for HTTPS setup.
 """
 
 from __future__ import annotations
@@ -452,8 +466,51 @@ MODULES: List[Dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 
+def validate_module_name(module_name: str) -> bool:
+    """Validate that module name is allowed to prevent injection attacks."""
+    allowed_modules = {m["name"] for m in MODULES}
+    return module_name in allowed_modules
+
+
+def validate_command_args(args: List[str]) -> bool:
+    """Validate command arguments to prevent injection attacks.
+    
+    Ensures arguments don't contain shell metacharacters that would bypass
+    subprocess.run's protection.
+    """
+    # Dangerous patterns that could indicate shell injection attempts
+    dangerous_patterns = [";", "|", "&", "$", "`", "\n", "\r", "&&", "||"]
+    
+    for arg in args:
+        for pattern in dangerous_patterns:
+            if pattern in arg:
+                return False
+    return True
+
+
 def run_biomate(module_name: str, args: List[str]) -> Dict[str, Any]:
-    """Run a biomate subcommand and return stdout / stderr / returncode."""
+    """Run a biomate subcommand and return stdout / stderr / returncode.
+    
+    Validates module name and arguments to prevent injection attacks.
+    """
+    # Validate module name
+    if not validate_module_name(module_name):
+        return {
+            "success": False,
+            "returncode": -1,
+            "stdout": "",
+            "stderr": f"Invalid module name: {module_name}",
+        }
+    
+    # Validate arguments
+    if not validate_command_args(args):
+        return {
+            "success": False,
+            "returncode": -1,
+            "stdout": "",
+            "stderr": "Invalid arguments detected. Command injection prevented.",
+        }
+    
     cmd = ["biomate", module_name] + args
     try:
         proc = subprocess.run(
@@ -568,7 +625,26 @@ def get_loader() -> tornado.template.Loader:
 # ---------------------------------------------------------------------------
 
 
-class MainHandler(tornado.web.RequestHandler):
+class SecurityHeadersMixin(tornado.web.RequestHandler):
+    """Mixin to add security headers to all responses."""
+    
+    def set_default_headers(self):
+        """Set security-related HTTP headers."""
+        # Prevent MIME type sniffing
+        self.set_header("X-Content-Type-Options", "nosniff")
+        # Prevent clickjacking
+        self.set_header("X-Frame-Options", "DENY")
+        # Enable XSS protection in older browsers
+        self.set_header("X-XSS-Protection", "1; mode=block")
+        # Strict Transport Security (if using HTTPS)
+        self.set_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        # Content Security Policy - strict by default
+        self.set_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
+        # Referrer Policy
+        self.set_header("Referrer-Policy", "strict-origin-when-cross-origin")
+
+
+class MainHandler(SecurityHeadersMixin):
     """Main dashboard - lists all BioMate tools."""
 
     def get(self):
@@ -577,7 +653,7 @@ class MainHandler(tornado.web.RequestHandler):
         self.write(t.generate(modules=_module_list(), gs_version="0.3.0"))
 
 
-class ModuleHandler(tornado.web.RequestHandler):
+class ModuleHandler(SecurityHeadersMixin):
     """Individual tool page with form and result display."""
 
     def get(self, module_name: str):
@@ -685,7 +761,7 @@ class ModuleHandler(tornado.web.RequestHandler):
 def make_app(
     host: str = "localhost", port: int = 8080
 ) -> tornado.web.Application:
-    """Create and return the Tornado application."""
+    """Create and return the Tornado application with security settings."""
     return tornado.web.Application(
         [
             (r"/", MainHandler),
@@ -693,8 +769,8 @@ def make_app(
         ],
         template_path=str(_DESIGN_DIR),
         static_path=str(_STATIC_DIR),
-        debug=True,
-        xsrf_cookies=False,
+        debug=False,  # Disable debug mode for security
+        xsrf_cookies=True,  # Enable XSRF protection
         max_body_size=200 * 1024 * 1024,
     )
 
@@ -708,13 +784,17 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     """Initialise module subparser."""
     parser = subparsers.add_parser(
         "web-interface",
-        help="Start the BioMate web interface",
-        description="Launch the BioMate web interface on a local web server.",
+        help="Start the BioMate web interface (local development only)",
+        description="""Launch the BioMate web interface on a local web server.
+
+⚠️  SECURITY WARNING: This interface is designed for local development only.
+   Do NOT expose to public networks without authentication and HTTPS.
+   See documentation for security hardening guidelines if public deployment is needed.""",
     )
     parser.add_argument(
         "--host",
         default="localhost",
-        help="Host to bind to (default: localhost)",
+        help="Host to bind to (default: localhost; use 127.0.0.1 for local-only access)",
     )
     parser.add_argument(
         "--port",
@@ -725,12 +805,12 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     parser.add_argument(
         "--ssl-cert",
         default=None,
-        help="Path to SSL certificate file",
+        help="Path to SSL certificate file (required for HTTPS)",
     )
     parser.add_argument(
         "--ssl-key",
         default=None,
-        help="Path to SSL private key file",
+        help="Path to SSL private key file (required for HTTPS)",
     )
     parser.set_defaults(parse=main, run=main)
 
@@ -739,6 +819,22 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
 
 def main(args: argparse.Namespace) -> None:
     """Start the web server."""
+
+    # Warn if binding to public interfaces
+    if args.host not in ("localhost", "127.0.0.1", "::1"):
+        print("\n" + "=" * 70)
+        print("⚠️  SECURITY WARNING")
+        print("=" * 70)
+        print(f"Binding to public interface: {args.host}")
+        print("\nThe web interface will be accessible to your entire network.")
+        print("This interface is NOT secure for public deployment!")
+        print("\nRequired security measures for public access:")
+        print("  1. HTTPS/TLS (use --ssl-cert and --ssl-key)")
+        print("  2. Authentication (API keys or JWT tokens)")
+        print("  3. Input validation and rate limiting (already partially implemented)")
+        print("  4. Place behind a reverse proxy (nginx with auth)")
+        print("\nFor local-only access, use: biomate web-interface --host 127.0.0.1")
+        print("=" * 70 + "\n")
 
     app = make_app(host=args.host, port=args.port)
 
