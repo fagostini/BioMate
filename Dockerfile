@@ -17,13 +17,18 @@ RUN BUILD_TIME=$(date) && \
     && rm -rf /var/lib/apt/lists/* \
     && echo "export BUILD_TIME=\"${BUILD_TIME}\"" > /etc/profile.d/build-time.sh
 
-# Install build package
-RUN python3 -m pip install --break-system-packages build
+# Create and activate Python virtual environment
+RUN python3 -m venv /app/venv
+ENV PATH="/app/venv/bin:$PATH"
+
+# Install build tools in venv
+RUN pip install --upgrade pip setuptools wheel
+RUN pip install build
 
 # Install BioMate package from local source
 COPY . /app
 WORKDIR /app
-RUN python3 -m pip install --break-system-packages .
+RUN pip install .
 
 # Expose the web interface port
 EXPOSE 8080
