@@ -82,11 +82,19 @@ class TestValidateCommandArgs:
 
     def test_valid_args_multiple(self):
         """Test that multiple valid arguments pass."""
-        assert validate_command_args([
-            "--seq-number", "1000",
-            "--seq-length", "50",
-            "--output", "/tmp/test.fastq"
-        ]) is True
+        assert (
+            validate_command_args(
+                [
+                    "--seq-number",
+                    "1000",
+                    "--seq-length",
+                    "50",
+                    "--output",
+                    "/tmp/test.fastq",
+                ]
+            )
+            is True
+        )
 
     def test_valid_args_numeric(self):
         """Test that numeric arguments pass."""
@@ -157,7 +165,14 @@ class TestModulesDefinition:
     def test_all_modules_defined(self):
         """Test that expected modules are in MODULES list."""
         module_names = [m["name"] for m in MODULES]
-        expected_modules = ["blabber", "index", "dirstruct", "fastrewind", "nspector", "strainer"]
+        expected_modules = [
+            "blabber",
+            "index",
+            "dirstruct",
+            "fastrewind",
+            "nspector",
+            "strainer",
+        ]
         for expected in expected_modules:
             assert expected in module_names, f"Module {expected} not found in MODULES"
 
@@ -165,15 +180,22 @@ class TestModulesDefinition:
         """Test that each module has required metadata fields."""
         for module in MODULES:
             assert "name" in module, f"Module missing 'name' field"
-            assert "title" in module, f"Module {module.get('name')} missing 'title' field"
-            assert "description" in module, f"Module {module.get('name')} missing 'description' field"
-            assert "parameters" in module, f"Module {module.get('name')} missing 'parameters' field"
+            assert "title" in module, (
+                f"Module {module.get('name')} missing 'title' field"
+            )
+            assert "description" in module, (
+                f"Module {module.get('name')} missing 'description' field"
+            )
+            assert "parameters" in module, (
+                f"Module {module.get('name')} missing 'parameters' field"
+            )
 
     def test_all_modules_have_valid_names(self):
         """Test that all module names pass validation."""
         for module in MODULES:
-            assert validate_module_name(module["name"]), \
+            assert validate_module_name(module["name"]), (
                 f"Module name {module['name']} fails validation"
+            )
 
     def test_blabber_module_has_parameters(self):
         """Test that blabber module has expected parameters."""
@@ -202,6 +224,7 @@ class TestFlattendParameters:
     def test_flatten_simple_parameter(self):
         """Test flattening a single parameter."""
         from biomate.web_interface import flatten_parameters
+
         params = [{"form_name": "seq_length", "cli_name": "seq-length"}]
         values = {"seq_length": "100"}
         args = flatten_parameters(params, values)
@@ -211,6 +234,7 @@ class TestFlattendParameters:
     def test_flatten_missing_parameter(self):
         """Test that missing parameters are skipped."""
         from biomate.web_interface import flatten_parameters
+
         params = [{"form_name": "seq_length", "cli_name": "seq-length"}]
         values = {}
         args = flatten_parameters(params, values)
@@ -219,6 +243,7 @@ class TestFlattendParameters:
     def test_flatten_boolean_parameter_true(self):
         """Test flattening a boolean parameter set to true."""
         from biomate.web_interface import flatten_parameters
+
         params = [{"form_name": "taint", "cli_name": "taint", "param_type": "boolean"}]
         values = {"taint": "true"}
         args = flatten_parameters(params, values)
@@ -227,6 +252,7 @@ class TestFlattendParameters:
     def test_flatten_boolean_parameter_false(self):
         """Test that boolean parameter set to false is not included."""
         from biomate.web_interface import flatten_parameters
+
         params = [{"form_name": "taint", "cli_name": "taint", "param_type": "boolean"}]
         values = {"taint": "false"}
         args = flatten_parameters(params, values)
@@ -235,7 +261,14 @@ class TestFlattendParameters:
     def test_flatten_select_parameter(self):
         """Test flattening a select parameter."""
         from biomate.web_interface import flatten_parameters
-        params = [{"form_name": "error_type", "cli_name": "error-type", "param_type": "select"}]
+
+        params = [
+            {
+                "form_name": "error_type",
+                "cli_name": "error-type",
+                "param_type": "select",
+            }
+        ]
         values = {"error_type": "s"}
         args = flatten_parameters(params, values)
         assert "--error-type" in args
@@ -244,12 +277,15 @@ class TestFlattendParameters:
     def test_flatten_with_default_value(self):
         """Test that default values are used when provided."""
         from biomate.web_interface import flatten_parameters
-        params = [{
-            "form_name": "threads",
-            "cli_name": "threads",
-            "default": "1",
-            "param_type": "number"
-        }]
+
+        params = [
+            {
+                "form_name": "threads",
+                "cli_name": "threads",
+                "default": "1",
+                "param_type": "number",
+            }
+        ]
         # Don't provide the value - let it use default
         values = {}
         args = flatten_parameters(params, values)
@@ -259,12 +295,15 @@ class TestFlattendParameters:
     def test_flatten_with_provided_value_overrides_default(self):
         """Test that provided values override defaults."""
         from biomate.web_interface import flatten_parameters
-        params = [{
-            "form_name": "threads",
-            "cli_name": "threads",
-            "default": "1",
-            "param_type": "number"
-        }]
+
+        params = [
+            {
+                "form_name": "threads",
+                "cli_name": "threads",
+                "default": "1",
+                "param_type": "number",
+            }
+        ]
         values = {"threads": "4"}
         args = flatten_parameters(params, values)
         assert "--threads" in args
@@ -306,18 +345,20 @@ class TestWebInterfaceModuleName:
     def test_module_imported_successfully(self):
         """Test that web_interface module can be imported."""
         import biomate.web_interface
+
         assert biomate.web_interface is not None
 
     def test_init_parser_creates_parser(self):
         """Test that init_parser creates valid argparse parser."""
         from biomate.web_interface import init_parser
+
         # Create a dummy subparsers object
         parser = argparse.ArgumentParser()
         subparsers = parser.add_subparsers()
-        
+
         # Call init_parser
         result = init_parser(subparsers)
-        
+
         # Should return a parser
         assert isinstance(result, argparse.ArgumentParser)
 
@@ -325,39 +366,40 @@ class TestWebInterfaceModuleName:
         """Test that make_app creates a Tornado application."""
         from biomate.web_interface import make_app
         import tornado.web
-        
+
         app = make_app(host="localhost", port=8080)
         assert isinstance(app, tornado.web.Application)
 
     def test_make_app_has_handlers(self):
         """Test that created app has request handlers configured."""
         from biomate.web_interface import make_app
-        
+
         app = make_app(host="localhost", port=8080)
-        
+
         # Verify app was created successfully
         assert app is not None
         # Verify it's a Tornado Application
         import tornado.web
+
         assert isinstance(app, tornado.web.Application)
         # Verify it has settings (which indicates proper configuration)
-        assert hasattr(app, 'settings')
+        assert hasattr(app, "settings")
         assert app.settings is not None
 
     def test_xsrf_cookies_enabled_in_app(self):
         """Test that XSRF protection is enabled in application."""
         from biomate.web_interface import make_app
-        
+
         app = make_app(host="localhost", port=8080)
-        
+
         # XSRF should be enabled (not False)
         assert app.settings.get("xsrf_cookies") is True
 
     def test_debug_mode_disabled_in_app(self):
         """Test that debug mode is disabled in application (security)."""
         from biomate.web_interface import make_app
-        
+
         app = make_app(host="localhost", port=8080)
-        
+
         # Debug should be disabled for security
         assert app.settings.get("debug") is False
