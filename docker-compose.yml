@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   biomate:
     build:
@@ -7,12 +5,16 @@ services:
       dockerfile: Dockerfile
     image: biomate:latest
     container_name: biomate
+    user: "${UID:-1000}:${GID:-1000}"
     volumes:
+      - ./assets:/assets
       - ./data:/data
       - ./results:/results
       - ./inputs:/inputs
     environment:
       - PYTHONUNBUFFERED=1
+    ports:
+      - "127.0.0.1:8080:8080"
     networks:
       - biomate-network
     # Uncomment to run interactively
