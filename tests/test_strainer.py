@@ -31,7 +31,7 @@ class TestExtractIndexesFromSampleSheet:
     def test_dual_index_returns_correct_columns(self, dual_index_sample_sheet):
         """Result DataFrame has the expected column names."""
         df = extract_indexes_from_sample_sheet(dual_index_sample_sheet)
-        assert set(df.columns) == {"Lane", "Sample_Project", "index", "index2"}
+        assert set(df.columns) == {"Lane", "Sample_Project", "index1", "index2"}
 
     def test_dual_index_row_count(self, dual_index_sample_sheet):
         """Dual-index sample sheet with 3 entries yields 3 rows."""
@@ -46,7 +46,7 @@ class TestExtractIndexesFromSampleSheet:
     def test_dual_index_values(self, dual_index_sample_sheet):
         """Index and project values are correctly extracted from the sheet."""
         df = extract_indexes_from_sample_sheet(dual_index_sample_sheet)
-        row = df.filter(polars.col("index") == "GAACTGAGCG").row(0, named=True)
+        row = df.filter(polars.col("index1") == "GAACTGAGCG").row(0, named=True)
         assert row["index2"] == "CGCTCCACGA"
         assert row["Sample_Project"] == "ProjectA"
 
@@ -111,11 +111,11 @@ class TestExtractIndexesFromSampleSheet:
 
 class TestExtractIndexesFromUndetermined:
     def test_returns_correct_structure(self, undetermined_fastq_l001):
-        """Each returned dict has Lane, Index and Count keys."""
+        """Each returned dict has Lane, Undetermined_Index and Count keys."""
         result = extract_indexes_from_undetermined_file(undetermined_fastq_l001)
         assert isinstance(result, list)
         assert all(isinstance(r, dict) for r in result)
-        assert all({"Lane", "Index", "Count"} <= r.keys() for r in result)
+        assert all({"Lane", "Undetermined_Index", "Count"} <= r.keys() for r in result)
 
     def test_lane_extracted_from_filename(self, undetermined_fastq_l001):
         """Lane is extracted from the filename's third underscore-separated token."""
@@ -125,7 +125,7 @@ class TestExtractIndexesFromUndetermined:
     def test_counts_are_correct(self, undetermined_fastq_l001):
         """Index occurrence counts reflect the actual frequency in the FASTQ file."""
         result = extract_indexes_from_undetermined_file(undetermined_fastq_l001)
-        index_map = {r["Index"]: r["Count"] for r in result}
+        index_map = {r["Undetermined_Index"]: r["Count"] for r in result}
         # Two reads have the same index → count 2
         assert index_map.get("ACGTACGT+TGCATGCA") == 2
 
@@ -140,7 +140,7 @@ class TestExtractIndexesFromUndetermined:
             ],
         )
         result = extract_indexes_from_undetermined_file(path)
-        indexes = [r["Index"] for r in result]
+        indexes = [r["Undetermined_Index"] for r in result]
         assert "GGGGACGT+TTTTTTTT" not in indexes
         assert "ACGT+TTTT" in indexes
 
@@ -161,7 +161,7 @@ class TestExtractIndexesFromUndetermined:
         path = tmp_path / "Undetermined_S0_L003_R1_001.fastq.gz"
         with gzip.open(path, "wt") as fh:
             fh.write("@VH00001:1:AABCCC:1:1101:10000:20000\nACGT\n+\n####\n")
-        with pytest.raises(ValueError, match="index"):
+        with pytest.raises(ValueError, match="Invalid read name format"):
             extract_indexes_from_undetermined_file(path)
 
     def test_at_most_1000_entries_returned(self, tmp_path):
@@ -316,8 +316,9 @@ class TestSearchForUnexpectedIndexes:
         result = search_for_unexpected_indexes(ss_df, und_df)
         expected_cols = {
             "Lane",
-            "Index",
+            "Undetermined_Index",
             "Count",
+            "Fraction",
             "Sample_Project",
             "Lane_Project",
             "index1",

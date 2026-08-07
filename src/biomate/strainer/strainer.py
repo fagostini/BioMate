@@ -258,10 +258,16 @@ def search_for_unexpected_indexes(
         ss_lane_df = sample_sheet_df.filter(polars.col("Lane") == lane)
         und_lane_df = undetermined_df.filter(polars.col("Lane") != lane)
 
+        # Compute total count for fraction calculation
+        total_count = und_lane_df.get_column("Count").sum()
+
         # Iterate through each sample in the sample sheet for this lane
         for ss_lane, ss_project, ss_index1, ss_index2 in ss_lane_df.iter_rows():
             # Iterate through undetermined indexes from other lanes
-            for und_lane, und_index, und_count, und_fraction in und_lane_df.iter_rows():
+            for und_lane, und_index, und_count in und_lane_df.iter_rows():
+                # Compute fraction from count and total
+                und_fraction = und_count / total_count if total_count > 0 else 0.0
+
                 # Allow up to 1 mismatch in each index
                 match_1 = regex.search(
                     r"(" + regex.escape(ss_index1) + "){s<=1}", und_index
