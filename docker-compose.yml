@@ -14,13 +14,12 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     ports:
-      - "127.0.0.1:8080:8080"
-    networks:
-      - biomate-network
-    # Uncomment to run interactively
-    # stdin_open: true
-    # tty: true
-
-networks:
-  biomate-network:
-    driver: bridge
+      - "8080:8080"
+    command: ["web-interface", "--port", "8080"]
+    network_mode: host
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 10m
+      timeout: 10s
+      retries: 3
+      start_period: 10s
