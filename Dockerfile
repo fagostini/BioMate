@@ -14,6 +14,7 @@ RUN BUILD_TIME=$(date) && \
         python3-pip \
         build-essential \
         python3-dev \
+        python3-venv \
     && rm -rf /var/lib/apt/lists/* \
     && echo "export BUILD_TIME=\"${BUILD_TIME}\"" > /etc/profile.d/build-time.sh
 
