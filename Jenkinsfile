@@ -4,7 +4,7 @@ pipeline {
         stage('Build') { 
             steps {
                 sh 'make test_mix' 
-                stash(name: 'compiled-results', includes: 'assets/*') 
+                stash(name: 'assets-files', includes: 'assets/*.csv') 
             }
         }
     }
