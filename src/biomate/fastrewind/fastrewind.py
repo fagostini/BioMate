@@ -510,6 +510,27 @@ def parse_fastq_groups(
 
     sample_recipe = masks_table[name]
 
+    # Keep only one R1/R2 file per sample group. Index-read files and duplicate
+    # R1/R2 entries can appear when previous demultiplex outputs are present.
+    reads_by_label = {}
+    for fpath in sorted(filenames):
+        match = re.search(r"_(R[12])_", fpath.name)
+        if not match:
+            continue
+        read_label = match.group(1)
+        reads_by_label.setdefault(read_label, fpath)
+
+    filenames = [
+        f
+        for f in [reads_by_label.get("R1"), reads_by_label.get("R2")]
+        if f is not None
+    ]
+    if not filenames:
+        logging.warning(
+            f"No R1/R2 FASTQ files found for sample '{name}' in lane '{lane}'. Skipping sample group."
+        )
+        return defaultdict(set)
+
     with dnaio.open(*sorted(filenames), open_threads=threads) as reader:
         # Procedure for single-end reads
         if len(filenames) == 1:
@@ -615,10 +636,14 @@ def parse_fastq_groups(
         except IOError:
             logging.warning("Failed to write to avro file!")
 
-    dt = (
-        polars.read_avro(
-            tempdir.joinpath("tile_positions.avro"),
+    if not avro_file.exists():
+        logging.warning(
+            f"No readable records found for sample '{name}' in lane '{lane}'. Skipping sample group."
         )
+        return defaultdict(set)
+
+    dt = (
+        polars.read_avro(avro_file)
         .unique()
         .with_columns(
             [polars.col("x").cast(polars.UInt16), polars.col("y").cast(polars.UInt16)]
@@ -834,6 +859,7 @@ def preprocess_and_write_bcls(
             # Cycle through the tile files
             for fq in fq_sorted:
                 logging.debug(f"   {fq.name}")
+                opened_files = []
                 try:
                     # Get the tile id
                     tile_id = fq.name.split("_")[1].replace(".fastq.gz", "")
@@ -843,7 +869,7 @@ def preprocess_and_write_bcls(
                     )
                     # Open all cycle files for the given tile; this is required because each base/quality of
                     # each read has to be written into the corresponding cycle file
-                    opened_files = [open(file, "bw") for file in temp_files[tile_id]]
+                    opened_files = [open(file, "wb") for file in temp_files[tile_id]]
                     with dnaio.open(fq, open_threads=threads) as reader:
                         # Initialise a buffer for the bits. This is necessary because every base/quality character
                         # accounts only for half byte, so at least two are needed to create a byte. One can probably
@@ -897,19 +923,16 @@ def preprocess_and_write_bcls(
                         # If there is an odd number of sequences, the buffer will be incomplete (4 out of 8 bits);
                         # fill the rest of the buffer with 0 and write it to file
                         if buffer:
-                            for cycle in range(total_cycles):
+                            for cycle in range(min(len(buffer), total_cycles)):
                                 opened_files[cycle].write(
                                     bytes([int(buffer[cycle].ljust(8, "0"), 2)])
                                 )
-                            if read_length < total_cycles:
-                                for cycle in range(read_length, total_cycles):
-                                    opened_files[cycle].write(
-                                        bytes([int(buffer[cycle].ljust(8, "0"), 2)])
-                                    )
-                except RuntimeError:
-                    logging.exception(
-                        f"Error: something went wrong!\nCycle: {cycle} Record: {read.qualities}"
-                    )
+                            for cycle in range(len(buffer), total_cycles):
+                                opened_files[cycle].write(bytes([0]))
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Error while processing tile file '{fq}': {e}"
+                    ) from e
                 finally:
                     # No matter what happens, always close the opened streaming output files
                     logging.debug("Closing opened files...")
@@ -956,9 +979,12 @@ def preprocess_and_write_bcls(
                 with open(
                     cycle_path.joinpath(f"{lane}_{surface}.cbcl"), "wb"
                 ) as out_handle:
-                    with open(
-                        tempdir.joinpath(f"all_{cycle + 1}_tiles.cbcl"), "rb"
-                    ) as in_handle:
+                    cycle_file = tempdir.joinpath(f"all_{cycle + 1}_tiles.cbcl")
+                    if not cycle_file.exists():
+                        raise FileNotFoundError(
+                            f"Missing temporary cycle file: {cycle_file}"
+                        )
+                    with open(cycle_file, "rb") as in_handle:
                         out_handle.write(header)
                         out_handle.write(in_handle.read())
 
@@ -1061,17 +1087,29 @@ def main(args: argparse.Namespace) -> None:
     # Search and split the FASTQ files by lane and sample name
     lanes_dict = organise_fastq_files(args.input_path)
 
-    # Get one read name to extract the run details
-    sample_lane = list(lanes_dict)[0]
-    sample_name = list(lanes_dict[sample_lane])[0]
-    sample_file = sorted(lanes_dict[sample_lane][sample_name])[0]
+    # Get one read name to extract the run details.
+    # Some generated/undetermined files can be empty, so scan until a read is found.
     sample_read = None
-    with dnaio.open(sample_file) as reader:
-        for read in reader:
-            sample_read = read.name
+    sample_file = None
+    for lane_files in lanes_dict.values():
+        for sample_files in lane_files.values():
+            for candidate_file in sorted(sample_files):
+                with dnaio.open(candidate_file) as reader:
+                    for read in reader:
+                        sample_read = read.name
+                        sample_file = candidate_file
+                        break
+                if sample_read is not None:
+                    break
+            if sample_read is not None:
+                break
+        if sample_read is not None:
             break
+
     if sample_read is None:
-        raise ValueError(f"No reads found in sample file {sample_file}")
+        raise ValueError(
+            "No reads found in any FASTQ input file. At least one non-empty FASTQ is required."
+        )
 
     # Dictionary containing all unique tiles per lane
     tiles_by_lane = defaultdict(set)
@@ -1099,6 +1137,11 @@ def main(args: argparse.Namespace) -> None:
             # Dictionary containing the cluster counts by tile
             unique_locs_by_tile = defaultdict(set)
             for name, filenames in files.items():
+                if name not in masks_table:
+                    logging.warning(
+                        f"Skipping FASTQ group '{name}' because no matching SampleSheet recipe was found."
+                    )
+                    continue
                 logging.info(f"   Processing '{name}': {[x.name for x in filenames]}")
                 logging.debug("Parsing FASTQ files...")
                 tiles_and_locs = parse_fastq_groups(
@@ -1130,6 +1173,12 @@ def main(args: argparse.Namespace) -> None:
             tiles_by_lane.setdefault(lane, set()).update(
                 {x for x in unique_locs_by_tile.keys()}
             )
+
+    tiles_by_lane = {lane: tiles for lane, tiles in tiles_by_lane.items() if tiles}
+    if not tiles_by_lane:
+        raise ValueError(
+            "No tile data was generated from FASTQ input. Check SampleSheet matching and FASTQ content."
+        )
 
     logging.debug("Extracting floecell layout from tiles...")
     (lane_count, surface_count, swath_count, tile_count), tile_names = (

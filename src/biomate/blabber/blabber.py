@@ -357,7 +357,8 @@ def generate_sequences_set(nucleotides: set, length: int, number: int) -> set:
         set: A set of unique random nucleotide sequences.
     """
     sequences = set()
-    while len(sequences) < number:
+    max_unique = len(nucleotides) ** length
+    while len(sequences) < number and len(sequences) < max_unique:
         seq = "".join(rng.choice(list(nucleotides), size=length))
         sequences.add(seq)
     return sequences
