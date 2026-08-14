@@ -14,11 +14,11 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     ports:
-      - "8080:8080"
-    command: ["web-interface", "--port", "8080"]
+      - "8765:8765"
+    command: ["web-interface", "--port", "8765"]
     network_mode: host
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      test: ["CMD", "curl", "-f", "http://localhost:8765/"]
       interval: 10m
       timeout: 10s
       retries: 3
