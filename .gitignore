@@ -191,7 +191,6 @@ test/*
 **.filter
 **.control
 **.xml
-**.csv
 
 # Containers
 *.sif
