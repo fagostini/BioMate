@@ -1,11 +1,15 @@
 # Makefile for the project
 include Makefile.help
 
+MAKEFLAGS += --no-print-directory
+
 # Makefile containing the project's variables
 PROJECT_NAME := BioMate
 PROJECT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 UV ?= uv
 BCLCONVERT ?= bcl-convert
+BCLCONVERT_NOFILE ?= 65535
+BCLCONVERT_FD_ERROR_PATTERN ?= too many open files|bad file descriptor
 SHELL=/bin/bash
 
 # Test assets and variables
@@ -42,6 +46,17 @@ check-bclconvert:
 		echo "Install bcl-convert or set BCLCONVERT=/full/path/to/bcl-convert."; \
 		exit 1; \
 	}
+
+.PHONY: smoke-bclconvert-fd
+smoke-bclconvert-fd:
+	@for f in $(TEMP_DIR)/bcl-validate.err $(TEMP_DIR)/bcl-convert.err; do \
+		if [[ -f $$f ]] && grep -Eiq "$(BCLCONVERT_FD_ERROR_PATTERN)" "$$f"; then \
+			echo "Detected file descriptor-related bcl-convert error in $$f"; \
+			grep -Ein "$(BCLCONVERT_FD_ERROR_PATTERN)" "$$f" | tail -n 20; \
+			exit 1; \
+		fi; \
+	done; \
+	echo "No file descriptor-related errors found in bcl-convert logs."
 
 
 .PHONY: sync
@@ -162,10 +177,14 @@ $(TEMP_DIR)/Data $(TEMP_DIR)/RunInfo.xml: check-uv $(TEMP_DIR)/$(FLOWCELL_ID) cl
 	@$(UV) run biomate --verbose fastrewind --input-path $(TEMP_DIR) --output-path $(TEMP_DIR) --threads 8 > $(TEMP_DIR)/fastrewind.out 2> $(TEMP_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || { echo "Error executing Fastrewind module!"; exit 1; }
 
 validate_samplesheet: check-bclconvert $(TEMP_DIR)/RunInfo.xml
+	@ulimit -Sn $(BCLCONVERT_NOFILE) 2>/dev/null && echo "BCL-convert soft nofile limit set to $$(ulimit -Sn)" || true
 	@$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true --bcl-validate-sample-sheet-only true > $(TEMP_DIR)/bcl-validate.out 2> $(TEMP_DIR)/bcl-validate.err && echo "BCL-convert SampleSheet validation was successful!" || { echo "Error executing BCL-convert SampleSheet validation!"; exit 1; }
+	@$(MAKE) smoke-bclconvert-fd
 
 $(TEMP_DIR)/Demultiplexing: check-bclconvert $(TEMP_DIR)/RunInfo.xml clean_demux
+	@ulimit -Sn $(BCLCONVERT_NOFILE) 2>/dev/null && echo "BCL-convert soft nofile limit set to $$(ulimit -Sn)" || true
 	@$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true > $(TEMP_DIR)/bcl-convert.out 2> $(TEMP_DIR)/bcl-convert.err && echo "BCL-convert executed successfully!" || { echo "Error executing BCL-convert!"; exit 1; }
+	@$(MAKE) smoke-bclconvert-fd
 
 
 .PHONY: report_results
@@ -187,7 +206,7 @@ test_dual: deepclean run_message copy_dual validate_samplesheet report_results c
 test_mix: deepclean run_message copy_mix validate_samplesheet report_results compare_results
 
 .PHONY: copy_none copy_single copy_dual copy_mix
-.PHONY: validate_samplesheet compare_results
+.PHONY: validate_samplesheet compare_results smoke-bclconvert-fd
 .PHONY: test_none test_single test_dual test_mix
 
 .PHONY: cleanup_message
