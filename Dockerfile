@@ -35,5 +35,4 @@ RUN pip install .
 EXPOSE 8080
 
 # Run the web interface
-ENTRYPOINT ["biomate"]
-CMD ["web-interface", "--host", "0.0.0.0", "--port", "8765"]
+ENTRYPOINT [""]
