@@ -9,6 +9,7 @@ pipeline {
             }
             steps {
                 sh 'mkdir -p temp' 
+                sh 'rm -fr temp/*'
                 sh 'cp assets/SampleSheet_MixedIndexes.csv temp/SampleSheet.csv'
                 sh 'biomate --verbose blabber --format fastq --sample-sheet temp/SampleSheet.csv --seq-number 10 --output temp --flowcell-id 20260310_LM43899_0385_A12GGASZR5'
                 sh 'biomate --verbose fastrewind --input-path temp --output-path temp --threads 8'
