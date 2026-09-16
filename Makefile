@@ -7,7 +7,7 @@ MAKEFLAGS += --no-print-directory
 PROJECT_NAME := BioMate
 PROJECT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 UV ?= uv
-BCLCONVERT ?= bcl-convert
+BCLCONVERT ?= assets/bcl-convert
 BCLCONVERT_NOFILE ?= 65535
 BCLCONVERT_FD_ERROR_PATTERN ?= too many open files|bad file descriptor
 SHELL=/bin/bash
@@ -42,8 +42,9 @@ install-uv:
 .PHONY: check-bclconvert
 check-bclconvert:
 	@command -v $(BCLCONVERT) >/dev/null 2>&1 || { \
-		echo "Error: '$(BCLCONVERT)' not found in PATH."; \
-		echo "Install bcl-convert or set BCLCONVERT=/full/path/to/bcl-convert."; \
+		echo "Error: '$(BCLCONVERT)' not found."; \
+		echo "BCL-convert is a proprietary Illumina tool and is not bundled with this repository (its redistribution is prohibited)."; \
+		echo "Download it from https://support.illumina.com/sequencing/sequencing_software/bcl-convert/downloads.html and place the executable in the assets/ directory, or set BCLCONVERT=/full/path/to/bcl-convert."; \
 		exit 1; \
 	}
 
