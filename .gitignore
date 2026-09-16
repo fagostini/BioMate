@@ -196,3 +196,6 @@ test/*
 *.sif
 *_build.err
 *_build.out
+
+# BCL-convert
+**/bcl-convert
