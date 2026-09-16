@@ -10,6 +10,8 @@ For detailed tool documentation, see [docs/README.md](docs/README.md).
 - Python 3.12 or later
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 
+> _**Note:** Running the demultiplexing test recipes additionally requires the Illumina [BCL-convert](https://support.illumina.com/sequencing/sequencing_software/bcl-convert/downloads.html) executable, which is not bundled with this repository because its redistribution is prohibited. Download it from the [Illumina website](https://support.illumina.com/sequencing/sequencing_software/bcl-convert/downloads.html) and place it in the `assets/` directory. See [docs/README.md](docs/README.md#external-dependencies) for details._
+
 ### Recommended: Using uv
 
 ```bash
