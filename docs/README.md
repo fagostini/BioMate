@@ -23,3 +23,15 @@ In addition to the `--version` option, which prints the current version of the B
 > _**Note:** By default, the logging level is set to `INFO`, which will print general information about the execution of the sub-command, but not the detailed debug information._
 
 > _**Important:** In some cases (e.g. when the output will be printed to the standard output), the `--quiet` option will be applied automatically to avoid cluttering the output with unnecessary information. In such cases, the logging level will be set to `ERROR` regardless of the `--verbose` or `--quiet` options._
+
+## External dependencies
+
+### BCL-convert
+
+The demultiplexing test recipes (e.g. `make test_mix`) require the Illumina [BCL-convert](https://support.illumina.com/sequencing/sequencing_software/bcl-convert/downloads.html) executable. BCL-convert is a proprietary Illumina tool whose redistribution is prohibited, so it is **not included in this repository**. To use it:
+
+1. Download BCL-convert from the [Illumina website](https://support.illumina.com/sequencing/sequencing_software/bcl-convert/downloads.html) and accept the license terms.
+2. Place the `bcl-convert` executable in the `assets/` directory of this repository, i.e. as `assets/bcl-convert`.
+3. The file is listed in `.gitignore` and must never be committed.
+
+The `Makefile` looks for the executable at `assets/bcl-convert` by default. If the tool is installed elsewhere, set the `BCLCONVERT` variable to its full path (e.g. `make BCLCONVERT=/full/path/to/bcl-convert test_mix`).
