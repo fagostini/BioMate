@@ -2,7 +2,9 @@
 
 import argparse
 from contextlib import contextmanager
+import gzip
 import pathlib
+import struct
 
 import pytest
 import biomate.fastrewind.fastrewind as fastrewind_module
@@ -265,6 +267,78 @@ def test_preprocess_and_write_bcls_handles_odd_read_count(tmp_path, monkeypatch)
     assert cycle_2.exists()
     assert cycle_1.stat().st_size > 0
     assert cycle_2.stat().st_size > 0
+
+
+def _cbcl_body(path: pathlib.Path) -> bytes:
+    """Decompress the body of the first tile in a cbcl file."""
+    data = path.read_bytes()
+    hsize = struct.unpack_from("<HLBBI", data, 0)[1]
+    ntiles, = struct.unpack_from("<I", data, 44)
+    assert ntiles == 1
+    _, _, _, comp = struct.unpack_from("<IIII", data, 48)
+    return gzip.decompress(data[hsize : hsize + comp])
+
+
+def test_preprocess_and_write_bcls_packs_clusters_little_endian(tmp_path, monkeypatch):
+    """The first cluster of each byte goes in the low nibble and the odd tail
+    is zero-padded in the high nibble (the order bcl-convert expects)."""
+
+    class FakeBaseCall:
+        def __init__(self, base: str, quality: str):
+            self.sequence = base
+            self.qualities = quality
+
+    class FakeRead:
+        def __init__(self, sequence: str, qualities: str):
+            self.sequence = sequence
+            self.qualities = qualities
+
+        def __len__(self):
+            return len(self.sequence)
+
+        def __getitem__(self, idx):
+            return FakeBaseCall(self.sequence[idx], self.qualities[idx])
+
+    lane = "L002"
+    tiles_root = tmp_path / "tiles"
+    lane_dir = tiles_root / lane
+    lane_dir.mkdir(parents=True)
+    fq_path = lane_dir / "1_1001.fastq.gz"
+    fq_path.write_bytes(b"")
+
+    # "II" is Phred 40 -> quality bits "11", "!!" is Phred 0 -> "00";
+    # base map: A="00" C="01" G="10" T="11", N -> "00"
+    fake_reads = [
+        FakeRead("AC", "II"),
+        FakeRead("TG", "II"),
+        FakeRead("NN", "!!"),
+    ]
+
+    @contextmanager
+    def fake_dnaio_open(path, open_threads=0):
+        assert pathlib.Path(path) == fq_path
+        assert open_threads == 0
+        yield iter(fake_reads)
+
+    monkeypatch.setattr(fastrewind_module.dnaio, "open", fake_dnaio_open)
+
+    out_dir = tmp_path / "out"
+    preprocess_and_write_bcls(
+        output_path=out_dir,
+        lane=lane,
+        tiles_path=tiles_root,
+        total_cycles=2,
+        threads=0,
+        pattern_suffix="*_*.fastq.gz",
+    )
+
+    cycle_1 = out_dir / "Data/Intensities/BaseCalls/L002/C1.1/L002_1.cbcl"
+    cycle_2 = out_dir / "Data/Intensities/BaseCalls/L002/C2.1/L002_1.cbcl"
+
+    # Cycle 1: A="1100" (low) | T="1111" (high) -> 0xFC, N tail -> 0x00
+    assert _cbcl_body(cycle_1) == b"\xfc\x00"
+    # Cycle 2: C="1101" (low) | G="1110" (high) -> 0xED, N tail -> 0x00
+    assert _cbcl_body(cycle_2) == b"\xed\x00"
 
 
 def test_parse_fastq_groups_uses_only_r1_r2_with_extra_files(tmp_path, monkeypatch):

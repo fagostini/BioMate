@@ -1,6 +1,7 @@
 """Blabber main script."""
 
 import argparse
+import contextlib
 import logging
 import pathlib
 import re
@@ -371,7 +372,7 @@ def generate_dnaio_fastq_files(
     recipe: dict[str, int | str],
     prefix: str,
     extension: str,
-    tile: str | None = None,
+    tiles: list[str],
     taint: bool = False,
     sequences: list | None = None,
 ) -> list:
@@ -384,7 +385,8 @@ def generate_dnaio_fastq_files(
         recipe: Recipe dict with R1, R2, U1, U2 lengths
         prefix: Read name prefix
         extension: Read name extension
-        tile: Tile identifier
+        tiles: List of tile identifiers; sequences are assigned to them
+            round-robin so that every tile is used at least once
         taint: If True, return ~10% of sequences for contamination simulation
         sequences: Pre-generated sequences to use
 
@@ -401,21 +403,26 @@ def generate_dnaio_fastq_files(
         str(x)
         for x in rng.choice(range(1000, TILE_HEIGHT * 10 + 1), size=k, replace=False)
     ]
-    assert tile is not None, "tile must be provided"
-    available_tile_positions = product([tile], available_pos_x, available_pos_y)
+    assert tiles, "tiles must be provided"
     read1_len = int(recipe["R1"])
     read2_len = int(recipe["R2"])
     umi1 = int(recipe["U1"])
     umi2 = int(recipe["U2"])
     logging.debug(
-        f"Generating sequence for {[x.name for x in output_files]} using tile(s): {tile}"
+        f"Generating sequence for {[x.name for x in output_files]} using tile(s): {tiles}"
     )
     with dnaio.open(*output_files, mode="w", fileformat="fastq") as writer:
         for reads in sequences or []:
             if reads:
                 writer.write(*reads)
         for i in range(seq_number):
-            suffix = ":".join(next(available_tile_positions))
+            suffix = ":".join(
+                [
+                    tiles[i % len(tiles)],
+                    available_pos_x[i // k],
+                    available_pos_y[i % k],
+                ]
+            )
             if umi1 != 0:
                 suffix += ":" + "".join(rng.choice(list(nucleotides), size=umi1))
             if umi2 != 0:
@@ -451,6 +458,70 @@ def split(a, n):
     return (a[i * k + min(i, m) : (i + 1) * k + min(i + 1, m)] for i in range(n))
 
 
+def partition_tiles_by_lane(available_tiles: list, lanes: list[str]) -> dict[str, list]:
+    """Distribute the available tiles evenly across the lanes.
+
+    Each lane receives a pool of tiles whose sizes differ by at most one.
+
+    Args:
+        available_tiles: List of tile identifiers.
+        lanes: List of lane names.
+
+    Returns:
+        dict: Mapping of lane names to their tile pools.
+    """
+    if len(lanes) > len(available_tiles):
+        raise ValueError(
+            f"Cannot partition {len(available_tiles)} tiles across {len(lanes)} lanes: "
+            "each lane must receive at least one tile."
+        )
+    return dict(zip(lanes, split(available_tiles, len(lanes))))
+
+
+def tiles_per_lane(
+    pool_size: int, lane_sample_counts: list[int], seq_number: int
+) -> int:
+    """Compute the number of tiles to use per lane.
+
+    All tiles of a lane's pool are used unless some lane has fewer sequences
+    than tiles, in which case the per-lane tile count is capped so that every
+    lane uses the same number of tiles and every used tile gets at least one
+    sequence.
+
+    Args:
+        pool_size: Number of tiles available to each lane.
+        lane_sample_counts: Number of samples in each lane.
+        seq_number: Number of sequences generated per sample.
+
+    Returns:
+        int: Number of tiles to use per lane.
+    """
+    return min(pool_size, min(count * seq_number for count in lane_sample_counts))
+
+
+def assign_tiles_to_samples(tile_pool: list, n_samples: int) -> list[list]:
+    """Distribute a lane's tile pool across its samples.
+
+    Every sample receives at least one tile and every tile in the pool is
+    assigned to at least one sample, so that the whole pool is used.
+
+    Args:
+        tile_pool: List of tile identifiers belonging to a lane.
+        n_samples: Number of samples in the lane.
+
+    Returns:
+        list: List of tile lists, one per sample.
+    """
+    if n_samples <= 0:
+        raise ValueError("n_samples must be a positive integer.")
+    if not tile_pool:
+        raise ValueError("tile_pool must not be empty.")
+    pool_size = len(tile_pool)
+    return [
+        tile_pool[i::n_samples] or [tile_pool[i % pool_size]] for i in range(n_samples)
+    ]
+
+
 def generate_undetermined_files(
     output_basepath: pathlib.Path,
     taint_sequences: dict[str, list],
@@ -476,20 +547,21 @@ def generate_undetermined_files(
 
         lane_num = int(lane_match.group(1))
 
-        # Pool sequences from all samples in this lane
-        all_reads = []
+        # Pool the read pairs (lists of one or two SequenceRecords) from all samples
+        # in this lane, keeping the R1/R2 pairing intact
+        all_read_pairs = []
         for sample_list in sample_sequences:
             for reads in sample_list:
-                all_reads.extend(reads if isinstance(reads, list) else [reads])
+                all_read_pairs.append(reads if isinstance(reads, list) else [reads])
 
-        if not all_reads:
+        if not all_read_pairs:
             logging.debug(f"No taint sequences for lane {lane_num}")
             continue
 
         # Shuffle and take taint_rate fraction
-        rng.shuffle(all_reads)
-        n_taint = max(1, int(len(all_reads) * taint_rate))
-        taint_pool = all_reads[:n_taint]
+        rng.shuffle(all_read_pairs)
+        n_taint = max(1, int(len(all_read_pairs) * taint_rate))
+        taint_pool = all_read_pairs[:n_taint]
 
         logging.info(
             f"Writing {len(taint_pool)} tainted sequences to Undetermined files for lane {lane_num}"
@@ -506,16 +578,22 @@ def generate_undetermined_files(
 
         undetermined_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write undetermined files
+        # Write the R1 records to the R1 file and the R2 records (if any) to the
+        # R2 file, using separate writers so that single-end reads are supported
+        r2_present = any(len(reads) > 1 for reads in taint_pool)
         with dnaio.open(
-            str(undetermined_r1), str(undetermined_r2), mode="w", fileformat="fastq"
-        ) as writer:
-            for read_pair in taint_pool:
-                # read_pair is a list of SequenceRecord(s), typically [R1, R2] or [R1]
-                if isinstance(read_pair, list):
-                    writer.write(*read_pair)
-                else:
-                    writer.write(read_pair)
+            str(undetermined_r1), mode="w", fileformat="fastq"
+        ) as writer_r1:
+            r2_writer = (
+                dnaio.open(str(undetermined_r2), mode="w", fileformat="fastq")
+                if r2_present
+                else contextlib.nullcontext()
+            )
+            with r2_writer as writer_r2:
+                for reads in taint_pool:
+                    writer_r1.write(reads[0])
+                    if len(reads) > 1:
+                        writer_r2.write(reads[1])
 
 
 def main(args: argparse.Namespace) -> None:
@@ -595,19 +673,39 @@ def main(args: argparse.Namespace) -> None:
             ]
             rng.shuffle(available_tiles)
 
-            partitioned_available_tiles = [
-                x
-                for x in split(
-                    available_tiles,
-                    len(
-                        [
-                            (proj, sample)
-                            for proj, samples in sample_sheet.items()
-                            for sample in samples
-                        ]
+            lanes = sorted(
+                {
+                    lane
+                    for samples in sample_sheet.values()
+                    for (_, lane, _) in samples.values()
+                }
+            )
+            lane_tile_pools = partition_tiles_by_lane(available_tiles, lanes)
+            lane_samples = defaultdict(list)
+            for proj, samples in sample_sheet.items():
+                for sample, (_, lane, _) in samples.items():
+                    lane_samples[lane].append((proj, sample))
+            tiles_per_lane_count = tiles_per_lane(
+                min(len(pool) for pool in lane_tile_pools.values()),
+                [len(samples) for samples in lane_samples.values()],
+                args.seq_number,
+            )
+            sample_tiles = {}
+            for lane, tile_pool in lane_tile_pools.items():
+                n_samples = len(lane_samples[lane])
+                for (proj, sample), tiles in zip(
+                    lane_samples[lane],
+                    assign_tiles_to_samples(
+                        tile_pool[:tiles_per_lane_count], n_samples
                     ),
-                )
-            ]
+                ):
+                    sample_tiles[(proj, sample)] = tiles
+            logging.info(
+                f"Using {tiles_per_lane_count} tiles per lane "
+                f"({tiles_per_lane_count * len(lanes)} of "
+                f"{len(available_tiles)} available tiles)"
+            )
+
             for proj, samples in sample_sheet.items():
                 for sample, (index, lane, recipe) in samples.items():
                     proj_prefix = prefix + f":{lane}"  # Lane number
@@ -627,22 +725,13 @@ def main(args: argparse.Namespace) -> None:
                         output_basepath.joinpath(proj)
                         .joinpath(sample)
                         .joinpath(
-                            f"{sample.replace('Sample_', '')}_{index}_R{i}_001.fastq.gz"
+                            f"{sample.replace('Sample_', '')}_{index}_{read}_001.fastq.gz"
                         )
-                        for i, _ in enumerate(
-                            {
-                                k: v
-                                for k, v in recipe.items()
-                                if k in ["R1", "R2", "R3"]
-                            },
-                            start=1,
-                        )
+                        for read, length in recipe.items()
+                        if read in ["R1", "R2", "R3"] and length != 0
                     ]
                     if not output_files[0].parent.is_dir():
                         output_files[0].parent.mkdir(parents=True, exist_ok=True)
-
-                    available_tiles = partitioned_available_tiles.pop()
-                    unique_tile = available_tiles.pop()
 
                     sampled_sequences = generate_dnaio_fastq_files(
                         output_files,
@@ -651,7 +740,7 @@ def main(args: argparse.Namespace) -> None:
                         recipe,
                         proj_prefix,
                         extension,
-                        unique_tile,
+                        sample_tiles[(proj, sample)],
                         args.taint,
                     )
                     taint_sequences.setdefault(lane_key, []).append(sampled_sequences)

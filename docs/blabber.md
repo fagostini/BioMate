@@ -55,6 +55,12 @@ The input sample sheet will be copied to the flowcell folder as `SampleSheet.csv
 
 When generating sequences based on a sample sheet, it is possible to simulate cases in which multiple recipes are present on the same lane. Running the demux process sequentially for each recipe will result in the unassigned files containing redundant reads belonging to the other recipes. By using the `taint` option, the unassigned reads contain ~10% of the reads from each sample present in the shared lane.
 
+### Tile Distribution
+
+When a sample sheet is provided, the available tiles (2 surfaces × 4 swaths × 16 tiles = 128) are distributed evenly across the lanes present in the sheet, so that each lane receives the same number of tiles (pool sizes differ by at most one when the tile count is not divisible by the number of lanes). Within each lane, the tile pool is shared among its samples — each sample's sequences are assigned to its tiles round-robin — so that every tile used in a lane appears in at least one sequence, regardless of how many samples or projects a lane contains.
+
+All available tiles are used by default. If a lane's total number of sequences (`samples per lane × --seq-number`) is lower than its tile pool, the per-lane tile count is capped to the largest number of tiles that every lane can fully cover, so that each lane still uses exactly the same number of tiles and no used tile is left without sequences.
+
 ## Caveats
 
-When simulating a flowcell run, there are some assumptions and tricks that do not really allow us to create a real-case dataset. These are mainly represented by the random numbers used in reads naming. Specifically, there is no check for duplicate entries (e.g. although unlikely, two reads might end up having the same tile, x and y positions) or for distribution balance (e.g. the reads distribution across lanes and tiles might be very skewed). These issues will be addressed in the future, as for the time being they were not considered harmful for the type of testing we carried out.
+When simulating a flowcell run, there are some assumptions and tricks that do not really allow us to create a real-case dataset. These are mainly represented by the random numbers used in reads naming. Specifically, there is no check for duplicate entries (e.g. although unlikely, two reads might end up having the same tile, x and y positions). The balance of the tile distribution across lanes, however, is now guaranteed as described above.
