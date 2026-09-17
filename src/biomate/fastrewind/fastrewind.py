@@ -877,13 +877,14 @@ def preprocess_and_write_bcls(
                             read_length = read.__len__()
                             # Even indexes mean that the byte is complete
                             if i % 2 == 0:
-                                # Cycle through the sequence and quality positions and extract the corresponding bits,
-                                # adding them to those already stored in the buffer
+                                # Cycle through the sequence and quality positions and extract the corresponding
+                                # bits. The byte is little-endian: the first cluster of the pair goes in the low
+                                # nibble and the buffered (previous) cluster in the high nibble
                                 for cycle in range(read_length):
-                                    bits_string = buffer[cycle] + encode_cluster_bits(
+                                    bits_string = encode_cluster_bits(
                                         read.__getitem__(cycle),
                                         quality_map,
-                                    )
+                                    ) + buffer[cycle]
                                     # Convert the bits to a byte and write them to file
                                     try:
                                         opened_files[cycle].write(
@@ -896,7 +897,7 @@ def preprocess_and_write_bcls(
                                 # Add N (00) with lowest quality (00) for the cycles beyond the read length
                                 if read_length < total_cycles:
                                     for cycle in range(read_length, total_cycles):
-                                        bits_string = buffer[cycle] + "0000"
+                                        bits_string = "0000" + buffer[cycle]
                                         # Convert the bits to a byte and write them to file
                                         opened_files[cycle].write(
                                             bytes([int(bits_string, 2)])
@@ -919,11 +920,12 @@ def preprocess_and_write_bcls(
                             tiles_metrics[tile_id]["clusters"] += 1
 
                         # If there is an odd number of sequences, the buffer will be incomplete (4 out of 8 bits);
-                        # fill the rest of the buffer with 0 and write it to file
+                        # the last cluster goes in the low nibble and the rest of the byte
+                        # is padded with 0
                         if buffer:
                             for cycle in range(min(len(buffer), total_cycles)):
                                 opened_files[cycle].write(
-                                    bytes([int(buffer[cycle].ljust(8, "0"), 2)])
+                                    bytes([int("0000" + buffer[cycle], 2)])
                                 )
                             for cycle in range(len(buffer), total_cycles):
                                 opened_files[cycle].write(bytes([0]))
