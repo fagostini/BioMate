@@ -179,7 +179,7 @@ $(TEMP_DIR)/Data $(TEMP_DIR)/RunInfo.xml: check-uv $(TEMP_DIR)/$(FLOWCELL_ID) cl
 
 validate_samplesheet: check-bclconvert $(TEMP_DIR)/RunInfo.xml
 	@ulimit -Sn $(BCLCONVERT_NOFILE) 2>/dev/null && echo "BCL-convert soft nofile limit set to $$(ulimit -Sn)" || true
-	@$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true --bcl-validate-sample-sheet-only true > $(TEMP_DIR)/bcl-validate.out 2> $(TEMP_DIR)/bcl-validate.err && echo "BCL-convert SampleSheet validation was successful!" || { echo "Error executing BCL-convert SampleSheet validation!"; exit 1; }
+	@$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true --bcl-output-format demux-autodetect --bcl-validate-sample-sheet-only true > $(TEMP_DIR)/bcl-validate.out 2> $(TEMP_DIR)/bcl-validate.err && echo "BCL-convert SampleSheet validation was successful!" || { echo "Error executing BCL-convert SampleSheet validation!"; exit 1; }
 	@$(MAKE) smoke-bclconvert-fd
 
 $(TEMP_DIR)/Demultiplexing: check-bclconvert $(TEMP_DIR)/RunInfo.xml clean_demux
