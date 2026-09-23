@@ -16,7 +16,6 @@ from biomate.fastrewind.fastrewind import (
     parse_fastq_groups,
     parse_sequence_mask,
     preprocess_and_write_bcls,
-    tile_to_int,
     validate_args,
     write_index_metrics,
 )
@@ -527,23 +526,6 @@ def test_parse_fastq_groups_skips_when_no_r1_r2(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# tile_to_int
-# ---------------------------------------------------------------------------
-
-
-class TestTileToInt:
-    def test_novaseq_x_tile(self):
-        """A NovaSeq X tile name maps to the numeric InterOp tile number."""
-        assert tile_to_int("11A01") == 1101
-        assert tile_to_int("24A98") == 2498
-
-    def test_three_digit_tile(self):
-        """A plain numeric tile name is unchanged."""
-        assert tile_to_int("111") == 111
-        assert tile_to_int("118") == 118
-
-
-# ---------------------------------------------------------------------------
 # write_index_metrics
 # ---------------------------------------------------------------------------
 
@@ -779,16 +761,16 @@ def test_parse_fastq_groups_accumulates_index_counts(tmp_path, monkeypatch):
 
     records = [
         (
-            FakeRead(make_read("11A01", "1"), "AC", "II"),
-            FakeRead(make_read("11A01", "2"), "GT", "II"),
+            FakeRead(make_read("1101", "1"), "AC", "II"),
+            FakeRead(make_read("1101", "2"), "GT", "II"),
         ),
         (
-            FakeRead(make_read("11A01", "1"), "AC", "II"),
-            FakeRead(make_read("11A01", "2"), "GT", "II"),
+            FakeRead(make_read("1101", "1"), "AC", "II"),
+            FakeRead(make_read("1101", "2"), "GT", "II"),
         ),
         (
-            FakeRead(make_read("11A02", "1"), "AC", "II"),
-            FakeRead(make_read("11A02", "2"), "GT", "II"),
+            FakeRead(make_read("1102", "1"), "AC", "II"),
+            FakeRead(make_read("1102", "2"), "GT", "II"),
         ),
     ]
 
@@ -866,7 +848,7 @@ def test_parse_fastq_groups_without_index_counts_unchanged(tmp_path, monkeypatch
     sample_name = "Sample_1_S1_L001_001"
     tempdir = tmp_path / "lane_tmp"
     tempdir.mkdir(parents=True)
-    read_name = "INST:1:FLOWCELL:1:11A01:1001:1002 1:N:0:ACGT+TGCA"
+    read_name = "INST:1:FLOWCELL:1:1101:1001:1002 1:N:0:ACGT+TGCA"
     records = [
         (
             FakeRead(read_name, "AC", "II"),
@@ -907,8 +889,8 @@ def test_parse_fastq_groups_without_index_counts_unchanged(tmp_path, monkeypatch
         instrument="NovaSeqXPlus",
     )
 
-    assert "11A01" in result
-    assert (1001, 1002) in result["11A01"]
+    assert "1101" in result
+    assert (1001, 1002) in result["1101"]
 
 
 # ---------------------------------------------------------------------------

@@ -496,7 +496,7 @@ def parse_fastq_groups(
     def count_index_cluster(tile: str) -> None:
         """Count the cluster for the InterOp index metrics, if requested."""
         if index_counts is not None:
-            key = (lane, tile_to_int(tile), name)
+            key = (lane, int(tile), name)
             index_counts[key] = index_counts.get(key, 0) + 1
 
     def process_read_name(name: str) -> tuple[list, str, list]:
@@ -743,12 +743,6 @@ def write_locs(locs_path: pathlib.Path, unique_locs: list) -> None:
         f_out.write(struct.pack("<IfI", 1, 1, len(unique_locs)))
         for x_pos, y_pos in unique_locs:
             f_out.write(encode_loc_bytes(x_pos, y_pos))
-
-
-def tile_to_int(tile: str) -> int:
-    """Convert a tile name to the numeric tile number used in InterOp files."""
-    # e.g. '11A01' -> 1101, '111' -> 111
-    return int(tile.replace("A", ""))
 
 
 def write_index_metrics(
