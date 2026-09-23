@@ -24,6 +24,10 @@ TILE_HEIGHT = 160  # 2879
 SURFACE_COUNT = 2
 SWATH_COUNT = 4
 TILE_COUNT = 16
+# Version of the InterOp IndexMetricsOut.bin binary format (version 2 is the
+# one written by current instruments, version 1 the one documented in the
+# bcl2fastq2 software guide)
+INTEROP_INDEX_VERSION = 2
 
 
 def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -58,6 +62,13 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         type=int,
         required=False,
         help="The total number of cycles. Shorter samples will be filled with Ns.",
+    )
+    parser.add_argument(
+        "--interop-dir",
+        type=pathlib.Path,
+        required=False,
+        default=None,
+        help="Path to the InterOp directory where IndexMetricsOut.bin is written (default: <output-path>/InterOp).",
     )
     parser.add_argument(
         "--instrument",
@@ -121,6 +132,9 @@ def validate_args(args) -> argparse.Namespace:
         else:
             logging.warning("Cleaning up the output directory before proceeding...")
             clean_directory(args.output_path.joinpath("Data"))
+            interop_dir = args.interop_dir or args.output_path.joinpath("InterOp")
+            if interop_dir.is_dir():
+                clean_directory(interop_dir)
     else:
         logging.debug("The output directory does not exist! It will be created...")
     return args
@@ -222,6 +236,10 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
     if "OverrideCycles" not in data.columns and "Recipe" not in data.columns:
         raise RuntimeError("OverrideCycles or Recipe column not found in Data section!")
 
+    # Keep the sample project for the InterOp index metrics, defaulting to 'NA'
+    if "Sample_Project" not in data.columns:
+        data = data.with_columns(polars.lit("NA").alias("Sample_Project"))
+
     data = (
         # Add a sample index column
         data.with_row_index(name="Sample_Index", offset=1)
@@ -240,9 +258,22 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
         )
         .filter(polars.col("Sample_Name").is_not_null())
         .with_columns(
-            polars.concat_str("Sample_Name", "Sample_Index", "Lane", separator="_")
+            [
+                # Keep the original sample name, before it is replaced by the group name
+                polars.col("Sample_Name").alias("Original_Sample_Name"),
+                polars.concat_str("Sample_Name", "Sample_Index", "Lane", separator="_"),
+            ]
         )
-        .select(["Sample_Name", "index", "index2", "OverrideCycles"])
+        .select(
+            [
+                "Sample_Name",
+                "Original_Sample_Name",
+                "Sample_Project",
+                "index",
+                "index2",
+                "OverrideCycles",
+            ]
+        )
     )
     data = (
         # Fill null values in the index columns with empty strings
@@ -317,6 +348,8 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
     # Check that all the expected columns are present
     assert data.columns == [
         "Sample_Name",
+        "Original_Sample_Name",
+        "Sample_Project",
         "U1",
         "R1B",
         "R1",
@@ -331,6 +364,8 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
 
     data = {
         sn: {
+            "sample_name": sname,
+            "sample_project": sproj,
             "R1B": "N" * r1b,
             "R1": r1,
             "R1A": "N" * r1a,
@@ -340,7 +375,7 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
             "R2": r2,
             "R2A": "N" * r2a,
         }
-        for sn, u1, r1b, r1, r1a, i1, u2, i2, r2b, r2, r2a in data.iter_rows()
+        for sn, sname, sproj, u1, r1b, r1, r1a, i1, u2, i2, r2b, r2, r2a in data.iter_rows()
     }
 
     return data
@@ -449,6 +484,7 @@ def parse_fastq_groups(
     tempdir: pathlib.Path,
     threads: int = 0,
     instrument: str = "NovaSeqXPlus",
+    index_counts: dict | None = None,
 ) -> dict:
     """Parse the FASTQ files and dumps reads and positions into separate files."""
     # Tiles list, used to update the Counter
@@ -456,6 +492,12 @@ def parse_fastq_groups(
     buffer_container = defaultdict(list)
     buffer_counter = 0
     buffer_avro = []
+
+    def count_index_cluster(tile: str) -> None:
+        """Count the cluster for the InterOp index metrics, if requested."""
+        if index_counts is not None:
+            key = (lane, int(tile), name)
+            index_counts[key] = index_counts.get(key, 0) + 1
 
     def process_read_name(name: str) -> tuple[list, str, list]:
         """Split the read name and return a list with the name parts and the indexes, if any."""
@@ -534,6 +576,7 @@ def parse_fastq_groups(
         if len(filenames) == 1:
             for buffer_counter, r1 in enumerate(reader, start=1):
                 split_name, indexes, umis = process_read_name(r1.name)
+                count_index_cluster(split_name[4])
                 # Assume the index is at the end
                 indexes = f"{sample_recipe['I1']}"
                 r1.sequence += indexes
@@ -571,6 +614,7 @@ def parse_fastq_groups(
         elif len(filenames) == 2:
             for buffer_counter, (r1, r2) in enumerate(reader, start=1):
                 split_name, indexes, umis = process_read_name(r1.name)
+                count_index_cluster(split_name[4])
                 # Redefine the indexes to include 'N's, if any
                 umi1, umi2 = umis if len(umis) == 2 else [""] + umis
                 indexes = f"{sample_recipe['I1']}{sample_recipe['I2']}"
@@ -699,6 +743,84 @@ def write_locs(locs_path: pathlib.Path, unique_locs: list) -> None:
         f_out.write(struct.pack("<IfI", 1, 1, len(unique_locs)))
         for x_pos, y_pos in unique_locs:
             f_out.write(encode_loc_bytes(x_pos, y_pos))
+
+
+def write_index_metrics(
+    path: pathlib.Path,
+    records: list,
+    version: int = INTEROP_INDEX_VERSION,
+) -> None:
+    """Write the InterOp IndexMetricsOut.bin file.
+
+    Each record is a (lane, tile, read, index, count, sample, project) tuple,
+    where lane, tile, read and count are integers and index, sample and
+    project are strings. The format follows the Illumina InterOp library
+    (Index Version 1/2): a version byte followed by little-endian records
+    with length-prefixed UTF-8 strings.
+    """
+    if version not in (1, 2):
+        raise ValueError(f"Unsupported InterOp index metrics version: {version}")
+    path.parent.mkdir(exist_ok=True, parents=True)
+    id_format = "<HHH" if version == 1 else "<HIH"
+    count_format = "<I" if version == 1 else "<Q"
+    with open(path, "wb") as f_out:
+        f_out.write(struct.pack("<B", version))
+        for lane, tile, read, index, count, sample, project in records:
+            index_bytes = (index or "NA").encode("utf-8")
+            sample_bytes = (sample or "NA").encode("utf-8")
+            project_bytes = (project or "NA").encode("utf-8")
+            f_out.write(struct.pack(id_format, lane, tile, read))
+            f_out.write(struct.pack("<H", len(index_bytes)) + index_bytes)
+            f_out.write(struct.pack(count_format, count))
+            f_out.write(struct.pack("<H", len(sample_bytes)) + sample_bytes)
+            f_out.write(struct.pack("<H", len(project_bytes)) + project_bytes)
+
+
+def build_index_records(
+    index_counts: dict,
+    masks_table: dict,
+    cycles_dict: dict,
+) -> list:
+    """Expand the per-tile cluster counts into InterOp index metrics records.
+
+    index_counts maps (lane, tile_number, sample_group) to the number of
+    clusters observed for that sample on that tile. Returns
+    (lane, tile, read, index, count, sample, project) tuples ordered by
+    lane, sample, tile and read, like the instrument files.
+    """
+    # Index reads are numbered by their position among the index reads of the
+    # run (I1 -> 1, I2 -> 2), like the instrument's InterOp files, regardless
+    # of where they sit in the run's overall read numbering
+    run_index_reads = [key for key in ("I1", "I2") if cycles_dict.get(key, 0) != 0]
+    read_numbers = {key: i for i, key in enumerate(run_index_reads, start=1)}
+
+    records = []
+    for (lane, tile, group), count in index_counts.items():
+        recipe = masks_table.get(group)
+        if not recipe or count <= 0:
+            continue
+        sample = recipe.get("sample_name") or "NA"
+        project = recipe.get("sample_project") or "NA"
+        sample_index_reads = [key for key in ("I1", "I2") if recipe.get(key)]
+        if not sample_index_reads:
+            continue
+        # The sample's full index (dual indexes joined with '-') is repeated
+        # in one record per index read of the run, all with the same count
+        index_name = "-".join(recipe[key] for key in sample_index_reads)
+        for read_key in run_index_reads:
+            records.append(
+                (
+                    int(lane[-1]),
+                    tile,
+                    read_numbers[read_key],
+                    index_name,
+                    count,
+                    sample,
+                    project,
+                )
+            )
+    records.sort(key=lambda record: (record[0], record[5], record[1], record[2]))
+    return records
 
 
 def extract_flowcell_layout(lane_tiles: dict) -> tuple:
@@ -1113,6 +1235,9 @@ def main(args: argparse.Namespace) -> None:
 
     # Dictionary containing all unique tiles per lane
     tiles_by_lane = defaultdict(set)
+    # Dictionary containing the cluster counts by (lane, tile, sample group)
+    # for the InterOp index metrics
+    index_counts = defaultdict(int)
     lanes_filter_dict = dict()
     for lane, files in lanes_dict.items():
         logging.info(f"Processing lane '{lane}'")
@@ -1152,6 +1277,7 @@ def main(args: argparse.Namespace) -> None:
                     tempdir,
                     args.threads,
                     args.instrument,
+                    index_counts,
                 )
 
                 for k, v in tiles_and_locs.items():
@@ -1249,6 +1375,15 @@ def main(args: argparse.Namespace) -> None:
         TILE_COUNT,  # alternatively: int(tile_count / surface_count / swath_count)
         tile_names,
         sample_read,
+    )
+
+    logging.info("Writing InterOp index metrics...")
+    interop_dir = args.interop_dir or args.output_path.joinpath("InterOp")
+    index_records = build_index_records(index_counts, masks_table, cycles_dict)
+    write_index_metrics(interop_dir.joinpath("IndexMetricsOut.bin"), index_records)
+    logging.debug(
+        f"Wrote {len(index_records)} index metrics records to "
+        f"'{interop_dir.joinpath('IndexMetricsOut.bin')}'"
     )
 
     if not args.output_path.joinpath("SampleSheet.csv").exists():

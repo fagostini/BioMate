@@ -14,9 +14,16 @@ The minimal command is `biomate fastrewind --input <PATH>`. This will search for
 - `--output-path`: Path to the output directory where the BCL structure will be created (default: current directory).
 - `--sample-sheet`: Path to the Sample Sheet file. If not provided, the script will look for SampleSheet.csv in the input directory.
 - `--total-cycles`: The total number of cycles. If this is larger than the sequences in the samples, shorter samples will be filled with Ns.
+- `--interop-dir`: Path to the InterOp directory where `IndexMetricsOut.bin` is written (default: `<output-path>/InterOp`).
 - `--instrument`: The type of Illumina instrument, which will determine the type of outputs and folder structure. _Please, be aware that only the NovaSeqXPlus is currently supported._
 - `--threads`: Number of threads used by dnaio to read/write files. Default is 0, which corresponds to a single thread.
-- `--force`: Force overwrite of existing files in the output directory.
+- `--force`: Force overwrite of existing files in the output directory (the `Data` and `InterOp` folders are cleaned up when re-running into an existing output).
+
+## InterOp Output
+
+In addition to the BCL structure, FastRewind generates the InterOp index metrics file `InterOp/IndexMetricsOut.bin` (location configurable via `--interop-dir`), which stores the number of clusters identified as each index, per lane, tile and index read. This mirrors the file described in the [bcl2fastq2 software guide](https://support.illumina.com/content/dam/illumina-support/documents/documentation/software_documentation/bcl2fastq/bcl2fastq2-v2-17-software-guide-15051736-g.pdf) and produced by the instrument, and can be read back by the official [Illumina InterOp library](https://github.com/Illumina/interop).
+
+The file format follows the InterOp "Index Version 2" binary layout: a leading version byte followed by little-endian records of lane, tile, read, a length-prefixed UTF-8 index name, a cluster count, and length-prefixed UTF-8 sample and project names. Tiles are stored as their numeric identifier from the FASTQ read name, and dual indexes are stored as a single `I1-I2` name, one record per index read. Index reads are numbered by their position among the run's index reads (`I1` -> `1`, `I2` -> `2`), matching the files produced by the instrument and independent of the overall read numbering in `RunInfo.xml`. The cluster counts are derived directly from the demultiplexed FASTQ input (one count per observed cluster), so only samples with at least one index cycle contribute records.
 
 ## Workflow Schematic Diagram
 
@@ -33,6 +40,9 @@ The conversion between Python values and C structs represented as Python bytes o
 - [Quality Scores](https://support-docs.illumina.com/IN/NovaSeqX/Content/IN/NovaSeqX/RTAOverview.htm)
 - [Flowcell Components](https://support-docs.illumina.com/IN/NextSeq_550-500/Content/IN/NextSeq/FlowCell_Tiles_fNS.htm)
 - [bcl2fastq](https://support.illumina.com/content/dam/illumina-support/documents/documentation/software_documentation/bcl2fastq/bcl2fastq2-v2-20-software-guide-15051736-03.pdf)
+- [bcl2fastq v2.17 (InterOp file specification)](https://support.illumina.com/content/dam/illumina-support/documents/documentation/software_documentation/bcl2fastq/bcl2fastq2-v2-17-software-guide-15051736-g.pdf)
+- [Illumina InterOp library](https://github.com/Illumina/interop)
+- [InterOp binary formats](http://illumina.github.io/interop/binary_formats.html)
 
 ### Encoding BCL Header and Nucleotides Examples
 
