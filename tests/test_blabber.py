@@ -27,6 +27,8 @@ from biomate.blabber.blabber import (
 
 
 class TestParseSequenceMask:
+    """Tests for parse_sequence_mask."""
+
     def test_r1_only(self):
         """A single-segment Y mask sets R1 and leaves all other fields at 0."""
         result = parse_sequence_mask("Y151")
@@ -118,7 +120,10 @@ class TestParseSequenceMask:
 
 
 class TestValidateArgs:
+    """Tests for validate_args."""
+
     def _base_args(self, **overrides):
+        """Build a valid Namespace, overridable per test."""
         args = argparse.Namespace(
             alphabet="ACGT",
             seq_length=50,
@@ -209,6 +214,8 @@ def all_tile_ids() -> set:
 
 
 class TestPartitionTilesByLane:
+    """Tests for partition_tiles_by_lane."""
+
     def test_equal_partition_when_divisible(self):
         """128 tiles across 4 lanes gives exactly 32 tiles per lane."""
         tiles = sorted(all_tile_ids())
@@ -245,6 +252,8 @@ class TestPartitionTilesByLane:
 
 
 class TestAssignTilesToSamples:
+    """Tests for assign_tiles_to_samples."""
+
     def test_fewer_samples_than_tiles_covers_all_tiles(self):
         """With 4 samples and 16 tiles, every sample gets 4 tiles and all are used."""
         pool = [f"11{i:02d}" for i in range(1, 17)]
@@ -295,6 +304,8 @@ class TestAssignTilesToSamples:
 
 
 class TestTilesPerLane:
+    """Tests for tiles_per_lane."""
+
     def test_uses_full_pool_when_all_lanes_can_cover_it(self):
         """No cap applies when every lane has enough sequences for its pool."""
         assert tiles_per_lane(16, [8, 4, 5], 10) == 16
@@ -313,6 +324,7 @@ class TestTilesPerLane:
         assert tiles_per_lane(16, counts, 10) == 10
 
     def test_large_seq_number_uses_full_pool(self):
+        """A seq_number large enough to cover the pool leaves it uncapped."""
         counts = [1, 8, 4, 5, 11, 4, 8, 6]
         assert tiles_per_lane(16, counts, 1000) == 16
 
@@ -386,6 +398,8 @@ def read_lane_tiles(demux_path: pathlib.Path) -> dict[str, set]:
 
 
 class TestSampleSheetTileDistribution:
+    """Tests for the tile distribution driven by a sample sheet."""
+
     def test_equal_tiles_per_lane_and_full_coverage(self, tmp_path):
         """Each lane uses an equal number of tiles and all 128 tiles are covered."""
         sheet = tmp_path / "SampleSheet.csv"
@@ -488,6 +502,8 @@ Lane,Sample_ID,Sample_Name,index,index2,Sample_Project,OverrideCycles
 
 
 class TestSingleEndAndTaint:
+    """Tests for single-end generation and base-calling taints."""
+
     def test_single_end_generates_r1_only(self, tmp_path):
         """A single-end recipe produces an R1 file with reads and no R2 file."""
         sheet = tmp_path / "SampleSheet.csv"
@@ -509,7 +525,9 @@ class TestSingleEndAndTaint:
 
         demux_path = tmp_path / "TESTFC" / "Demultiplexing"
         undetermined = sorted(demux_path.glob("Undetermined*"))
-        assert [f.name for f in undetermined] == ["Undetermined_S0_L001_R1_001.fastq.gz"]
+        assert [f.name for f in undetermined] == [
+            "Undetermined_S0_L001_R1_001.fastq.gz"
+        ]
         assert _count_reads(undetermined[0]) > 0
 
     def test_paired_end_taint_creates_both_undetermined_files(self, tmp_path):

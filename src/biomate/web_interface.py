@@ -458,6 +458,77 @@ MODULES: List[Dict[str, Any]] = [
             },
         ],
     },
+    {
+        "name": "waif",
+        "title": "Undetermined Barcode Intersection",
+        "short_description": (
+            "Reports the barcodes that remain undetermined in every "
+            "demultiplexing run of a lane, with an estimated read count."
+        ),
+        "description": (
+            "Waif compares the undetermined barcodes of all bcl-convert runs "
+            "that share a lane and reports the barcodes undetermined in "
+            "every one of them, with the mean count rounded up to a multiple "
+            "of 10. By default it reads the UnknownBarcodes field of the "
+            "Stats.json files; with the Exact flag it counts the undetermined "
+            "FASTQ headers directly (a Sample Sheet is then required to "
+            "identify the shared lanes). Outputs a CSV with Lane, Barcode, "
+            "Count and Total % columns."
+        ),
+        "parameters": [
+            {
+                "label": "Input Path",
+                "param_type": "text",
+                "default": "",
+                "help": (
+                    "Directory containing the Stats.json files (or the "
+                    "undetermined FASTQ files when Exact is set)"
+                ),
+                "form_name": "input_path",
+                "cli_name": "input-path",
+            },
+            {
+                "label": "Output File",
+                "param_type": "text",
+                "default": "",
+                "help": "CSV file to write the results to (leave empty to stream from server)",
+                "form_name": "output_file",
+                "cli_name": "output-file",
+            },
+            {
+                "label": "Exact",
+                "param_type": "boolean",
+                "default": False,
+                "help": (
+                    "Count undetermined indexes exactly by reading the "
+                    "undetermined FASTQ files (requires a Sample Sheet)"
+                ),
+                "form_name": "exact",
+                "cli_name": "exact",
+            },
+            {
+                "label": "Sample Sheet Path",
+                "param_type": "text",
+                "default": "",
+                "help": (
+                    "Path to SampleSheet.csv (looks in the input directory if omitted)"
+                ),
+                "form_name": "sample_sheet",
+                "cli_name": "sample-sheet",
+            },
+            {
+                "label": "Block Cache Directory",
+                "param_type": "text",
+                "default": "",
+                "help": (
+                    "Directory for a gzip member-offset index enabling "
+                    "forked parallel counting (Linux only)"
+                ),
+                "form_name": "block_cache",
+                "cli_name": "block-cache",
+            },
+        ],
+    },
 ]
 
 
@@ -588,6 +659,7 @@ class ParamDict(dict):
     """A dict subclass that supports attribute access for Tornado templates."""
 
     def __getattr__(self, key):
+        """Resolve attribute access to item access."""
         try:
             return self[key]
         except KeyError:
@@ -596,10 +668,12 @@ class ParamDict(dict):
             )
 
     def __setattr__(self, key, value):
+        """Map attribute assignment to item assignment."""
         self[key] = value
 
 
 def _module_list() -> list:
+    """Return MODULES with the derived is_path flag added to each parameter."""
     _path_keywords = ["path", "file", "directory", "folder", "sheet"]
     result = []
     for m in MODULES:
@@ -621,6 +695,7 @@ def _module_list() -> list:
 
 
 def get_loader() -> tornado.template.Loader:
+    """Return the template loader for the design directory, created lazily."""
     global _loader
     if _loader is None:
         _loader = tornado.template.Loader(str(_DESIGN_DIR))
@@ -660,6 +735,7 @@ class MainHandler(SecurityHeadersMixin):
     """Main dashboard - lists all BioMate tools."""
 
     def get(self):
+        """Serve the dashboard listing all BioMate tools."""
         loader = get_loader()
         t = loader.load("main.html")
         self.write(t.generate(modules=_module_list(), gs_version="0.3.0"))
@@ -669,6 +745,7 @@ class ModuleHandler(SecurityHeadersMixin):
     """Individual tool page with form and result display."""
 
     def get(self, module_name: str):
+        """Serve the form page of the requested tool."""
         module = self._find_module(module_name)
         if not module:
             self.set_status(404)
@@ -686,8 +763,6 @@ class ModuleHandler(SecurityHeadersMixin):
                 "default": p.get("default", ""),
                 "is_boolean": p.get("param_type") == "boolean",
             }
-        from json import dumps
-
         self.write(
             t.generate(
                 module=mod,
@@ -700,6 +775,7 @@ class ModuleHandler(SecurityHeadersMixin):
         )
 
     def post(self, module_name: str):
+        """Run the requested tool with the submitted form and show the result."""
         module = self._find_module(module_name)
         if not module:
             self.set_status(404)
@@ -760,6 +836,7 @@ class ModuleHandler(SecurityHeadersMixin):
         )
 
     def _find_module(self, name: str):
+        """Return the MODULES entry with the given name, or None."""
         for m in MODULES:
             if m["name"] == name:
                 return m

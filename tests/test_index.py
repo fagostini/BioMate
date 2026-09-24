@@ -19,6 +19,8 @@ from biomate.index.index import (
 
 
 class TestCompileIndexRegex:
+    """Tests for compile_index_regex."""
+
     def test_returns_compiled_regex(self):
         """compile_index_regex returns an object with a search method."""
         pattern = compile_index_regex("ACGT", distance=0, error_type="s")
@@ -79,6 +81,8 @@ class TestCompileIndexRegex:
 
 
 class TestExpandRegex:
+    """Tests for expand_regex."""
+
     def test_literal_returns_single_element(self):
         """A literal sequence expands to a set containing only itself."""
         assert expand_regex("ACGT") == {"ACGT"}
@@ -137,6 +141,8 @@ class TestExpandRegex:
 
 
 class TestValidateArgs:
+    """Tests for validate_args."""
+
     def _make_args(
         self,
         input_path,
@@ -146,6 +152,7 @@ class TestValidateArgs:
         distance=0,
         error_type="s",
     ):
+        """Build an index Namespace with the given overrides."""
         return argparse.Namespace(
             input=input_path,
             index_regex=index_regex,
@@ -176,7 +183,10 @@ class TestValidateArgs:
 
 
 class TestWriteResults:
+    """Tests for write_results."""
+
     def _make_results(self):
+        """Build a small results dict across two files and two patterns."""
         results = defaultdict(Counter)
         results["0"][("ACGT", "TTTT")] = 10
         results["0"][("ACGG", "TTTT")] = 5
