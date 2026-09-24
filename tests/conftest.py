@@ -81,6 +81,7 @@ Lane,Sample_ID,Sample_Name,index,index2,Sample_Project,OverrideCycles
 
 @pytest.fixture
 def dual_index_sample_sheet(tmp_path: pathlib.Path) -> pathlib.Path:
+    """A sample sheet with dual-index (i7/i5) samples."""
     path = tmp_path / "SampleSheet_dual.csv"
     path.write_text(DUAL_INDEX_SS)
     return path
@@ -88,6 +89,7 @@ def dual_index_sample_sheet(tmp_path: pathlib.Path) -> pathlib.Path:
 
 @pytest.fixture
 def single_index_sample_sheet(tmp_path: pathlib.Path) -> pathlib.Path:
+    """A sample sheet with single-index (i7 only) samples."""
     path = tmp_path / "SampleSheet_single.csv"
     path.write_text(SINGLE_INDEX_SS)
     return path

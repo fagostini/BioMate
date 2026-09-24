@@ -7,7 +7,16 @@ from importlib.metadata import version
 
 from rich.logging import RichHandler
 
-from biomate import blabber, dirstruct, fastrewind, index, nspector, strainer, web_interface
+from biomate import (
+    blabber,
+    dirstruct,
+    fastrewind,
+    index,
+    nspector,
+    strainer,
+    waif,
+    web_interface,
+)
 
 try:
     __version__ = version(__name__)
@@ -65,6 +74,7 @@ def main():
     fastrewind.fastrewind.init_parser(subparsers)
     nspector.nspector.init_parser(subparsers)
     strainer.strainer.init_parser(subparsers)
+    waif.waif.init_parser(subparsers)
     web_interface.init_parser(subparsers)
 
     args = parser.parse_args()

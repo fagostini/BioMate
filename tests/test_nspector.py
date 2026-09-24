@@ -36,6 +36,8 @@ def _data_df(tiles, x_coords, y_coords, cycles_lists):
 
 
 class TestGenerateCyclesFiller:
+    """Tests for generate_cycles_filler."""
+
     def test_row_count_is_tiles_times_cycles(self):
         """Filler has exactly (unique tile count) × cycles rows."""
         data = _data_df([1101, 1101, 1102], [0, 0, 0], [0, 0, 0], [[2], [5], [3]])
@@ -84,7 +86,10 @@ class TestGenerateCyclesFiller:
 
 
 class TestValidateArgs:
+    """Tests for validate_args."""
+
     def _make_args(self, tmp_path, input_files=None, output=None):
+        """Create valid input files and a Namespace pointing at them."""
         if input_files is None:
             f = tmp_path / "sample.fastq.gz"
             write_fastq_gz(f, [(illumina_header(), "ACGT", "####")])

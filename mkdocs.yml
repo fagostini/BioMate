@@ -12,5 +12,6 @@ nav:
     - FastRewind: fastrewind.md
     - Nspector: nspector.md
     - Strainer: strainer.md
+    - Waif: waif.md
 theme:
   name: readthedocs

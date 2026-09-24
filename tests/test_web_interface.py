@@ -171,6 +171,7 @@ class TestModulesDefinition:
             "fastrewind",
             "nspector",
             "strainer",
+            "waif",
         ]
         for expected in expected_modules:
             assert expected in module_names, f"Module {expected} not found in MODULES"
@@ -209,6 +210,16 @@ class TestModulesDefinition:
         param_names = [p["form_name"] for p in strainer["parameters"]]
         assert "input_path" in param_names
         assert "output_path" in param_names
+
+    def test_waif_module_has_parameters(self):
+        """Test that waif module has expected parameters."""
+        waif = next(m for m in MODULES if m["name"] == "waif")
+        param_names = [p["form_name"] for p in waif["parameters"]]
+        assert "input_path" in param_names
+        assert "output_file" in param_names
+        assert "exact" in param_names
+        assert "sample_sheet" in param_names
+        assert "block_cache" in param_names
 
     def test_index_module_has_parameters(self):
         """Test that index module has expected parameters."""

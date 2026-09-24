@@ -13,6 +13,8 @@ from biomate.dirstruct.dirstruct import validate_args, main
 
 
 class TestValidateArgs:
+    """Tests for validate_args."""
+
     def test_extract_valid_source_path(self, tmp_path):
         """validate_args accepts an existing directory for the extract command."""
         src = tmp_path / "src"
@@ -58,6 +60,7 @@ class TestValidateArgs:
 
 
 def _extract_args(src, output_file=None, no_tags=False, verbose=False, quiet=False):
+    """Build a Namespace for the extract command."""
     return argparse.Namespace(
         command="extract",
         source_path=src,
@@ -69,6 +72,8 @@ def _extract_args(src, output_file=None, no_tags=False, verbose=False, quiet=Fal
 
 
 class TestExtractCommand:
+    """Tests for the extract command."""
+
     def test_extract_writes_to_file(self, tmp_path):
         """Extracted directory tree is written to the output file."""
         src = tmp_path / "src"
@@ -124,6 +129,7 @@ class TestExtractCommand:
 
 
 def _create_args(source_file, output_path, verbose=False, quiet=False):
+    """Build a Namespace for the create command."""
     return argparse.Namespace(
         command="create",
         source_file=source_file,
@@ -135,6 +141,8 @@ def _create_args(source_file, output_path, verbose=False, quiet=False):
 
 
 class TestCreateCommand:
+    """Tests for the create command."""
+
     def test_create_directories_from_file(self, tmp_path):
         """Directories listed in the struct file are created at the destination."""
         struct_file = tmp_path / "struct.txt"

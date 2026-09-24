@@ -27,6 +27,8 @@ from biomate.fastrewind.fastrewind import (
 
 
 class TestParseSequenceMask:
+    """Tests for parse_sequence_mask."""
+
     def test_r1_only(self):
         """A single-segment Y mask sets R1 and leaves all other fields at 0."""
         result = parse_sequence_mask("Y151")
@@ -97,6 +99,8 @@ class TestParseSequenceMask:
 
 
 class TestCleanDirectory:
+    """Tests for clean_directory."""
+
     def test_removes_a_file(self, tmp_path):
         """A plain file is deleted."""
         f = tmp_path / "test.txt"
@@ -137,7 +141,10 @@ class TestCleanDirectory:
 
 
 class TestValidateArgs:
+    """Tests for validate_args."""
+
     def _make_args(self, tmp_path, force=False):
+        """Create a valid Namespace together with the files validate_args expects."""
         input_path = tmp_path / "flowcell"
         input_path.mkdir()
         # Add a dummy FASTQ file so the glob check passes
@@ -249,19 +256,27 @@ def test_preprocess_and_write_bcls_handles_odd_read_count(tmp_path, monkeypatch)
     """An odd number of reads still produces valid cbcl files for each cycle."""
 
     class FakeBaseCall:
+        """Stand-in for a dnaio base call."""
+
         def __init__(self, base: str, quality: str):
+            """Store the base and its quality score."""
             self.sequence = base
             self.qualities = quality
 
     class FakeRead:
+        """Stand-in for a dnaio read (sequence plus qualities)."""
+
         def __init__(self, sequence: str, qualities: str):
+            """Store the sequence and its quality scores."""
             self.sequence = sequence
             self.qualities = qualities
 
         def __len__(self):
+            """Return the read length."""
             return len(self.sequence)
 
         def __getitem__(self, idx):
+            """Return the base call at position idx."""
             return FakeBaseCall(self.sequence[idx], self.qualities[idx])
 
     lane = "L002"
@@ -279,6 +294,7 @@ def test_preprocess_and_write_bcls_handles_odd_read_count(tmp_path, monkeypatch)
 
     @contextmanager
     def fake_dnaio_open(path, open_threads=0):
+        """Yield the fake reads when the expected FASTQ path is opened."""
         assert pathlib.Path(path) == fq_path
         assert open_threads == 0
         yield iter(fake_reads)
@@ -308,7 +324,7 @@ def _cbcl_body(path: pathlib.Path) -> bytes:
     """Decompress the body of the first tile in a cbcl file."""
     data = path.read_bytes()
     hsize = struct.unpack_from("<HLBBI", data, 0)[1]
-    ntiles, = struct.unpack_from("<I", data, 44)
+    (ntiles,) = struct.unpack_from("<I", data, 44)
     assert ntiles == 1
     _, _, _, comp = struct.unpack_from("<IIII", data, 48)
     return gzip.decompress(data[hsize : hsize + comp])
@@ -319,19 +335,27 @@ def test_preprocess_and_write_bcls_packs_clusters_little_endian(tmp_path, monkey
     is zero-padded in the high nibble (the order bcl-convert expects)."""
 
     class FakeBaseCall:
+        """Stand-in for a dnaio base call."""
+
         def __init__(self, base: str, quality: str):
+            """Store the base and its quality score."""
             self.sequence = base
             self.qualities = quality
 
     class FakeRead:
+        """Stand-in for a dnaio read (sequence plus qualities)."""
+
         def __init__(self, sequence: str, qualities: str):
+            """Store the sequence and its quality scores."""
             self.sequence = sequence
             self.qualities = qualities
 
         def __len__(self):
+            """Return the read length."""
             return len(self.sequence)
 
         def __getitem__(self, idx):
+            """Return the base call at position idx."""
             return FakeBaseCall(self.sequence[idx], self.qualities[idx])
 
     lane = "L002"
@@ -351,6 +375,7 @@ def test_preprocess_and_write_bcls_packs_clusters_little_endian(tmp_path, monkey
 
     @contextmanager
     def fake_dnaio_open(path, open_threads=0):
+        """Yield the fake reads when the expected FASTQ path is opened."""
         assert pathlib.Path(path) == fq_path
         assert open_threads == 0
         yield iter(fake_reads)
@@ -380,30 +405,45 @@ def test_parse_fastq_groups_uses_only_r1_r2_with_extra_files(tmp_path, monkeypat
     """Index-read files and duplicate R1/R2 files are ignored during paired-end parsing."""
 
     class FakeRead:
+        """Stand-in for a named dnaio read."""
+
         def __init__(self, name: str, sequence: str, qualities: str):
+            """Store the read name, sequence and qualities."""
             self.name = name
             self.sequence = sequence
             self.qualities = qualities
 
     class FakeWriter:
+        """Writer that discards everything written to it."""
+
         def write(self, read):
+            """Discard the read."""
             return None
 
     class FakeWriterContext:
+        """Context manager yielding a FakeWriter."""
+
         def __enter__(self):
+            """Return a new FakeWriter."""
             return FakeWriter()
 
         def __exit__(self, exc_type, exc_val, exc_tb):
+            """Never suppress exceptions."""
             return False
 
     class FakeReaderContext:
+        """Context manager yielding an iterator over the fake records."""
+
         def __init__(self, records):
+            """Store the records to be iterated."""
             self.records = records
 
         def __enter__(self):
+            """Return an iterator over the stored records."""
             return iter(self.records)
 
         def __exit__(self, exc_type, exc_val, exc_tb):
+            """Never suppress exceptions."""
             return False
 
     sample_name = "Sample_1_S1_L001_001"
@@ -432,6 +472,7 @@ def test_parse_fastq_groups_uses_only_r1_r2_with_extra_files(tmp_path, monkeypat
     reader_calls = []
 
     def fake_dnaio_open(*args, **kwargs):
+        """Return a writer or a reader context, recording the reader calls."""
         if "mode" in kwargs:
             return FakeWriterContext()
         reader_calls.append(tuple(pathlib.Path(x).name for x in args))
@@ -476,12 +517,16 @@ def test_parse_fastq_groups_skips_when_no_r1_r2(tmp_path, monkeypatch):
     """If a sample group has no R1/R2 files, parsing is skipped and no reads are opened."""
 
     class FakeReaderContext:
+        """Reader context that fails if it is ever entered."""
+
         def __enter__(self):
+            """Fail: no reader may be opened without R1/R2 files."""
             raise AssertionError(
                 "Reader should not be opened when no R1/R2 files exist"
             )
 
         def __exit__(self, exc_type, exc_val, exc_tb):
+            """Never suppress exceptions."""
             return False
 
     sample_name = "Sample_2_S2_L001_001"
@@ -495,6 +540,7 @@ def test_parse_fastq_groups_skips_when_no_r1_r2(tmp_path, monkeypatch):
     ]
 
     def fake_dnaio_open(*args, **kwargs):
+        """Return the reader context that fails on entry."""
         return FakeReaderContext()
 
     monkeypatch.setattr(fastrewind_module.dnaio, "open", fake_dnaio_open)
@@ -559,6 +605,8 @@ def _unpack_index_metrics(data: bytes, version: int) -> list:
 
 
 class TestWriteIndexMetrics:
+    """Tests for write_index_metrics."""
+
     RECORDS = [
         (1, 1101, 1, "ACGT-TGCA", 42, "Sample_1", "Proj_A"),
         (1, 1101, 2, "ACGT-TGCA", 42, "Sample_1", "Proj_A"),
@@ -618,6 +666,8 @@ class TestWriteIndexMetrics:
 
 
 class TestBuildIndexRecords:
+    """Tests for build_index_records."""
+
     MASKS_TABLE = {
         "Sample_1_S1_L001_001": {
             "sample_name": "Sample_1",
@@ -725,30 +775,45 @@ def test_parse_fastq_groups_accumulates_index_counts(tmp_path, monkeypatch):
     index_counts dict is provided."""
 
     class FakeRead:
+        """Stand-in for a named dnaio read."""
+
         def __init__(self, name: str, sequence: str, qualities: str):
+            """Store the read name, sequence and qualities."""
             self.name = name
             self.sequence = sequence
             self.qualities = qualities
 
     class FakeWriter:
+        """Writer that discards everything written to it."""
+
         def write(self, read):
+            """Discard the read."""
             return None
 
     class FakeWriterContext:
+        """Context manager yielding a FakeWriter."""
+
         def __enter__(self):
+            """Return a new FakeWriter."""
             return FakeWriter()
 
         def __exit__(self, exc_type, exc_val, exc_tb):
+            """Never suppress exceptions."""
             return False
 
     class FakeReaderContext:
+        """Context manager yielding an iterator over the fake records."""
+
         def __init__(self, records):
+            """Store the records to be iterated."""
             self.records = records
 
         def __enter__(self):
+            """Return an iterator over the stored records."""
             return iter(self.records)
 
         def __exit__(self, exc_type, exc_val, exc_tb):
+            """Never suppress exceptions."""
             return False
 
     sample_name = "Sample_1_S1_L001_001"
@@ -757,6 +822,7 @@ def test_parse_fastq_groups_accumulates_index_counts(tmp_path, monkeypatch):
     tempdir.mkdir(parents=True)
 
     def make_read(tile: str, read: str) -> str:
+        """Build an instrument-style read name for the given tile and read."""
         return f"INST:1:FLOWCELL:1:{tile}:1001:1002 {read}:N:0:ACGT+TGCA"
 
     records = [
@@ -775,6 +841,7 @@ def test_parse_fastq_groups_accumulates_index_counts(tmp_path, monkeypatch):
     ]
 
     def fake_dnaio_open(*args, **kwargs):
+        """Return a writer or a reader context depending on the open mode."""
         if "mode" in kwargs:
             return FakeWriterContext()
         return FakeReaderContext(records)
@@ -819,30 +886,45 @@ def test_parse_fastq_groups_without_index_counts_unchanged(tmp_path, monkeypatch
     """Omitting index_counts keeps the previous behaviour (no accumulation)."""
 
     class FakeRead:
+        """Stand-in for a named dnaio read."""
+
         def __init__(self, name: str, sequence: str, qualities: str):
+            """Store the read name, sequence and qualities."""
             self.name = name
             self.sequence = sequence
             self.qualities = qualities
 
     class FakeWriter:
+        """Writer that discards everything written to it."""
+
         def write(self, read):
+            """Discard the read."""
             return None
 
     class FakeWriterContext:
+        """Context manager yielding a FakeWriter."""
+
         def __enter__(self):
+            """Return a new FakeWriter."""
             return FakeWriter()
 
         def __exit__(self, exc_type, exc_val, exc_tb):
+            """Never suppress exceptions."""
             return False
 
     class FakeReaderContext:
+        """Context manager yielding an iterator over the fake records."""
+
         def __init__(self, records):
+            """Store the records to be iterated."""
             self.records = records
 
         def __enter__(self):
+            """Return an iterator over the stored records."""
             return iter(self.records)
 
         def __exit__(self, exc_type, exc_val, exc_tb):
+            """Never suppress exceptions."""
             return False
 
     sample_name = "Sample_1_S1_L001_001"
@@ -857,6 +939,7 @@ def test_parse_fastq_groups_without_index_counts_unchanged(tmp_path, monkeypatch
     ]
 
     def fake_dnaio_open(*args, **kwargs):
+        """Return a writer or a reader context depending on the open mode."""
         if "mode" in kwargs:
             return FakeWriterContext()
         return FakeReaderContext(records)
@@ -932,6 +1015,7 @@ class TestInteropReadBack:
 """
 
     def _build_run_folder(self, tmp_path: pathlib.Path, records: list) -> pathlib.Path:
+        """Create a minimal run folder the interop library can parse."""
         run_dir = tmp_path / "run"
         (run_dir / "InterOp").mkdir(parents=True)
         # Note: the interop library requires numeric lane prefixes in the tile

@@ -28,6 +28,8 @@ from biomate.strainer.strainer import (
 
 
 class TestExtractIndexesFromSampleSheet:
+    """Tests for extract_indexes_from_sample_sheet."""
+
     def test_dual_index_returns_correct_columns(self, dual_index_sample_sheet):
         """Result DataFrame has the expected column names."""
         df = extract_indexes_from_sample_sheet(dual_index_sample_sheet)
@@ -110,6 +112,8 @@ class TestExtractIndexesFromSampleSheet:
 
 
 class TestExtractIndexesFromUndetermined:
+    """Tests for extract_indexes_from_undetermined_file."""
+
     def test_returns_correct_structure(self, undetermined_fastq_l001):
         """Each returned dict has Lane, Undetermined_Index and Count keys."""
         result = extract_indexes_from_undetermined_file(undetermined_fastq_l001)
@@ -187,10 +191,13 @@ def _make_ss_df(rows: list[dict]) -> polars.DataFrame:
 
 
 def _make_und_df(rows: list[dict]) -> polars.DataFrame:
+    """Build an undetermined-indexes DataFrame from row dicts."""
     return polars.from_dicts(rows)
 
 
 class TestSearchForUnexpectedIndexes:
+    """Tests for search_for_unexpected_indexes."""
+
     def test_finds_unexpected_match(self):
         """An index from lane A found in undetermined reads of lane B is returned."""
         ss_df = _make_ss_df(
@@ -333,7 +340,10 @@ class TestSearchForUnexpectedIndexes:
 
 
 class TestValidateArgs:
+    """Tests for validate_args."""
+
     def _make_args(self, tmp_path, threads=1, sample_sheet=None):
+        """Create a valid input/output layout and the matching Namespace."""
         fastq = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
         write_fastq_gz(fastq, [(illumina_header(), "ACGT", "####")])
         (tmp_path / "input").mkdir()
