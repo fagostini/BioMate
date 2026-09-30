@@ -1,3 +1,15 @@
+## 0.5.0 (2026-09-30)
+
+### Feat
+
+- Add the waif module for undetermined barcode intersection
+- Generate InterOp IndexMetricsOut.bin in fastrewind
+
+### Refactor
+
+- Drop the speculative A-form tile name handling
+- Remove tracking for test cases dataset
+
 ## 0.4.0 (2026-09-17)
 
 ### BREAKING CHANGE
