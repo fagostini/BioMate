@@ -1147,7 +1147,15 @@ def write_run_info_xml(
         else fields["flowcell_id"]
     )
     instrument = fields["instrument"]
-    date = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    if flowcell_name is not None:
+        # Pin the run date to the date segment of the run folder name
+        # (e.g. 20260310 in 20260310_LM43899_0385_A12GGASZR5); the time is
+        # fixed to midnight to keep the output reproducible
+        date = datetime.strptime(
+            flowcell_name.split("_")[0], "%Y%m%d"
+        ).strftime("%Y-%m-%dT00:00:00Z")
+    else:
+        date = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(xml_path, "wt") as f_out:
         f_out.write(
             '<?xml version="1.0"?> \n'

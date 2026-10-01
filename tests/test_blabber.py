@@ -462,7 +462,11 @@ def _count_reads(fastq: pathlib.Path) -> int:
 
 
 def _blabber_args(
-    tmp_path: pathlib.Path, sheet: pathlib.Path, seq_number: int, taint: bool = False
+    tmp_path: pathlib.Path,
+    sheet: pathlib.Path,
+    seq_number: int,
+    taint: bool = False,
+    flowcell_id: str = "TESTFC",
 ) -> argparse.Namespace:
     """Build the argument namespace used to run blabber.main in the tests."""
     return argparse.Namespace(
@@ -473,7 +477,7 @@ def _blabber_args(
         format="fastq",
         sample_sheet=sheet,
         output=tmp_path,
-        flowcell_id="TESTFC",
+        flowcell_id=flowcell_id,
         seq_number=seq_number,
         seq_length=151,
         seq_mask=None,
@@ -545,3 +549,44 @@ class TestSingleEndAndTaint:
             assert r2.is_file(), f"Missing {r2.name}"
             assert _count_reads(r1) > 0
             assert _count_reads(r1) == _count_reads(r2)
+
+
+class TestFlowcellIdPinning:
+    """Tests for pinning the read name identity from a full run folder name."""
+
+    RUNFOLDER = "20260310_LM43899_0385_A12GGASZR5"
+
+    def _first_read_name(self, demux_path: pathlib.Path) -> str:
+        """Return the @-line (without the leading @) of the first R1 fastq."""
+        r1_files = sorted(demux_path.rglob("*_R1_001.fastq.gz"))
+        assert r1_files, f"No R1 fastq files found under {demux_path}"
+        with gzip.open(r1_files[0], "rt") as fh:
+            return fh.readline().rstrip("\n").lstrip("@")
+
+    def test_read_names_pinned_to_runfolder_name(self, tmp_path):
+        """A four-part run folder name pins instrument, run number and flowcell in the read names and is used verbatim as the output folder."""
+        sheet = tmp_path / "SampleSheet.csv"
+        sheet.write_text(SINGLE_END_SAMPLE_SHEET)
+        main(
+            _blabber_args(
+                tmp_path, sheet, seq_number=10, flowcell_id=self.RUNFOLDER
+            )
+        )
+
+        demux_path = tmp_path / self.RUNFOLDER / "Demultiplexing"
+        assert demux_path.is_dir()
+        name = self._first_read_name(demux_path)
+        # Run number is normalized to an integer (no leading zeros), as
+        # bcl-convert does when rebuilding the read names
+        assert name.startswith("LM43899:385:A12GGASZR5:1:")
+
+    def test_non_conforming_flowcell_id_keeps_random_identity(self, tmp_path):
+        """A flowcell id that is not a four-part run folder name is used as the folder name only; the read name identity stays random."""
+        sheet = tmp_path / "SampleSheet.csv"
+        sheet.write_text(SINGLE_END_SAMPLE_SHEET)
+        main(_blabber_args(tmp_path, sheet, seq_number=10))
+
+        demux_path = tmp_path / "TESTFC" / "Demultiplexing"
+        prefix = ":".join(self._first_read_name(demux_path).split(":")[:3])
+        # Random identity: <2 letters><5 digits>:<3 digits>:<2 digits><6 letters><digit>
+        assert re.fullmatch(r"[A-Z]{2}[0-9]{5}:[0-9]{3}:[0-9]{2}[A-Z]{6}[0-9]", prefix)

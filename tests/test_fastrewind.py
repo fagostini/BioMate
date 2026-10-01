@@ -4,6 +4,7 @@ import argparse
 from contextlib import contextmanager
 import gzip
 import pathlib
+import re
 import struct
 
 import pytest
@@ -292,17 +293,21 @@ class TestWriteRunInfoXml:
         return xml_path.read_text()
 
     def test_run_id_and_flowcell_from_read_name_by_default(self, tmp_path):
-        """Without an override, the run id and <Flowcell> are derived from the read name."""
+        """Without an override, the run id and <Flowcell> are derived from the read name and the date is the current time."""
         xml = self._write(tmp_path)
         assert "<Flowcell>B23NWY7LT4</Flowcell>" in xml
         assert 'B23NWY7LT4" Number="424"' in xml
         assert self.RUN_ID not in xml
+        assert re.search(
+            r"<Date>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z</Date>", xml
+        )
 
     def test_provided_flowcell_name_used_as_run_id(self, tmp_path):
-        """A provided flowcell name (full run folder name) is used as-is as the run id, skipping the generation of a new one, while <Flowcell> holds only its last part."""
+        """A provided flowcell name (full run folder name) is used as-is as the run id, skipping the generation of a new one, while <Flowcell> holds only its last part and <Date> is pinned to its date segment at midnight."""
         xml = self._write(tmp_path, flowcell_name=self.RUN_ID)
         assert f'<Run Id="{self.RUN_ID}" Number="424">' in xml
         assert f"<Flowcell>{self.FLOWCELL_ID}</Flowcell>" in xml
+        assert "<Date>2026-03-10T00:00:00Z</Date>" in xml
         assert "B23NWY7LT4" not in xml
 
 

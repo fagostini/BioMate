@@ -95,7 +95,12 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         "--flowcell-id",
         type=str,
         default=None,
-        help="Use this flowcell id instead of generating a random string (default: None)",
+        help=(
+            "Full run folder name (date_instrument_run_number_flowcell_id) to use "
+            "as the output folder; when given, the instrument, run number "
+            "(without leading zeros) and flowcell in the read names are also "
+            "pinned to its parts (default: None, a random identity is generated)"
+        ),
     )
     parser.add_argument(
         "--taint",
@@ -633,6 +638,18 @@ def main(args: argparse.Namespace) -> None:
                 + [str(rng.integers(10000, 100000))]
             )
             field2 = str(rng.integers(100, 1000))
+            if args.flowcell_id:
+                # Pin the read name identity (instrument, run number, flowcell)
+                # to a full run folder name (date_instrument_run_number_flowcell_id)
+                # so the generated read names match the output folder. Values
+                # with a different shape keep the random identity.
+                parts = args.flowcell_id.split("_")
+                if len(parts) == 4:
+                    field0, field1, field2, field3 = parts
+                    # bcl-convert normalizes the run number to an integer when
+                    # rebuilding the read names, so drop any leading zeros to
+                    # keep RunInfo.xml and the demultiplexed FASTQs consistent
+                    field2 = str(int(field2))
             output_basepath = args.output.joinpath(
                 f"{field0}_{field1}_{field2:>04}_A{field3}"
                 if not args.flowcell_id
