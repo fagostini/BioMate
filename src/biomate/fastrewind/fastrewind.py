@@ -78,6 +78,13 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         help="The type of Illumina instrument, which will determine the type of outputs and folder structure.",
     )
     parser.add_argument(
+        "--flowcell-id",
+        type=str,
+        required=False,
+        default=None,
+        help="Flowcell name (the full run folder name, e.g. 20260310_LM43899_0385_A12GGASZR5) to use as the run id in RunInfo.xml, instead of generating one; its last part is written in the Flowcell element (default: None).",
+    )
+    parser.add_argument(
         "--threads",
         type=int,
         default=0,
@@ -1120,6 +1127,7 @@ def write_run_info_xml(
     tile_count: int | None = None,
     tile_names: str | None = None,
     desc: str | None = None,
+    flowcell_name: str | None = None,
 ) -> None:
     """Write the RunInfo.xml file."""
     if desc is None:
@@ -1128,9 +1136,16 @@ def write_run_info_xml(
         )
     xml_path.parent.mkdir(exist_ok=True, parents=True)
     fields = parse_seqname_fields(desc)
-    run_id = generate_run_id(desc)
+    # When a flowcell name (the full run folder name) is provided, it is used
+    # as-is as the run id, skipping the generation of a new one
+    run_id = flowcell_name if flowcell_name is not None else generate_run_id(desc)
     run_number = fields["run_number"]
-    flowcell_id = fields["flowcell_id"]
+    # The <Flowcell> element holds only the last part of the flowcell name
+    flowcell_id = (
+        flowcell_name.split("_")[-1]
+        if flowcell_name is not None
+        else fields["flowcell_id"]
+    )
     instrument = fields["instrument"]
     date = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(xml_path, "wt") as f_out:
@@ -1375,6 +1390,7 @@ def main(args: argparse.Namespace) -> None:
         TILE_COUNT,  # alternatively: int(tile_count / surface_count / swath_count)
         tile_names,
         sample_read,
+        args.flowcell_id,
     )
 
     logging.info("Writing InterOp index metrics...")

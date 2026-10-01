@@ -289,6 +289,14 @@ MODULES: List[Dict[str, Any]] = [
                 "cli_name": "instrument",
             },
             {
+                "label": "Flowcell ID",
+                "param_type": "text",
+                "default": "",
+                "help": "Full run folder name to use as the run id in RunInfo.xml (e.g. 20260310_LM43899_0385_A12GGASZR5); its last part is written in the Flowcell element (generated if omitted)",
+                "form_name": "flowcell_id",
+                "cli_name": "flowcell-id",
+            },
+            {
                 "label": "Threads",
                 "param_type": "number",
                 "default": "0",

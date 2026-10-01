@@ -16,6 +16,7 @@ The minimal command is `biomate fastrewind --input <PATH>`. This will search for
 - `--total-cycles`: The total number of cycles. If this is larger than the sequences in the samples, shorter samples will be filled with Ns.
 - `--interop-dir`: Path to the InterOp directory where `IndexMetricsOut.bin` is written (default: `<output-path>/InterOp`).
 - `--instrument`: The type of Illumina instrument, which will determine the type of outputs and folder structure. _Please, be aware that only the NovaSeqXPlus is currently supported._
+- `--flowcell-id`: Flowcell name (the full run folder name, e.g. `20260310_LM43899_0385_A12GGASZR5`) to use as the run id in the `RunInfo.xml` file, instead of generating one; its last part is written in the `Flowcell` element (default: derived from the read names).
 - `--threads`: Number of threads used by dnaio to read/write files. Default is 0, which corresponds to a single thread.
 - `--force`: Force overwrite of existing files in the output directory (the `Data` and `InterOp` folders are cleaned up when re-running into an existing output).
 

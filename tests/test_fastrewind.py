@@ -13,11 +13,13 @@ from biomate.fastrewind.fastrewind import (
     INTEROP_INDEX_VERSION,
     build_index_records,
     clean_directory,
+    generate_run_id,
     parse_fastq_groups,
     parse_sequence_mask,
     preprocess_and_write_bcls,
     validate_args,
     write_index_metrics,
+    write_run_info_xml,
 )
 
 
@@ -245,6 +247,78 @@ class TestValidateArgs:
         (interop_dir / "IndexMetricsOut.bin").write_bytes(b"\x02")
         validate_args(args)
         assert interop_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# generate_run_id / write_run_info_xml
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateRunId:
+    """Tests for generate_run_id."""
+
+    READ_NAME = "LH00217:424:B23NWY7LT4:1:1101:1001:1002 1:N:0:ACGT+TGCA"
+
+    def test_run_id_uses_read_name_fields(self):
+        """The run id is built from the date, instrument, run number and flowcell of the read name."""
+        result = generate_run_id(self.READ_NAME)
+        assert result.endswith("_B23NWY7LT4")
+        assert "LH00217" in result
+        assert "0424" in result
+
+
+class TestWriteRunInfoXml:
+    """Tests for write_run_info_xml."""
+
+    READ_NAME = "LH00217:424:B23NWY7LT4:1:1101:1001:1002 1:N:0:ACGT+TGCA"
+    RUN_ID = "20260310_LM43899_0385_A12GGASZR5"
+    FLOWCELL_ID = "A12GGASZR5"  # Last part of RUN_ID
+    CYCLES_DICT = {"R1": 150, "I1": 8, "I2": 8, "R2": 150}
+
+    def _write(self, tmp_path, **kwargs) -> str:
+        """Write a RunInfo.xml with the given overrides and return its content."""
+        xml_path = tmp_path / "RunInfo.xml"
+        write_run_info_xml(
+            xml_path,
+            self.CYCLES_DICT,
+            lane_count=1,
+            surface_count=2,
+            swath_count=4,
+            tile_count=16,
+            tile_names=["L001_1101", "L001_1102"],
+            desc=self.READ_NAME,
+            **kwargs,
+        )
+        return xml_path.read_text()
+
+    def test_run_id_and_flowcell_from_read_name_by_default(self, tmp_path):
+        """Without an override, the run id and <Flowcell> are derived from the read name."""
+        xml = self._write(tmp_path)
+        assert "<Flowcell>B23NWY7LT4</Flowcell>" in xml
+        assert 'B23NWY7LT4" Number="424"' in xml
+        assert self.RUN_ID not in xml
+
+    def test_provided_flowcell_name_used_as_run_id(self, tmp_path):
+        """A provided flowcell name (full run folder name) is used as-is as the run id, skipping the generation of a new one, while <Flowcell> holds only its last part."""
+        xml = self._write(tmp_path, flowcell_name=self.RUN_ID)
+        assert f'<Run Id="{self.RUN_ID}" Number="424">' in xml
+        assert f"<Flowcell>{self.FLOWCELL_ID}</Flowcell>" in xml
+        assert "B23NWY7LT4" not in xml
+
+
+def test_parser_flowcell_id_option():
+    """--flowcell-id is an optional argument defaulting to None."""
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers()
+    fastrewind_module.init_parser(subparsers)
+    args = parser.parse_args(
+        ["fastrewind", "--input-path", "in", "--output-path", "out"]
+    )
+    assert args.flowcell_id is None
+    args = parser.parse_args(
+        ["fastrewind", "--input-path", "in", "--flowcell-id", "A12GGASZR5"]
+    )
+    assert args.flowcell_id == "A12GGASZR5"
 
 
 # ---------------------------------------------------------------------------

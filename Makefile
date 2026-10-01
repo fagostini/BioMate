@@ -175,7 +175,7 @@ $(TEMP_DIR)/$(FLOWCELL_ID): check-uv $(TEMP_DIR) clean_flowcell
 	@$(UV) run biomate --verbose blabber --format fastq --sample-sheet $(TEMP_DIR)/SampleSheet.csv --seq-number $(SEQ_NUM) --output $(TEMP_DIR) --flowcell-id $(FLOWCELL_ID) > $(TEMP_DIR)/blabber.out 2> $(TEMP_DIR)/blabber.err && echo "Blabber module executed successfully!" || { echo "Error executing Blabber module!"; exit 1; }
 
 $(TEMP_DIR)/Data $(TEMP_DIR)/RunInfo.xml: check-uv $(TEMP_DIR)/$(FLOWCELL_ID) clean_data
-	@$(UV) run biomate --verbose fastrewind --input-path $(TEMP_DIR) --output-path $(TEMP_DIR) --threads 8 > $(TEMP_DIR)/fastrewind.out 2> $(TEMP_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || { echo "Error executing Fastrewind module!"; exit 1; }
+	@$(UV) run biomate --verbose fastrewind --input-path $(TEMP_DIR) --output-path $(TEMP_DIR) --flowcell-id $(FLOWCELL_ID) --threads 8 > $(TEMP_DIR)/fastrewind.out 2> $(TEMP_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || { echo "Error executing Fastrewind module!"; exit 1; }
 
 validate_samplesheet: check-bclconvert $(TEMP_DIR)/RunInfo.xml
 	@ulimit -Sn $(BCLCONVERT_NOFILE) 2>/dev/null && echo "BCL-convert soft nofile limit set to $$(ulimit -Sn)" || true
