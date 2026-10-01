@@ -36,3 +36,11 @@ The demultiplexing test recipes (e.g. `make test_mix`) require the Illumina [BCL
 3. The file is listed in `.gitignore` and must never be committed.
 
 The `Makefile` looks for the executable at `assets/bcl-convert` by default. If the tool is installed elsewhere, set the `BCLCONVERT` variable to its full path (e.g. `make BCLCONVERT=/full/path/to/bcl-convert test_mix`).
+
+BCL-convert opens thousands of BCL and filter files in parallel, so it needs a high open-file (nofile) limit. The `Makefile` raises the soft limit to `BCLCONVERT_NOFILE` (default `65535`) in the same shell that runs BCL-convert, and aborts with an actionable error if the resulting limit is below `BCLCONVERT_MIN_NOFILE` (default `4096`). If your session cannot reach that minimum (for example, when the hard limit is `1024`), raise it before running the recipes:
+
+```
+ulimit -Sn 65535
+```
+
+or add a `nofile` entry to `/etc/security/limits.conf`. Otherwise BCL-convert aborts in strict mode with a misleading `Missing ... file` error.

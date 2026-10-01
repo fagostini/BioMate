@@ -9,6 +9,7 @@ PROJECT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 UV ?= uv
 BCLCONVERT ?= assets/bcl-convert
 BCLCONVERT_NOFILE ?= 65535
+BCLCONVERT_MIN_NOFILE ?= 4096
 BCLCONVERT_FD_ERROR_PATTERN ?= too many open files|bad file descriptor
 SHELL=/bin/bash
 
@@ -54,6 +55,7 @@ smoke-bclconvert-fd:
 		if [[ -f $$f ]] && grep -Eiq "$(BCLCONVERT_FD_ERROR_PATTERN)" "$$f"; then \
 			echo "Detected file descriptor-related bcl-convert error in $$f"; \
 			grep -Ein "$(BCLCONVERT_FD_ERROR_PATTERN)" "$$f" | tail -n 20; \
+			echo "This usually means bcl-convert ran with too few open files; raise the nofile limit for this session with 'ulimit -Sn $(BCLCONVERT_NOFILE)' and re-run."; \
 			exit 1; \
 		fi; \
 	done; \
@@ -178,13 +180,25 @@ $(TEMP_DIR)/Data $(TEMP_DIR)/RunInfo.xml: check-uv $(TEMP_DIR)/$(FLOWCELL_ID) cl
 	@$(UV) run biomate --verbose fastrewind --input-path $(TEMP_DIR) --output-path $(TEMP_DIR) --flowcell-id $(FLOWCELL_ID) --threads 8 > $(TEMP_DIR)/fastrewind.out 2> $(TEMP_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || { echo "Error executing Fastrewind module!"; exit 1; }
 
 validate_samplesheet: check-bclconvert $(TEMP_DIR)/RunInfo.xml
-	@ulimit -Sn $(BCLCONVERT_NOFILE) 2>/dev/null && echo "BCL-convert soft nofile limit set to $$(ulimit -Sn)" || true
-	@$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true --bcl-output-format demux-autodetect --bcl-validate-sample-sheet-only true > $(TEMP_DIR)/bcl-validate.out 2> $(TEMP_DIR)/bcl-validate.err && echo "BCL-convert SampleSheet validation was successful!" || { echo "Error executing BCL-convert SampleSheet validation!"; exit 1; }
+	@ulimit -Sn $(BCLCONVERT_NOFILE) 2>/dev/null || true; \
+	if [ "$$(ulimit -Sn)" -lt $(BCLCONVERT_MIN_NOFILE) ]; then \
+		echo "Error: bcl-convert requires at least $(BCLCONVERT_MIN_NOFILE) open files, but the soft nofile limit is only $$(ulimit -Sn) and could not be raised to $(BCLCONVERT_NOFILE) (hard limit: $$(ulimit -Hn))."; \
+		echo "Raise the limit for this session with 'ulimit -Sn $(BCLCONVERT_NOFILE)' (or permanently via /etc/security/limits.conf) and re-run."; \
+		exit 1; \
+	fi; \
+	echo "BCL-convert soft nofile limit set to $$(ulimit -Sn)"; \
+	$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true --bcl-output-format demux-autodetect --bcl-validate-sample-sheet-only true > $(TEMP_DIR)/bcl-validate.out 2> $(TEMP_DIR)/bcl-validate.err && echo "BCL-convert SampleSheet validation was successful!" || { echo "Error executing BCL-convert SampleSheet validation!"; exit 1; }
 	@$(MAKE) smoke-bclconvert-fd
 
 $(TEMP_DIR)/Demultiplexing: check-bclconvert $(TEMP_DIR)/RunInfo.xml clean_demux
-	@ulimit -Sn $(BCLCONVERT_NOFILE) 2>/dev/null && echo "BCL-convert soft nofile limit set to $$(ulimit -Sn)" || true
-	@$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true > $(TEMP_DIR)/bcl-convert.out 2> $(TEMP_DIR)/bcl-convert.err && echo "BCL-convert executed successfully!" || { echo "Error executing BCL-convert!"; exit 1; }
+	@ulimit -Sn $(BCLCONVERT_NOFILE) 2>/dev/null || true; \
+	if [ "$$(ulimit -Sn)" -lt $(BCLCONVERT_MIN_NOFILE) ]; then \
+		echo "Error: bcl-convert requires at least $(BCLCONVERT_MIN_NOFILE) open files, but the soft nofile limit is only $$(ulimit -Sn) and could not be raised to $(BCLCONVERT_NOFILE) (hard limit: $$(ulimit -Hn))."; \
+		echo "Raise the limit for this session with 'ulimit -Sn $(BCLCONVERT_NOFILE)' (or permanently via /etc/security/limits.conf) and re-run."; \
+		exit 1; \
+	fi; \
+	echo "BCL-convert soft nofile limit set to $$(ulimit -Sn)"; \
+	$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true > $(TEMP_DIR)/bcl-convert.out 2> $(TEMP_DIR)/bcl-convert.err && echo "BCL-convert executed successfully!" || { echo "Error executing BCL-convert!"; exit 1; }
 	@$(MAKE) smoke-bclconvert-fd
 
 
