@@ -6,6 +6,7 @@ import logging
 import pathlib
 import struct
 import tempfile
+import xml.etree.ElementTree as ET
 from collections import OrderedDict, defaultdict
 from datetime import datetime
 import numpy
@@ -1010,10 +1011,13 @@ def preprocess_and_write_bcls(
                                 # bits. The byte is little-endian: the first cluster of the pair goes in the low
                                 # nibble and the buffered (previous) cluster in the high nibble
                                 for cycle in range(read_length):
-                                    bits_string = encode_cluster_bits(
-                                        read.__getitem__(cycle),
-                                        quality_map,
-                                    ) + buffer[cycle]
+                                    bits_string = (
+                                        encode_cluster_bits(
+                                            read.__getitem__(cycle),
+                                            quality_map,
+                                        )
+                                        + buffer[cycle]
+                                    )
                                     # Convert the bits to a byte and write them to file
                                     try:
                                         opened_files[cycle].write(
@@ -1151,9 +1155,9 @@ def write_run_info_xml(
         # Pin the run date to the date segment of the run folder name
         # (e.g. 20260310 in 20260310_LM43899_0385_A12GGASZR5); the time is
         # fixed to midnight to keep the output reproducible
-        date = datetime.strptime(
-            flowcell_name.split("_")[0], "%Y%m%d"
-        ).strftime("%Y-%m-%dT00:00:00Z")
+        date = datetime.strptime(flowcell_name.split("_")[0], "%Y%m%d").strftime(
+            "%Y-%m-%dT00:00:00Z"
+        )
     else:
         date = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(xml_path, "wt") as f_out:
@@ -1198,6 +1202,65 @@ def write_run_info_xml(
         )
 
         f_out.write("  </Run>\n</RunInfo>\n")
+
+
+def write_run_parameters_xml(
+    xml_path: pathlib.Path,
+    output_path: pathlib.Path,
+    cycles_dict: dict,
+    desc: str,
+    instrument: str,
+    flowcell_name: str | None = None,
+) -> None:
+    """Write RunParameters.xml using the metadata available to FastRewind."""
+    xml_path.parent.mkdir(exist_ok=True, parents=True)
+    fields = parse_seqname_fields(desc)
+    run_id = flowcell_name if flowcell_name is not None else generate_run_id(desc)
+
+    root = ET.Element(
+        "RunParameters",
+        {
+            "xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance",
+            "xmlns:xsd": "http://www.w3.org/2001/XMLSchema",
+        },
+    )
+    ET.SubElement(root, "Application").text = f"{instrument}Series Control Software"
+    ET.SubElement(
+        root, "SystemSuiteVersion"
+    ).text = "1.1.0.26158"  # Arbitrary fixed version for now
+    ET.SubElement(root, "OutputFolder").text = str(output_path.resolve())
+    primer_selections = ET.SubElement(root, "CustomPrimerSelections")
+    for primer in [
+        "ReadOnePrimer",
+        "ReadTwoPrimer",
+        "IndexOnePrimer",
+        "IndexTwoPrimer",
+    ]:
+        ET.SubElement(primer_selections, primer).text = "false"
+    ET.SubElement(root, "CloudUploadMode").text = "None"
+    ET.SubElement(root, "RunSetupMode").text = ""
+    ET.SubElement(root, "SecondaryAnalysisMode").text = "None"
+    ET.SubElement(root, "InstrumentType").text = instrument
+    ET.SubElement(root, "InstrumentSerialNumber").text = fields["instrument"]
+    ET.SubElement(root, "RunId").text = run_id
+    ET.SubElement(root, "ConsumableInfo")
+
+    planned_reads = ET.SubElement(root, "PlannedReads")
+    read_names = {"R1": "Read1", "I1": "Index1", "I2": "Index2", "R2": "Read2"}
+    for read, name in read_names.items():
+        cycles = cycles_dict.get(read, 0)
+        if cycles:
+            ET.SubElement(planned_reads, "Read", ReadName=name, Cycles=str(cycles))
+
+    ET.SubElement(root, "SecondaryAnalysisInfo")
+    ET.SubElement(root, "RunCounter").text = fields["run_number"]
+    ET.SubElement(root, "RecipeName").text = ""
+    ET.SubElement(root, "RecipeVersion").text = ""
+    ET.SubElement(root, "ExperimentName").text = ""
+    ET.SubElement(root, "PurgeReagentCartridge").text = "false"
+
+    ET.indent(root, space="  ")
+    ET.ElementTree(root).write(xml_path, encoding="utf-8", xml_declaration=True)
 
 
 def main(args: argparse.Namespace) -> None:
@@ -1401,6 +1464,14 @@ def main(args: argparse.Namespace) -> None:
         args.flowcell_id,
     )
 
+    write_run_parameters_xml(
+        args.output_path.joinpath("RunParameters.xml"),
+        args.output_path,
+        cycles_dict,
+        sample_read,
+        args.instrument,
+        args.flowcell_id,
+    )
     logging.info("Writing InterOp index metrics...")
     interop_dir = args.interop_dir or args.output_path.joinpath("InterOp")
     index_records = build_index_records(index_counts, masks_table, cycles_dict)

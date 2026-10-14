@@ -6,6 +6,7 @@ import gzip
 import pathlib
 import re
 import struct
+import xml.etree.ElementTree as ET
 
 import pytest
 import biomate.fastrewind.fastrewind as fastrewind_module
@@ -21,6 +22,7 @@ from biomate.fastrewind.fastrewind import (
     validate_args,
     write_index_metrics,
     write_run_info_xml,
+    write_run_parameters_xml,
 )
 
 
@@ -298,9 +300,7 @@ class TestWriteRunInfoXml:
         assert "<Flowcell>B23NWY7LT4</Flowcell>" in xml
         assert 'B23NWY7LT4" Number="424"' in xml
         assert self.RUN_ID not in xml
-        assert re.search(
-            r"<Date>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z</Date>", xml
-        )
+        assert re.search(r"<Date>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z</Date>", xml)
 
     def test_provided_flowcell_name_used_as_run_id(self, tmp_path):
         """A provided flowcell name (full run folder name) is used as-is as the run id, skipping the generation of a new one, while <Flowcell> holds only its last part and <Date> is pinned to its date segment at midnight."""
@@ -309,6 +309,56 @@ class TestWriteRunInfoXml:
         assert f"<Flowcell>{self.FLOWCELL_ID}</Flowcell>" in xml
         assert "<Date>2026-03-10T00:00:00Z</Date>" in xml
         assert "B23NWY7LT4" not in xml
+
+
+class TestWriteRunParametersXml:
+    """Tests for write_run_parameters_xml."""
+
+    READ_NAME = "LH00217:424:B23NWY7LT4:1:1101:1001:1002 1:N:0:ACGT+TGCA"
+    RUN_ID = "20260310_LM43899_0385_A12GGASZR5"
+
+    def test_writes_run_context_and_template_structure(self, tmp_path):
+        xml_path = tmp_path / "flowcell" / "RunParameters.xml"
+        output_path = tmp_path / "flowcell"
+        write_run_parameters_xml(
+            xml_path,
+            output_path,
+            {"R1": 150, "I1": 8, "I2": 8, "R2": 150},
+            self.READ_NAME,
+            "NovaSeqXPlus",
+            self.RUN_ID,
+        )
+
+        root = ET.parse(xml_path).getroot()
+        assert root.findtext("OutputFolder") == str(output_path.resolve())
+        assert root.findtext("InstrumentType") == "NovaSeqXPlus"
+        assert root.findtext("InstrumentSerialNumber") == "LH00217"
+        assert root.findtext("RunId") == self.RUN_ID
+        assert root.findtext("RunCounter") == "424"
+        assert [
+            (read.get("ReadName"), read.get("Cycles"))
+            for read in root.findall("./PlannedReads/Read")
+        ] == [("Read1", "150"), ("Index1", "8"), ("Index2", "8"), ("Read2", "150")]
+        assert [child.tag for child in root] == [
+            "Application",
+            "SystemSuiteVersion",
+            "OutputFolder",
+            "CustomPrimerSelections",
+            "CloudUploadMode",
+            "RunSetupMode",
+            "SecondaryAnalysisMode",
+            "InstrumentType",
+            "InstrumentSerialNumber",
+            "RunId",
+            "ConsumableInfo",
+            "PlannedReads",
+            "SecondaryAnalysisInfo",
+            "RunCounter",
+            "RecipeName",
+            "RecipeVersion",
+            "ExperimentName",
+            "PurgeReagentCartridge",
+        ]
 
 
 def test_parser_flowcell_id_option():
