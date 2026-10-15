@@ -21,6 +21,10 @@ MISS = assets/SampleSheet_MixedIndexes.csv
 
 TEMP_DIR = temp
 FLOWCELL_ID = 20260310_LM43899_0385_A12GGASZR5
+FLOWCELL_ID_NONE ?= $(FLOWCELL_ID)
+FLOWCELL_ID_SINGLE ?= 20260310_LM43896_0386_B98QWERTY6
+FLOWCELL_ID_DUAL ?= 20260310_LM43897_0387_C36MNBVCX7
+FLOWCELL_ID_MIX ?= 20260310_LM43898_0388_D74LKJHGF8
 SEQ_NUM = 10
 
 RELEASE_DATA = DemuxCasesData.tar.gz
@@ -209,16 +213,20 @@ report_results: $(TEMP_DIR)/Demultiplexed results_message
 
 
 compare_results: $(TEMP_DIR)/Demultiplexed comparison_message
-	@bash assets/compare_results.sh && echo "All files pairwise comparisons were successful!" || echo "WARNING: Some pairwise comparisons yield different results!"
+	@FLOWCELL_ID=$(FLOWCELL_ID) bash assets/compare_results.sh && echo "All files pairwise comparisons were successful!" || echo "WARNING: Some pairwise comparisons yield different results!"
 
 
-test_none: deepclean run_message copy_none validate_samplesheet report_results compare_results
+test_none:
+	@$(MAKE) FLOWCELL_ID=$(FLOWCELL_ID_NONE) deepclean run_message copy_none validate_samplesheet report_results compare_results
 
-test_single: deepclean run_message copy_single validate_samplesheet report_results compare_results
+test_single:
+	@$(MAKE) FLOWCELL_ID=$(FLOWCELL_ID_SINGLE) deepclean run_message copy_single validate_samplesheet report_results compare_results
 
-test_dual: deepclean run_message copy_dual validate_samplesheet report_results compare_results
+test_dual:
+	@$(MAKE) FLOWCELL_ID=$(FLOWCELL_ID_DUAL) deepclean run_message copy_dual validate_samplesheet report_results compare_results
 
-test_mix: deepclean run_message copy_mix validate_samplesheet report_results compare_results
+test_mix:
+	@$(MAKE) FLOWCELL_ID=$(FLOWCELL_ID_MIX) deepclean run_message copy_mix validate_samplesheet report_results compare_results
 
 .PHONY: copy_none copy_single copy_dual copy_mix
 .PHONY: validate_samplesheet compare_results smoke-bclconvert-fd

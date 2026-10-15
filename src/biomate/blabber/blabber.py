@@ -150,9 +150,16 @@ def parse_sequence_mask(
     if len(mask_split) > 4:
         raise ValueError(f"OverrideCycles mask has incorrect format: {mask_string}")
 
-    for i_substring, substring in enumerate(mask_split):
+    read_index = 0
+    index_index = 0
+    for substring in mask_split:
         substring_type = "R" if "Y" in substring else "I"
-        substring_index = i_substring // 2 + 1
+        if substring_type == "R":
+            read_index += 1
+            substring_index = read_index
+        else:
+            index_index += 1
+            substring_index = index_index
         submask_split = re.findall(r"[^\W\d_]+|\d+", substring)
 
         for label, value in batched(submask_split, 2):

@@ -172,10 +172,16 @@ def parse_sequence_mask(mask_string: str) -> dict:
     if len(mask_split) > 4:
         raise ValueError(f"OverrideCycles mask has incorrect format: {mask_string}")
 
-    for i_substring, substring in enumerate(mask_split):
+    read_index = 0
+    index_index = 0
+    for substring in mask_split:
         substring_type = "R" if "Y" in substring else "I"
-        # Determine the substring index based on the position in the mask (1 for R1/I1, 2 for R2/I2)
-        substring_index = i_substring // 2 + 1
+        if substring_type == "R":
+            read_index += 1
+            substring_index = read_index
+        else:
+            index_index += 1
+            substring_index = index_index
         # Split the substring into letters and numbers
         submask_split = re.findall(r"[^\W\d_]+|\d+", substring)
 

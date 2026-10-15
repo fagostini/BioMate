@@ -36,10 +36,8 @@ class TestParseSequenceMask:
         assert result["R2"] == 0
 
     def test_r1_and_r2(self):
-        """A four-segment mask sets both R1 and R2 correctly."""
-        # A 2-segment mask "Y151;Y151" maps both to index-1 (R1) due to i_substring//2+1.
-        # R2 requires 4 segments; use a full 4-part mask to verify R2.
-        result = parse_sequence_mask("Y151;I0;I0;Y151")
+        """A two-read mask sets R1 and R2 correctly."""
+        result = parse_sequence_mask("Y151;Y151")
         assert result["R1"] == 151
         assert result["R2"] == 151
         assert result["I1"] == 0
@@ -498,15 +496,29 @@ RunName,DummyRun
 InstrumentPlatform,NextSeq2000
 [Reads]
 Read1Cycles,151
-Read2Cycles,151
 [BCLConvert_Data]
 Lane,Sample_ID,Sample_Name,index,index2,Sample_Project,OverrideCycles
-1,S1,Sample1,,,ProjA,Y151;Y151
+1,S1,Sample1,,,ProjA,Y151
 """
 
 
 class TestSingleEndAndTaint:
     """Tests for single-end generation and base-calling taints."""
+
+    def test_no_index_asset_generates_both_reads(self, tmp_path):
+        """The no-index sample sheet still generates paired-end FASTQs."""
+        sample_sheet = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "assets"
+            / "SampleSheet_NoIndex.csv"
+        )
+        main(_blabber_args(tmp_path, sample_sheet, seq_number=16))
+
+        demux_path = tmp_path / "TESTFC" / "Demultiplexing"
+        r1_files = sorted(demux_path.rglob("*_R1_001.fastq.gz"))
+        r2_files = sorted(demux_path.rglob("*_R2_001.fastq.gz"))
+        assert len(r1_files) == len(r2_files) == 1
+        assert _count_reads(r1_files[0]) == _count_reads(r2_files[0]) == 16
 
     def test_single_end_generates_r1_only(self, tmp_path):
         """A single-end recipe produces an R1 file with reads and no R2 file."""

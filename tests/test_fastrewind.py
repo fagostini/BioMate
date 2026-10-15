@@ -41,10 +41,8 @@ class TestParseSequenceMask:
         assert result["R2"] == 0
 
     def test_r1_and_r2(self):
-        """A four-segment mask sets both R1 and R2 correctly."""
-        # A 2-segment mask "Y151;Y151" maps both to index-1 (R1) due to i_substring//2+1.
-        # R2 requires 4 segments; use a full 4-part mask to verify R2.
-        result = parse_sequence_mask("Y151;I0;I0;Y151")
+        """A two-read mask sets R1 and R2 correctly."""
+        result = parse_sequence_mask("Y151;Y151")
         assert result["R1"] == 151
         assert result["R2"] == 151
         assert result["I1"] == 0
