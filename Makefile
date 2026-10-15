@@ -176,10 +176,10 @@ copy_mix: $(TEMP_DIR) $(MISS) clean_samplesheet
 $(TEMP_DIR)/$(FLOWCELL_ID): check-uv $(TEMP_DIR) clean_flowcell
 	@$(UV) run biomate --verbose blabber --format fastq --sample-sheet $(TEMP_DIR)/SampleSheet.csv --seq-number $(SEQ_NUM) --output $(TEMP_DIR) --flowcell-id $(FLOWCELL_ID) > $(TEMP_DIR)/blabber.out 2> $(TEMP_DIR)/blabber.err && echo "Blabber module executed successfully!" || { echo "Error executing Blabber module!"; exit 1; }
 
-$(TEMP_DIR)/Data $(TEMP_DIR)/RunInfo.xml: check-uv $(TEMP_DIR)/$(FLOWCELL_ID) clean_data
-	@$(UV) run biomate --verbose fastrewind --input-path $(TEMP_DIR) --output-path $(TEMP_DIR) --flowcell-id $(FLOWCELL_ID) --threads 8 > $(TEMP_DIR)/fastrewind.out 2> $(TEMP_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || { echo "Error executing Fastrewind module!"; exit 1; }
+$(TEMP_DIR)/$(FLOWCELL_ID)/Data $(TEMP_DIR)/$(FLOWCELL_ID)/RunInfo.xml $(TEMP_DIR)/$(FLOWCELL_ID)/RunParameters.xml: check-uv $(TEMP_DIR)/$(FLOWCELL_ID) clean_data
+	@$(UV) run biomate --verbose fastrewind --input-path $(TEMP_DIR) --output-path $(TEMP_DIR)/$(FLOWCELL_ID) --flowcell-id $(FLOWCELL_ID) --threads 8 > $(TEMP_DIR)/fastrewind.out 2> $(TEMP_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || { echo "Error executing Fastrewind module!"; exit 1; }
 
-validate_samplesheet: check-bclconvert $(TEMP_DIR)/RunInfo.xml
+validate_samplesheet: check-bclconvert $(TEMP_DIR)/$(FLOWCELL_ID)/RunInfo.xml
 	@ulimit -Sn $(BCLCONVERT_NOFILE) 2>/dev/null || true; \
 	if [ "$$(ulimit -Sn)" -lt $(BCLCONVERT_MIN_NOFILE) ]; then \
 		echo "Error: bcl-convert requires at least $(BCLCONVERT_MIN_NOFILE) open files, but the soft nofile limit is only $$(ulimit -Sn) and could not be raised to $(BCLCONVERT_NOFILE) (hard limit: $$(ulimit -Hn))."; \
@@ -187,10 +187,10 @@ validate_samplesheet: check-bclconvert $(TEMP_DIR)/RunInfo.xml
 		exit 1; \
 	fi; \
 	echo "BCL-convert soft nofile limit set to $$(ulimit -Sn)"; \
-	$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true --bcl-output-format demux-autodetect --bcl-validate-sample-sheet-only true > $(TEMP_DIR)/bcl-validate.out 2> $(TEMP_DIR)/bcl-validate.err && echo "BCL-convert SampleSheet validation was successful!" || { echo "Error executing BCL-convert SampleSheet validation!"; exit 1; }
+	$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexed --bcl-input-directory $(TEMP_DIR)/$(FLOWCELL_ID) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true --bcl-output-format demux-autodetect --bcl-validate-sample-sheet-only true > $(TEMP_DIR)/bcl-validate.out 2> $(TEMP_DIR)/bcl-validate.err && echo "BCL-convert SampleSheet validation was successful!" || { echo "Error executing BCL-convert SampleSheet validation!"; exit 1; }
 	@$(MAKE) smoke-bclconvert-fd
 
-$(TEMP_DIR)/Demultiplexing: check-bclconvert $(TEMP_DIR)/RunInfo.xml clean_demux
+$(TEMP_DIR)/Demultiplexed: check-bclconvert $(TEMP_DIR)/$(FLOWCELL_ID)/RunInfo.xml clean_demux
 	@ulimit -Sn $(BCLCONVERT_NOFILE) 2>/dev/null || true; \
 	if [ "$$(ulimit -Sn)" -lt $(BCLCONVERT_MIN_NOFILE) ]; then \
 		echo "Error: bcl-convert requires at least $(BCLCONVERT_MIN_NOFILE) open files, but the soft nofile limit is only $$(ulimit -Sn) and could not be raised to $(BCLCONVERT_NOFILE) (hard limit: $$(ulimit -Hn))."; \
@@ -198,17 +198,17 @@ $(TEMP_DIR)/Demultiplexing: check-bclconvert $(TEMP_DIR)/RunInfo.xml clean_demux
 		exit 1; \
 	fi; \
 	echo "BCL-convert soft nofile limit set to $$(ulimit -Sn)"; \
-	$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexing --bcl-input-directory $(TEMP_DIR) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true > $(TEMP_DIR)/bcl-convert.out 2> $(TEMP_DIR)/bcl-convert.err && echo "BCL-convert executed successfully!" || { echo "Error executing BCL-convert!"; exit 1; }
+	$(BCLCONVERT) --output-directory $(TEMP_DIR)/Demultiplexed --bcl-input-directory $(TEMP_DIR)/$(FLOWCELL_ID) --strict-mode true --bcl-sampleproject-subdirectories true --sample-name-column-enabled true > $(TEMP_DIR)/bcl-convert.out 2> $(TEMP_DIR)/bcl-convert.err && echo "BCL-convert executed successfully!" || { echo "Error executing BCL-convert!"; exit 1; }
 	@$(MAKE) smoke-bclconvert-fd
 
 
 .PHONY: report_results
-report_results: $(TEMP_DIR)/Demultiplexing results_message
-	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep -v -e "Undetermined" -e "_I1_" -e "_I2_" | xargs -r zgrep -c ^@ || true
-	@find $(TEMP_DIR)/Demultiplexing -name "*.fastq.gz" | grep "Undetermined" | grep -v -e "_I1_" -e "_I2_" | xargs -r zgrep -c ^@ || true
+report_results: $(TEMP_DIR)/Demultiplexed results_message
+	@find $(TEMP_DIR)/Demultiplexed -name "*.fastq.gz" | grep -v -e "Undetermined" -e "_I1_" -e "_I2_" | xargs -r zgrep -c ^@ || true
+	@find $(TEMP_DIR)/Demultiplexed -name "*.fastq.gz" | grep "Undetermined" | grep -v -e "_I1_" -e "_I2_" | xargs -r zgrep -c ^@ || true
 
 
-compare_results: $(TEMP_DIR)/Demultiplexing comparison_message
+compare_results: $(TEMP_DIR)/Demultiplexed comparison_message
 	@bash assets/compare_results.sh && echo "All files pairwise comparisons were successful!" || echo "WARNING: Some pairwise comparisons yield different results!"
 
 
@@ -263,8 +263,8 @@ clean_flowcell:
 
 .PHONY: clean_data
 clean_data:
-	if [[ -d $(TEMP_DIR)/Data ]]; then rm -r $(TEMP_DIR)/Data; fi
+	if [[ -d $(TEMP_DIR)/$(FLOWCELL_ID)/Data ]]; then rm -r $(TEMP_DIR)/$(FLOWCELL_ID)/Data; fi
 
 .PHONY: clean_demux
 clean_demux:
-	@if [[ -d $(TEMP_DIR)/Demultiplexing ]]; then rm -r $(TEMP_DIR)/Demultiplexing; fi
+	@if [[ -d $(TEMP_DIR)/Demultiplexed ]]; then rm -r $(TEMP_DIR)/Demultiplexed; fi
