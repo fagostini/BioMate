@@ -57,6 +57,8 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#options">Options</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#interop-output">InterOp Output</a>
+    </li>
     <li class="toctree-l2"><a class="reference internal" href="#workflow-schematic-diagram">Workflow Schematic Diagram</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#notes-and-references">Notes and References</a>
@@ -74,6 +76,8 @@
                   <li class="toctree-l1"><a class="reference internal" href="../nspector/">Nspector</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../strainer/">Strainer</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../waif/">Waif</a>
                   </li>
               </ul>
       </div>
@@ -114,10 +118,15 @@
 <li><code>--output-path</code>: Path to the output directory where the BCL structure will be created (default: current directory).</li>
 <li><code>--sample-sheet</code>: Path to the Sample Sheet file. If not provided, the script will look for SampleSheet.csv in the input directory.</li>
 <li><code>--total-cycles</code>: The total number of cycles. If this is larger than the sequences in the samples, shorter samples will be filled with Ns.</li>
+<li><code>--interop-dir</code>: Path to the InterOp directory where <code>IndexMetricsOut.bin</code> is written (default: <code>&lt;output-path&gt;/InterOp</code>).</li>
 <li><code>--instrument</code>: The type of Illumina instrument, which will determine the type of outputs and folder structure. <em>Please, be aware that only the NovaSeqXPlus is currently supported.</em></li>
+<li><code>--flowcell-id</code>: Flowcell name (the full run folder name, e.g. <code>20260310_LM43899_0385_A12GGASZR5</code>) to use as the run id in the <code>RunInfo.xml</code> file, instead of generating one; its last part is written in the <code>Flowcell</code> element and its date segment (with the time fixed to midnight) in the <code>Date</code> element (default: derived from the read names, date set to the current time).</li>
 <li><code>--threads</code>: Number of threads used by dnaio to read/write files. Default is 0, which corresponds to a single thread.</li>
-<li><code>--force</code>: Force overwrite of existing files in the output directory.</li>
+<li><code>--force</code>: Force overwrite of existing files in the output directory (the <code>Data</code> and <code>InterOp</code> folders are cleaned up when re-running into an existing output).</li>
 </ul>
+<h2 id="interop-output">InterOp Output</h2>
+<p>In addition to the BCL structure, FastRewind generates the InterOp index metrics file <code>InterOp/IndexMetricsOut.bin</code> (location configurable via <code>--interop-dir</code>), which stores the number of clusters identified as each index, per lane, tile and index read. This mirrors the file described in the <a href="https://support.illumina.com/content/dam/illumina-support/documents/documentation/software_documentation/bcl2fastq/bcl2fastq2-v2-17-software-guide-15051736-g.pdf">bcl2fastq2 software guide</a> and produced by the instrument, and can be read back by the official <a href="https://github.com/Illumina/interop">Illumina InterOp library</a>.</p>
+<p>The file format follows the InterOp "Index Version 2" binary layout: a leading version byte followed by little-endian records of lane, tile, read, a length-prefixed UTF-8 index name, a cluster count, and length-prefixed UTF-8 sample and project names. Tiles are stored as their numeric identifier from the FASTQ read name, and dual indexes are stored as a single <code>I1-I2</code> name, one record per index read. Index reads are numbered by their position among the run's index reads (<code>I1</code> -&gt; <code>1</code>, <code>I2</code> -&gt; <code>2</code>), matching the files produced by the instrument and independent of the overall read numbering in <code>RunInfo.xml</code>. The cluster counts are derived directly from the demultiplexed FASTQ input (one count per observed cluster), so only samples with at least one index cycle contribute records.</p>
 <h2 id="workflow-schematic-diagram">Workflow Schematic Diagram</h2>
 <p><img alt="FastRewind Diagram" src="../fastrewind.png" /></p>
 <h2 id="notes-and-references">Notes and References</h2>
@@ -129,6 +138,9 @@
 <li><a href="https://support-docs.illumina.com/IN/NovaSeqX/Content/IN/NovaSeqX/RTAOverview.htm">Quality Scores</a></li>
 <li><a href="https://support-docs.illumina.com/IN/NextSeq_550-500/Content/IN/NextSeq/FlowCell_Tiles_fNS.htm">Flowcell Components</a></li>
 <li><a href="https://support.illumina.com/content/dam/illumina-support/documents/documentation/software_documentation/bcl2fastq/bcl2fastq2-v2-20-software-guide-15051736-03.pdf">bcl2fastq</a></li>
+<li><a href="https://support.illumina.com/content/dam/illumina-support/documents/documentation/software_documentation/bcl2fastq/bcl2fastq2-v2-17-software-guide-15051736-g.pdf">bcl2fastq v2.17 (InterOp file specification)</a></li>
+<li><a href="https://github.com/Illumina/interop">Illumina InterOp library</a></li>
+<li><a href="http://illumina.github.io/interop/binary_formats.html">InterOp binary formats</a></li>
 </ul>
 <h3 id="encoding-bcl-header-and-nucleotides-examples">Encoding BCL Header and Nucleotides Examples</h3>
 <ul>

@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="Federico Agostini <federico.agostini@scilifelab.se>" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>BioMate Compatibility Matrix - BioMate</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "BioMate Compatibility Matrix";
+        var mkdocs_page_input_path = "COMPATIBILITY.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> BioMate
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Sub-commands</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../blabber/">Blabber</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../dirstruct/">Dirstruct</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../indexer/">Indexer</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../fastrewind/">FastRewind</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../nspector/">Nspector</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../strainer/">Strainer</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../waif/">Waif</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">BioMate</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">BioMate Compatibility Matrix</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/fagostini/BioMate/edit/master/docs/COMPATIBILITY.md" class="icon icon-github"> Edit on GitHub</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="biomate-compatibility-matrix">BioMate Compatibility Matrix</h1>
+<p>This document tracks tested versions and known compatibility constraints for BioMate.</p>
+<h2 id="tested-python-versions">Tested Python Versions</h2>
+<table>
+<thead>
+<tr>
+<th>Python Version</th>
+<th>Status</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>3.12.x</td>
+<td>✅ Tested</td>
+<td>Full support</td>
+</tr>
+<tr>
+<td>3.13.11</td>
+<td>✅ Tested (Current)</td>
+<td>Full support</td>
+</tr>
+<tr>
+<td>3.14.x</td>
+<td>❓ Not tested</td>
+<td>Expected to work; pending verification</td>
+</tr>
+<tr>
+<td>3.11 and earlier</td>
+<td>❌ Not supported</td>
+<td>Uses <code>itertools.batched</code> (Python 3.12+)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Minimum Requirement:</strong> Python 3.12+ (due to <code>itertools.batched</code> usage in sequence generation)</p>
+<h2 id="core-dependencies">Core Dependencies</h2>
+<h3 id="updated-numpy-2x-compatibility-resolved">Updated: NumPy 2.x Compatibility (RESOLVED)</h3>
+<table>
+<thead>
+<tr>
+<th>Package</th>
+<th>Tested Version</th>
+<th>Status</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>numpy</td>
+<td>2.5.0</td>
+<td>✅ Tested</td>
+<td>Migrated from deprecated <code>numpy.random</code> to <code>np.random.Generator</code> (see ISSUE-002 for details)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="tested-dependency-versions">Tested Dependency Versions</h3>
+<table>
+<thead>
+<tr>
+<th>Package</th>
+<th>Tested Version</th>
+<th>Status</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>polars</td>
+<td>1.42.0</td>
+<td>✅ Tested</td>
+<td>Data manipulation, CSV/FASTQ parsing</td>
+</tr>
+<tr>
+<td>altair</td>
+<td>6.2.2</td>
+<td>✅ Tested</td>
+<td>Visualizations (pinned to &gt;=6.2.0,&lt;7.0.0 per ISSUE-003)</td>
+</tr>
+<tr>
+<td>tornado</td>
+<td>6.5.7</td>
+<td>✅ Tested</td>
+<td>Web interface server</td>
+</tr>
+<tr>
+<td>regex</td>
+<td>2026.5.9</td>
+<td>✅ Tested</td>
+<td>Pattern matching for index evaluation</td>
+</tr>
+<tr>
+<td>dnaio</td>
+<td>1.2.4</td>
+<td>✅ Tested</td>
+<td>FASTQ/FASTA file I/O</td>
+</tr>
+<tr>
+<td>jellyfish</td>
+<td>1.2.1</td>
+<td>✅ Tested</td>
+<td>String distance calculations</td>
+</tr>
+</tbody>
+</table>
+<h2 id="known-compatibility-issues">Known Compatibility Issues</h2>
+<h3 id="issue-002-numpy-random-api-deprecation-resolved">ISSUE-002: NumPy Random API Deprecation (RESOLVED)</h3>
+<p><strong>Status:</strong> ✅ Fixed in commit 8d42be0</p>
+<ul>
+<li><strong>Problem:</strong> NumPy 2.x deprecated <code>numpy.random</code> module (will be removed in 3.x)</li>
+<li><strong>Solution:</strong> Migrated all random API calls to <code>np.random.Generator</code></li>
+<li><strong>Migration Pattern:</strong>
+  ```python
+  # Old (deprecated):
+  from numpy import random
+  random.choice(items, size=n)
+  random.randint(10, 100)</li>
+</ul>
+<p># New (current):
+  import numpy as np
+  rng = np.random.default_rng()
+  rng.choice(items, size=n)
+  rng.integers(10, 100)
+  ```
+- <strong>Affected Modules:</strong> blabber.py (sequence generation)</p>
+<h3 id="issue-003-altair-version-constraint-resolved">ISSUE-003: Altair Version Constraint (RESOLVED)</h3>
+<p><strong>Status:</strong> ✅ Fixed in commit f734633</p>
+<ul>
+<li><strong>Problem:</strong> Loose version spec allowed older untested versions</li>
+<li><strong>Current Spec:</strong> <code>altair[all]&gt;=6.2.0,&lt;7.0.0</code> (pinned to tested version)</li>
+<li><strong>Affected Modules:</strong> nspector.py (visualization generation)</li>
+</ul>
+<h3 id="issue-004-docker-break-system-packages-flag-resolved">ISSUE-004: Docker --break-system-packages Flag (RESOLVED)</h3>
+<p><strong>Status:</strong> ✅ Fixed in commit e0f33c0</p>
+<ul>
+<li><strong>Problem:</strong> Non-standard pip flag masked package conflicts</li>
+<li><strong>Solution:</strong> Replaced with virtual environment setup</li>
+<li><strong>Affected Files:</strong> Dockerfile (venv-based installation)</li>
+</ul>
+<h3 id="issue-006-python-312-requirement-no-action-needed">ISSUE-006: Python 3.12+ Requirement (NO ACTION NEEDED)</h3>
+<p><strong>Status:</strong> ✅ Expected behavior</p>
+<ul>
+<li><strong>Reason:</strong> <code>itertools.batched</code> used in blabber.py (line 12) and fastrewind.py</li>
+<li><strong>Impact:</strong> Only available in Python 3.12+</li>
+<li><strong>Current Requirement:</strong> pyproject.toml specifies <code>python = "&gt;=3.12"</code></li>
+<li><strong>Backward Compatibility:</strong> None needed; requirement is intentional</li>
+</ul>
+<h2 id="breaking-changes-migration-guide">Breaking Changes &amp; Migration Guide</h2>
+<h3 id="numpy-2x-3x-future">NumPy 2.x → 3.x (Future)</h3>
+<p>When NumPy 3.x is released and <code>numpy.random</code> module is removed:</p>
+<ol>
+<li>✅ Code is already compatible (migrated to <code>np.random.Generator</code>)</li>
+<li>No changes needed for BioMate when upgrading to NumPy 3.x</li>
+</ol>
+<h3 id="python-312-313">Python 3.12 → 3.13+</h3>
+<p>No breaking changes detected. Full compatibility confirmed for Python 3.13.11.</p>
+<h2 id="dependency-update-process">Dependency Update Process</h2>
+<h3 id="safe-to-update">Safe to Update</h3>
+<p>The following dependencies can be safely updated:
+- <strong>polars</strong>: Major versions tested; minor/patch updates recommended
+- <strong>regex</strong>: Stable upstream; updates recommended for new features/fixes
+- <strong>dnaio</strong>: Well-maintained; updates recommended
+- <strong>jellyfish</strong>: Stable; updates recommended
+- <strong>tornado</strong>: Monitor for security updates; apply promptly</p>
+<h3 id="version-pinned-dependencies">Version-Pinned Dependencies</h3>
+<ul>
+<li><strong>altair</strong>: Pinned to <code>&gt;=6.2.0,&lt;7.0.0</code> for stability (requires regression testing on upgrade)</li>
+<li><strong>numpy</strong>: May require updates when moving between major versions (test <code>np.random.Generator</code> API)</li>
+</ul>
+<h3 id="update-procedure">Update Procedure</h3>
+<pre><code class="language-bash"># Check for new versions
+uv update
+
+# Lock updated versions
+uv lock
+
+# Run full test suite
+uv run pytest tests/ -v
+
+# If all tests pass, commit new lock file
+git add uv.lock
+git commit -m &quot;chore: update dependencies&quot;
+</code></pre>
+<h2 id="testing-recommendations">Testing Recommendations</h2>
+<h3 id="before-upgrading-dependencies">Before Upgrading Dependencies</h3>
+<ol>
+<li>Run full test suite: <code>uv run pytest tests/ -v</code></li>
+<li>Test sequence generation: <code>uv run biomate blabber --seq-number 1000 --seq-length 100 --output test.fastq</code></li>
+<li>Test visualization: <code>uv run biomate nspector --input test.fastq --output /tmp</code></li>
+<li>Test sample sheet handling: Verify with real Illumina sample sheets</li>
+</ol>
+<h3 id="cicd-environment">CI/CD Environment</h3>
+<p>BioMate's CI/CD pipeline should test on:
+- ✅ Python 3.12 (latest patch)
+- ✅ Python 3.13 (latest patch)
+- ? Python 3.14 (when available)</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="importerror-cannot-import-name-batched-from-itertools">"ImportError: cannot import name 'batched' from 'itertools'"</h3>
+<p><strong>Cause:</strong> Running Python &lt; 3.12</p>
+<p><strong>Solution:</strong> Upgrade to Python 3.12 or later:</p>
+<pre><code class="language-bash">python --version  # Check current version
+python -m venv --upgrade-deps /path/to/venv  # Update venv
+</code></pre>
+<h3 id="numpy-random-api-errors">NumPy random API errors</h3>
+<p><strong>Old message:</strong> "AttributeError: module 'numpy.random' has no attribute 'randint'"</p>
+<p><strong>Cause:</strong> NumPy 3.x removed deprecated API; code not migrated</p>
+<p><strong>Solution:</strong> Already addressed in BioMate (see ISSUE-002). No action needed.</p>
+<h3 id="altair-visualization-not-rendering">Altair visualization not rendering</h3>
+<p><strong>Cause:</strong> Version mismatch between altair and dependencies</p>
+<p><strong>Solution:</strong> </p>
+<pre><code class="language-bash">uv lock --upgrade altair
+uv sync
+uv run biomate nspector --input test.fastq --output /tmp
+</code></pre>
+<h2 id="environment-variables">Environment Variables</h2>
+<p>None required. Optional:
+- <code>SSL_CERT</code> / <code>SSL_KEY</code>: For web interface HTTPS (see web_interface.py)</p>
+<h2 id="reporting-compatibility-issues">Reporting Compatibility Issues</h2>
+<p>If you encounter compatibility problems:</p>
+<ol>
+<li>
+<p>Document your environment:
+   <code>bash
+   python --version
+   pip list | grep -E "numpy|polars|altair|tornado|regex|dnaio|jellyfish"
+   uv lock --frozen  # Show exact versions</code></p>
+</li>
+<li>
+<p>Create an issue on GitHub with:</p>
+</li>
+<li>Exact error message</li>
+<li>Steps to reproduce</li>
+<li>Environment details (Python version, OS, installed versions)</li>
+<li>Whether issue reproduces on latest main branch</li>
+</ol>
+<h2 id="version-release-timeline">Version Release Timeline</h2>
+<table>
+<thead>
+<tr>
+<th>Version</th>
+<th>Release Date</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.3.0</td>
+<td>Current</td>
+<td>All known compatibility issues resolved</td>
+</tr>
+<tr>
+<td>0.2.x</td>
+<td>Earlier</td>
+<td>See git history for older tested versions</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<p><strong>Last Updated:</strong> August 2026<br />
+<strong>Maintainer:</strong> BioMate Development Team<br />
+<strong>Next Review:</strong> When adding new dependencies or supporting new Python versions</p>
+              
+            </div>
+          </div><footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/fagostini/BioMate" class="fa fa-github" style="color: #fcfcfc"> GitHub</a>
+        </span>
+    
+    
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

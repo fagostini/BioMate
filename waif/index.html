@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="Federico Agostini <federico.agostini@scilifelab.se>" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Waif - BioMate</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Waif";
+        var mkdocs_page_input_path = "waif.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> BioMate
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Sub-commands</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../blabber/">Blabber</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../dirstruct/">Dirstruct</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../indexer/">Indexer</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../fastrewind/">FastRewind</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../nspector/">Nspector</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../strainer/">Strainer</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Waif</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#usage">Usage</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#options">Options</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#input-format">Input Format</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#default-mode-statsjson">Default mode (Stats.json)</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#exact-mode">Exact mode</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#output">Output</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#counting-strategies-exact-mode">Counting Strategies (Exact Mode)</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#example">Example</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#notes">Notes</a>
+    </li>
+    </ul>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">BioMate</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Sub-commands</li>
+      <li class="breadcrumb-item active">Waif</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/fagostini/BioMate/edit/master/docs/waif.md" class="icon icon-github"> Edit on GitHub</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="waif">Waif</h1>
+<p>This module reports the barcodes that remain <strong>undetermined in every demultiplexing run of a lane</strong>.
+When a flowcell lane is demultiplexed multiple times (for example, successive bcl-convert re-runs with an updated sample sheet), barcodes that are undetermined in <em>all</em> of those runs are strong candidates for index hopping or index mis-assignment.
+For each such barcode the module reports an estimated read count: the mean of the per-dataset counts, rounded up to a multiple of 10.</p>
+<h2 id="usage">Usage</h2>
+<p>The minimal command is <code>biomate waif --input-path &lt;DIR&gt;</code>.
+By default the module reads the <code>UnknownBarcodes</code> field of every <code>Stats.json</code> file found under the input directory.</p>
+<h2 id="options">Options</h2>
+<ul>
+<li><code>--input-path</code>: Path to the input directory. In default mode it must contain at least one <code>&lt;Dataset&gt;/Stats/Stats.json</code> file; in exact mode it must contain the undetermined FASTQ files. This argument is required.</li>
+<li><code>--output-file</code>: File to write the results CSV to. If not specified, the results are written to stdout (and logging is suppressed automatically). The parent directory is created automatically if it does not exist.</li>
+<li><code>--exact</code>: Enable exact counting of undetermined indexes by reading the undetermined FASTQ files instead of relying on <code>Stats.json</code>. Requires a Sample Sheet to identify the lanes that carry samples from two or more projects.</li>
+<li><code>--sample-sheet</code>: Path to an explicit Sample Sheet file (only used in exact mode). If not provided, the module looks for <code>SampleSheet.csv</code> inside <code>--input-path</code>.</li>
+<li><code>--block-cache DIR</code>: Directory for a small gzip member-offset index of the undetermined files; enables forked per-file workers that decompress and count in parallel (effective when there are fewer files than cores). Each file is scanned once to locate member boundaries; the index file is tiny and the source is never copied or re-compressed. Only supported on Linux.</li>
+</ul>
+<h2 id="input-format">Input Format</h2>
+<h3 id="default-mode-statsjson">Default mode (Stats.json)</h3>
+<p>The module globs <code>**/Stats.json</code> under <code>--input-path</code> and reads the <code>UnknownBarcodes</code> field, which is expected to look like:</p>
+<pre><code class="language-json">{
+    &quot;UnknownBarcodes&quot;: [
+        {&quot;Lane&quot;: 1, &quot;Barcodes&quot;: {&quot;AAAA+AAAA&quot;: 200, &quot;CCCC+CCCC&quot;: 100}}
+    ]
+}
+</code></pre>
+<p>The dataset name is the directory that contains the <code>Stats</code> folder (i.e. <code>input_path/&lt;Dataset&gt;/Stats/Stats.json</code>).
+Files below any <code>Demultiplexing/</code> directory are excluded, as that is the primary bcl-convert demux output rather than a re-run.
+<code>Stats.json</code> files without an <code>UnknownBarcodes</code> field are skipped with a warning.</p>
+<h3 id="exact-mode">Exact mode</h3>
+<p>The module globs <code>**/Undetermined_*_L00&lt;Lane&gt;_R1_*.fastq.gz</code> under <code>--input-path</code> and counts the index pairs in the read headers (only R1 files are used, as the index information is in the R1 headers).
+Files below any <code>Demultiplexing/</code> directory are excluded.
+If bcl-convert split a dataset into several 1M-read parts (<code>_001</code>, <code>_002</code>, ...), their counts are summed, so each (Lane, Dataset, Barcode) combination is unique.</p>
+<p>The Sample Sheet must be in either the legacy <code>FCID,...</code> format or the modern <code>Lane,...</code> format (the one used by <code>[BCLConvert_Data]</code> sheets).
+Rows without any index and rows with an empty <code>Sample_Project</code> are ignored; a lane is selected when its rows carry samples from two or more distinct projects.</p>
+<h2 id="output">Output</h2>
+<p>A CSV with the following columns is written to <code>--output-file</code> (or to stdout):</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Lane</code></td>
+<td>Lane number</td>
+</tr>
+<tr>
+<td><code>Barcode</code></td>
+<td>The undetermined barcode (<code>index1</code> or <code>index1+index2</code>)</td>
+</tr>
+<tr>
+<td><code>Count</code></td>
+<td>Estimated read count: mean of the per-dataset counts, rounded up to a multiple of 10</td>
+</tr>
+<tr>
+<td><code>Total %</code></td>
+<td>Percentage of the lane's total reported count</td>
+</tr>
+</tbody>
+</table>
+<p>Rows are sorted by lane, then by count (descending), then by barcode.
+If no barcode is undetermined in every run of a lane (or no lane is shared), the file is still written but contains only the header row.</p>
+<h2 id="counting-strategies-exact-mode">Counting Strategies (Exact Mode)</h2>
+<p>Each undetermined FASTQ file is counted with the fastest strategy that is correct for it:</p>
+<ul>
+<li><strong>Serial</strong>: one fused streaming pass (decompress + count) for small files.</li>
+<li><strong>Threaded</strong>: the <code>zlib</code> inflate C call (which releases the GIL) runs in a producer thread overlapped with the counting pass, for large files.</li>
+<li><strong>Forked (with <code>--block-cache</code>)</strong>: a small index of the gzip member byte offsets is built and cached (validated against the source by path, mtime and size); the file is then counted by one forked worker per contiguous run of members. This is only used when every member boundary falls on a FASTQ line boundary; otherwise the module falls back to the serial pass. A multi-member file whose boundary falls mid-header is never split.</li>
+</ul>
+<p>Per-file counting runs in a process pool (one worker per file, up to the core count) and the output order matches the file order, so the results are deterministic.</p>
+<h2 id="example">Example</h2>
+<pre><code class="language-bash">biomate waif \
+    --input-path /data/flowcells/20260310_LM43899_0385_A12GGASZR5 \
+    --output-file ./waif_results/undetermined.csv
+
+biomate waif \
+    --input-path /data/flowcells/20260310_LM43899_0385_A12GGASZR5 \
+    --exact \
+    --sample-sheet /data/sample_sheets/SampleSheet.csv \
+    --block-cache /tmp/waif_cache
+</code></pre>
+<p>The first command processes all <code>Stats.json</code> files under the flowcell directory and writes the results to <code>undetermined.csv</code>.
+The second command counts the undetermined FASTQ headers exactly, using the given sample sheet to select the lanes, and caches the gzip member-offset index in <code>/tmp/waif_cache</code>.</p>
+<h2 id="notes">Notes</h2>
+<ul>
+<li>The reported count is an estimate: it is the mean of the per-dataset counts rounded up to a multiple of 10, with a single rounding applied at the end.</li>
+<li>Datasets may be dual-index (<code>index1+index2</code>) or single-index (<code>index1</code> only). When every dataset of a lane is dual-index the intersection is computed on both indexes; as soon as a single-index dataset joins, the comparison drops to index1 only (the longer index1 is trimmed to the shorter) and the result is reported in the single-index form.</li>
+<li>A (Dataset, Lane) must be uniformly single- or dual-index; mixing the two within one dataset is a data error and aborts the run.</li>
+<li>Two datasets with equal total index length but crossed per-index lengths (e.g. 10+8 vs 8+10) can leave one index untruncated, in which case that lane's intersection comes out empty.</li>
+<li><code>--block-cache</code> is only supported on Linux (it relies on <code>os.fork</code>); on other platforms the argument is rejected.</li>
+<li>The web interface runs each tool with a 10-minute timeout; large exact-mode runs should be done from the command line.</li>
+</ul>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../strainer/" class="btn btn-neutral float-left" title="Strainer"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/fagostini/BioMate" class="fa fa-github" style="color: #fcfcfc"> GitHub</a>
+        </span>
+    
+    
+      <span><a href="../strainer/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

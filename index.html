@@ -46,6 +46,12 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#general-options">General options</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#external-dependencies">External dependencies</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#bcl-convert">BCL-convert</a>
+    </li>
+        </ul>
+    </li>
     </ul>
                 </li>
               </ul>
@@ -62,6 +68,8 @@
                   <li class="toctree-l1"><a class="reference internal" href="nspector/">Nspector</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="strainer/">Strainer</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="waif/">Waif</a>
                   </li>
               </ul>
       </div>
@@ -99,6 +107,7 @@
 <li><a href="fastrewind/">FastRewind</a> - Convert a demultiplexed folder back into the Illumina NovaSeqXPlus output. It can be used to generate a subset for demultiplex testing.</li>
 <li><a href="nspector/">Nspector</a> - Inspect FASTQ files for N-base content and their distribution across flowcell tiles and sequencing cycles.</li>
 <li><a href="strainer/">Strainer</a> - Evaluate index mixing across flowcell lanes by identifying sample indexes from one lane appearing in undetermined reads of another.</li>
+<li><a href="waif/">Waif</a> - Report the barcodes that remain undetermined in every demultiplexing run of a lane, with an estimated read count.</li>
 </ul>
 <h2 id="general-options">General options</h2>
 <p>In addition to the <code>--version</code> option, which prints the current version of the BioMate package, the following options can be provided before any sub-command (<em>e.g.</em> <code>biomate &lt;OPTION&gt; &lt;SUBCOMMAND&gt;</code>), and they will be propagated to the sub-command execution:</p>
@@ -110,6 +119,19 @@
 <p><em><strong>Note:</strong> By default, the logging level is set to <code>INFO</code>, which will print general information about the execution of the sub-command, but not the detailed debug information.</em></p>
 <p><em><strong>Important:</strong> In some cases (e.g. when the output will be printed to the standard output), the <code>--quiet</code> option will be applied automatically to avoid cluttering the output with unnecessary information. In such cases, the logging level will be set to <code>ERROR</code> regardless of the <code>--verbose</code> or <code>--quiet</code> options.</em></p>
 </blockquote>
+<h2 id="external-dependencies">External dependencies</h2>
+<h3 id="bcl-convert">BCL-convert</h3>
+<p>The demultiplexing test recipes (e.g. <code>make test_mix</code>) require the Illumina <a href="https://support.illumina.com/sequencing/sequencing_software/bcl-convert/downloads.html">BCL-convert</a> executable. BCL-convert is a proprietary Illumina tool whose redistribution is prohibited, so it is <strong>not included in this repository</strong>. To use it:</p>
+<ol>
+<li>Download BCL-convert from the <a href="https://support.illumina.com/sequencing/sequencing_software/bcl-convert/downloads.html">Illumina website</a> and accept the license terms.</li>
+<li>Place the <code>bcl-convert</code> executable in the <code>assets/</code> directory of this repository, i.e. as <code>assets/bcl-convert</code>.</li>
+<li>The file is listed in <code>.gitignore</code> and must never be committed.</li>
+</ol>
+<p>The <code>Makefile</code> looks for the executable at <code>assets/bcl-convert</code> by default. If the tool is installed elsewhere, set the <code>BCLCONVERT</code> variable to its full path (e.g. <code>make BCLCONVERT=/full/path/to/bcl-convert test_mix</code>).</p>
+<p>BCL-convert opens thousands of BCL and filter files in parallel, so it needs a high open-file (nofile) limit. The <code>Makefile</code> raises the soft limit to <code>BCLCONVERT_NOFILE</code> (default <code>65535</code>) in the same shell that runs BCL-convert, and aborts with an actionable error if the resulting limit is below <code>BCLCONVERT_MIN_NOFILE</code> (default <code>4096</code>). If your session cannot reach that minimum (for example, when the hard limit is <code>1024</code>), raise it before running the recipes:</p>
+<pre><code>ulimit -Sn 65535
+</code></pre>
+<p>or add a <code>nofile</code> entry to <code>/etc/security/limits.conf</code>. Otherwise BCL-convert aborts in strict mode with a misleading <code>Missing ... file</code> error.</p>
               
             </div>
           </div><footer>
@@ -162,5 +184,5 @@
 
 <!--
 MkDocs version : 1.6.1
-Build Date UTC : 2026-06-22 08:06:28.245660+00:00
+Build Date UTC : 2026-11-02 08:46:30.538475+00:00
 -->
