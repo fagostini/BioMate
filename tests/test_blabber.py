@@ -602,3 +602,71 @@ class TestFlowcellIdPinning:
         prefix = ":".join(self._first_read_name(demux_path).split(":")[:3])
         # Random identity: <2 letters><5 digits>:<3 digits>:<2 digits><6 letters><digit>
         assert re.fullmatch(r"[A-Z]{2}[0-9]{5}:[0-9]{3}:[0-9]{2}[A-Z]{6}[0-9]", prefix)
+
+
+# ---------------------------------------------------------------------------
+# Simple-mode (no sample sheet) FASTQ generation — structural regression
+# ---------------------------------------------------------------------------
+
+
+class TestSimpleFastqGeneration:
+    """Structural invariants of the vectorized simple-mode generator."""
+
+    def _run(self, tmp_path, seq_number=1000, seq_length=150, fmt="fastq", seed=42):
+        out = tmp_path / (f"sequences.{fmt}" + (".gz" if fmt == "fastq" else ""))
+        args = argparse.Namespace(
+            verbose=False,
+            quiet=True,
+            random_seed=seed,
+            alphabet="ACGT",
+            format=fmt,
+            sample_sheet=None,
+            output=out,
+            flowcell_id=None,
+            seq_number=seq_number,
+            seq_length=seq_length,
+            seq_mask=None,
+            index1=None,
+            index2=None,
+            taint=False,
+        )
+        main(args)
+        return out
+
+    def test_fastq_structural_invariants(self, tmp_path):
+        """Record count, name format, length, alphabet and composition."""
+        from collections import Counter
+
+        import dnaio
+
+        out = self._run(tmp_path)
+        comp = Counter()
+        n = 0
+        name_re = re.compile(
+            r"^[A-Z]{2}[0-9]{5}:[0-9]{3}:[0-9]{2}[A-Z]{6}:[0-9]+:[0-9]+:[0-9]+$"
+        )
+        with dnaio.open(out) as reader:
+            for rec in reader:
+                assert name_re.fullmatch(rec.name), rec.name
+                assert len(rec.sequence) == 150
+                assert set(rec.sequence) <= set("ACGT")
+                assert rec.qualities == "I" * 150
+                comp.update(rec.sequence)
+                n += 1
+        assert n == 1000
+        total = sum(comp.values())
+        for base in "ACGT":
+            assert abs(comp[base] / total - 0.25) < 0.05
+
+    def test_sequences_deterministic_per_seed(self, tmp_path):
+        """The same seed yields the same set of sequences (in-process)."""
+        import numpy as np
+
+        import biomate.blabber.blabber as b
+
+        b.rng = np.random.default_rng(7)
+        seqs_a = b.generate_sequences_set(set("ACGT"), 150, 2000)
+        b.rng = np.random.default_rng(7)
+        seqs_b = b.generate_sequences_set(set("ACGT"), 150, 2000)
+        assert seqs_a == seqs_b
+        assert len(seqs_a) == 2000

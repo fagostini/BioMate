@@ -27,6 +27,33 @@ TILE_COUNT = 16
 rng = np.random.default_rng()
 
 
+def _base_translation_table(alphabet: str) -> bytes:
+    """Build a 256-entry bytes translation table for an alphabet.
+
+    Maps the integers 0..len(alphabet)-1 onto the alphabet's characters; all
+    other byte values map to themselves. Built explicitly because
+    ``bytes.maketrans`` with overlapping from-tables is error-prone
+    (last occurrence wins).
+    """
+    table = bytearray(range(256))
+    for i, char in enumerate(alphabet):
+        table[i] = ord(char)
+    return bytes(table)
+
+
+def _random_base_rows(
+    generator, alphabet: str, table: bytes, n: int, length: int
+) -> list[str]:
+    """Vectorized generation of ``n`` random base strings of ``length``.
+
+    One ``integers`` draw for the whole batch plus a bulk byte translation
+    replaces the per-record ``"".join(rng.choice(...))`` pattern.
+    """
+    idx = generator.integers(0, len(alphabet), size=(n, length), dtype=np.uint8)
+    flat = idx.tobytes().translate(table).decode()
+    return [flat[i * length : (i + 1) * length] for i in range(n)]
+
+
 def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Initialise module subparser."""
     parser = subparsers.add_parser(
@@ -369,11 +396,16 @@ def generate_sequences_set(nucleotides: set, length: int, number: int) -> set:
     Returns:
         set: A set of unique random nucleotide sequences.
     """
+    alphabet = "".join(sorted(nucleotides))
+    table = _base_translation_table(alphabet)
+    target = min(number, len(nucleotides) ** length)
     sequences = set()
-    max_unique = len(nucleotides) ** length
-    while len(sequences) < number and len(sequences) < max_unique:
-        seq = "".join(rng.choice(list(nucleotides), size=length))
-        sequences.add(seq)
+    while len(sequences) < target:
+        batch = min(250_000, 4 * (target - len(sequences)))
+        for seq in _random_base_rows(rng, alphabet, table, batch, length):
+            sequences.add(seq)
+            if len(sequences) == target:
+                break
     return sequences
 
 
@@ -423,43 +455,74 @@ def generate_dnaio_fastq_files(
     logging.debug(
         f"Generating sequence for {[x.name for x in output_files]} using tile(s): {tiles}"
     )
+    alphabet = "".join(sorted(nucleotides))
+    table = _base_translation_table(alphabet)
+    tiles_arr = np.array(tiles)
+    x_arr = np.array(available_pos_x)
+    y_arr = np.array(available_pos_y)
+    extension_r2 = extension.replace(" 1", " 2")
+    qual1 = "I" * read1_len
+    qual2 = "I" * read2_len
+    chunk_size = 250_000
     with dnaio.open(*output_files, mode="w", fileformat="fastq") as writer:
         for reads in sequences or []:
             if reads:
                 writer.write(*reads)
-        for i in range(seq_number):
-            suffix = ":".join(
-                [
-                    tiles[i % len(tiles)],
-                    available_pos_x[i // k],
-                    available_pos_y[i % k],
-                ]
+        for i0 in range(0, seq_number, chunk_size):
+            i1 = min(i0 + chunk_size, seq_number)
+            n_chunk = i1 - i0
+            idx = np.arange(i0, i1)
+            tiles_c = tiles_arr[idx % len(tiles)].tolist()
+            x_c = x_arr[idx // k].tolist()
+            y_c = y_arr[idx % k].tolist()
+            seq1_c = (
+                _random_base_rows(rng, alphabet, table, n_chunk, read1_len)
+                if read1_len
+                else [""] * n_chunk
             )
-            if umi1 != 0:
-                suffix += ":" + "".join(rng.choice(list(nucleotides), size=umi1))
-            if umi2 != 0:
-                suffix += "+" if umi1 != 0 else ":"
-                suffix += "".join(rng.choice(list(nucleotides), size=umi2))
-            reads = [
-                dnaio.SequenceRecord(
-                    name=f"{prefix}:{suffix}{extension}",
-                    sequence="".join(rng.choice(list(nucleotides), size=read1_len)),
-                    qualities="I" * read1_len,
-                )
-            ]
-            if read2_len != 0:
-                reads.append(
+            umi1_c = (
+                _random_base_rows(rng, alphabet, table, n_chunk, umi1)
+                if umi1
+                else [""] * n_chunk
+            )
+            umi2_c = (
+                _random_base_rows(rng, alphabet, table, n_chunk, umi2)
+                if umi2
+                else [""] * n_chunk
+            )
+            seq2_c = (
+                _random_base_rows(rng, alphabet, table, n_chunk, read2_len)
+                if read2_len
+                else None
+            )
+            taint_flags = rng.random(n_chunk) < 0.1 if taint else None
+            for j in range(n_chunk):
+                suffix = f"{tiles_c[j]}:{x_c[j]}:{y_c[j]}"
+                if umi1:
+                    suffix += ":" + umi1_c[j]
+                if umi2:
+                    suffix += "+" if umi1 else ":"
+                    suffix += umi2_c[j]
+                reads = [
                     dnaio.SequenceRecord(
-                        name=f"{prefix}:{suffix}{extension.replace(' 1', ' 2')}",
-                        sequence="".join(rng.choice(list(nucleotides), size=read2_len)),
-                        qualities="I" * read2_len,
+                        name=f"{prefix}:{suffix}{extension}",
+                        sequence=seq1_c[j],
+                        qualities=qual1,
                     )
-                )
-            writer.write(*reads)
+                ]
+                if read2_len:
+                    reads.append(
+                        dnaio.SequenceRecord(
+                            name=f"{prefix}:{suffix}{extension_r2}",
+                            sequence=seq2_c[j],
+                            qualities=qual2,
+                        )
+                    )
+                writer.write(*reads)
 
-            # Collect ~10% of reads for taint contamination if enabled
-            if taint and rng.random() < 0.1:
-                sampled_sequences.append(reads)
+                # Collect ~10% of reads for taint contamination if enabled
+                if taint_flags is not None and taint_flags[j]:
+                    sampled_sequences.append(reads)
 
     return sampled_sequences
 
@@ -774,11 +837,11 @@ def main(args: argparse.Namespace) -> None:
                 generate_undetermined_files(output_basepath, taint_sequences)
 
         else:
-            sequences = set()
-            while len(sequences) < args.seq_number:
-                seq = "".join(rng.choice(list(nucleotides), size=args.seq_length))
-                sequences.add(seq)
-
+            sequences = generate_sequences_set(
+                nucleotides, args.seq_length, args.seq_number
+            )
+            coords = rng.integers(0, 10000, size=(len(sequences), 3)).tolist()
+            qual = "I" * args.seq_length
             if args.output:
                 output_file = (
                     args.output.joinpath("sequences.fastq")
@@ -787,45 +850,31 @@ def main(args: argparse.Namespace) -> None:
                 )
                 with dnaio.open(output_file, mode="w", fileformat="fastq") as writer:
                     for i, seq in enumerate(sequences):
-                        suffix = "".join(
-                            [str(rng.integers(0, 10000))]  # Tile number
-                            + [":"]
-                            + [str(rng.integers(0, 10000))]  # X coordinate
-                            + [":"]
-                            + [str(rng.integers(0, 10000))]  # Y coordinate
-                        )
+                        # coords[i] = [tile number, X coordinate, Y coordinate]
                         writer.write(
                             dnaio.SequenceRecord(
-                                name=f"{prefix}:{suffix}{extension}",
+                                name=f"{prefix}:{coords[i][0]}:{coords[i][1]}:{coords[i][2]}{extension}",
                                 sequence=seq,
-                                qualities="I" * args.seq_length,
+                                qualities=qual,
                             )
                         )
             else:
-                for seq in sequences:
-                    suffix = "".join(
-                        [str(rng.integers(0, 10000))]
-                        + [":"]
-                        + [str(rng.integers(0, 10000))]
-                        + [":"]
-                        + [str(rng.integers(0, 10000))]
-                    )
+                for i, seq in enumerate(sequences):
                     print(
-                        f"@{prefix}:{suffix}{extension}\n{seq}\n+\n{'I' * args.seq_length}"
+                        f"@{prefix}:{coords[i][0]}:{coords[i][1]}:{coords[i][2]}{extension}\n{seq}\n+\n{qual}"
                     )
     else:
-        sequences = set()
-        while len(sequences) < args.seq_number:
-            seq = "".join(rng.choice(list(nucleotides), size=args.seq_length))
-            sequences.add(seq)
-        for seq in sequences:
-            if args.output:
-                output_file = (
-                    args.output.joinpath("sequences.txt")
-                    if args.output.is_dir()
-                    else args.output
-                )
-                with open(output_file, "a") as writer:
-                    writer.write(f"{seq}\n")
-            else:
+        sequences = generate_sequences_set(
+            nucleotides, args.seq_length, args.seq_number
+        )
+        if args.output:
+            output_file = (
+                args.output.joinpath("sequences.txt")
+                if args.output.is_dir()
+                else args.output
+            )
+            with open(output_file, "a") as writer:
+                writer.write("".join(f"{seq}\n" for seq in sequences))
+        else:
+            for seq in sequences:
                 print(seq)
