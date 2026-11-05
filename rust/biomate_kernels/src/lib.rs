@@ -27,9 +27,13 @@
 //!    before the gap shrinks.
 //! 8. `fuzzy_counts` tuple order is (subs, ins, dels).
 
+use flate2::read::GzDecoder;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::collections::{BTreeSet, HashMap};
+use std::io::BufRead;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 const MAX_TEXT: usize = 1_000_000; // sanity guard per record
 
@@ -331,6 +335,177 @@ impl IndexPattern {
     }
 }
 
+/// Per-file N-content scan result (nspector).
+///
+/// `format_error` is the 0-based index of the first N-containing record whose
+/// name fails coordinate parsing; when set, the reference implementation stops
+/// reading the file and skips it entirely (parity: data after the error is
+/// neither produced nor needed).
+///
+/// `tiles`/`xs`/`ys`/`n_positions` are parallel: entry `i` describes the
+/// i-th N-containing record (records without Ns are omitted).
+struct FileScan {
+    format_error: Option<usize>,
+    tiles: Vec<i32>,
+    xs: Vec<i32>,
+    ys: Vec<i32>,
+    n_positions: Vec<Vec<u16>>,
+}
+
+/// Port of `biomate.nspector.nspector.extract_tile_coordinates`.
+///
+/// Python `int()` trims ASCII whitespace and allows a leading sign; `parse`
+/// after `trim()` matches that for the realistic (digit-only) coordinate
+/// fields. Returns None for <7 colon-fields or non-numeric fields, exactly
+/// like the reference.
+fn parse_tile_coordinates(name: &str) -> Option<(i32, i32, i32)> {
+    let base = name.split(' ').next()?;
+    let parts = base.split(':').collect::<Vec<_>>();
+    if parts.len() < 7 {
+        return None;
+    }
+    let tile = parts[4].trim().parse::<i32>().ok()?;
+    let x = parts[5].trim().parse::<i32>().ok()?;
+    let y = parts[6].trim().parse::<i32>().ok()?;
+    Some((tile, x, y))
+}
+
+/// Scan one FASTQ (`.gz` suffix => gzip) for N-containing records.
+///
+/// Line protocol: `@name` / sequence / `+` / qualities. A name line not
+/// starting with `@`, or a truncated final record, is a hard error (the
+/// reference raises a `dnaio` format error in the same situations).
+fn scan_fastq_file(path: &str) -> Result<FileScan, String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut reader: Box<dyn BufRead> = if path.ends_with(".gz") {
+        Box::new(std::io::BufReader::new(GzDecoder::new(file)))
+    } else {
+        Box::new(std::io::BufReader::new(file))
+    };
+
+    let mut out = FileScan {
+        format_error: None,
+        tiles: Vec::new(),
+        xs: Vec::new(),
+        ys: Vec::new(),
+        n_positions: Vec::new(),
+    };
+    let mut name_line = String::new();
+    let mut line = String::new();
+    let mut record_idx = 0usize;
+
+    loop {
+        name_line.clear();
+        let n = reader
+            .read_line(&mut name_line)
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            break; // clean EOF
+        }
+        if !name_line.starts_with('@') {
+            return Err(format!(
+                "malformed FASTQ at record {record_idx}: name line missing '@'"
+            ));
+        }
+        // sequence: scan for N positions immediately (line is reused below)
+        line.clear();
+        reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        let positions: Vec<u16> = line
+            .trim_end_matches(['\n', '\r'])
+            .bytes()
+            .enumerate()
+            .filter(|(_, b)| *b == b'N')
+            .map(|(i, _)| i as u16)
+            .collect();
+        // '+' separator
+        line.clear();
+        reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        // qualities
+        line.clear();
+        let nq = reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        if nq == 0 {
+            return Err(format!("truncated FASTQ at record {record_idx}"));
+        }
+
+        // dnaio strips the leading '@' from record.name
+        let rec_name = &name_line.trim_end_matches(['\n', '\r'])[1..];
+
+        if !positions.is_empty() {
+            match parse_tile_coordinates(rec_name) {
+                Some((tile, x, y)) => {
+                    out.tiles.push(tile);
+                    out.xs.push(x);
+                    out.ys.push(y);
+                    out.n_positions.push(positions);
+                }
+                None => {
+                    out.format_error = Some(record_idx);
+                    break; // reference stops reading this file
+                }
+            }
+        }
+        record_idx += 1;
+    }
+    Ok(out)
+}
+
+/// Scan N content of one or more FASTQ files.
+///
+/// `paths` are processed by up to `threads` OS threads (work-stealing over
+/// the list); results come back in input order. Returns, per file:
+/// `(format_error, tiles, xs, ys, n_positions)` where `format_error` is the
+/// index of the first bad record or None, and the four arrays are parallel
+/// over the N-containing records (see `FileScan`).
+#[pyfunction]
+fn scan_n_content(
+    paths: Vec<String>,
+    threads: u32,
+) -> PyResult<Vec<(Option<usize>, Vec<i32>, Vec<i32>, Vec<i32>, Vec<Vec<u16>>)>> {
+    let n = paths.len();
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let nthreads = (threads.max(1) as usize).min(n);
+
+    let scanned: Vec<Result<FileScan, String>> = if nthreads <= 1 {
+        paths.iter().map(|p| scan_fastq_file(p)).collect()
+    } else {
+        let paths = Arc::new(paths);
+        let next = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut handles = Vec::new();
+        for _ in 0..nthreads {
+            let paths = Arc::clone(&paths);
+            let next = Arc::clone(&next);
+            let tx = tx.clone();
+            handles.push(std::thread::spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= n {
+                    break;
+                }
+                tx.send((i, scan_fastq_file(&paths[i]))).ok();
+            }));
+        }
+        drop(tx);
+        for h in handles {
+            h.join().ok();
+        }
+        let mut out: Vec<Option<Result<FileScan, String>>> = (0..n).map(|_| None).collect();
+        for (i, r) in rx {
+            out[i] = Some(r);
+        }
+        out.into_iter().map(|o| o.expect("result for every index")).collect()
+    };
+
+    scanned
+        .into_iter()
+        .map(|r| match r {
+            Ok(s) => Ok((s.format_error, s.tiles, s.xs, s.ys, s.n_positions)),
+            Err(e) => Err(PyValueError::new_err(e)),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,5 +533,6 @@ mod tests {
 #[pymodule]
 fn biomate_kernels(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_class::<IndexPattern>()?;
+    m.add_function(wrap_pyfunction!(scan_n_content, m)?)?;
     Ok(())
 }

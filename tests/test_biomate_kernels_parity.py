@@ -1,18 +1,23 @@
-"""Differential parity tests: biomate_kernels.IndexPattern vs the regex engine.
+"""Differential parity tests: biomate_kernels vs the production code paths.
 
-The kernel must be byte-identical to the production `regex`-module path on
-(match?, span, fuzzy_counts, groups[1:]). These tests are the definition of
-done for the kernel (see docs/todo/index.md); they skip when the optional
-biomate_kernels package is not installed.
+IndexPattern must be byte-identical to the `regex`-module path on (match?,
+span, fuzzy_counts, groups[1:]); scan_n_content must equal the per-record
+dnaio loop in `biomate.nspector.nspector`. These tests are the definition of
+done for the kernels (see docs/todo/index.md and nspector.md); they skip when
+the optional biomate_kernels package is not installed.
 """
 
+import gzip
+import pathlib
 import random
 
+import dnaio
 import pytest
 
 biomate_kernels = pytest.importorskip("biomate_kernels")
 
 from biomate.index.index import compile_index_regex  # noqa: E402
+from biomate.nspector.nspector import extract_tile_coordinates  # noqa: E402
 
 M = "ATCGATCGAT"
 G8 = "GGGGGGGG"
@@ -171,3 +176,120 @@ class TestScanBatchParity:
         )
         total = sum(c for groups in aggregated.values() for c in groups.values())
         assert total == expected_matches
+
+
+# ---------------------------------------------------------------------------
+# nspector N-content scan parity
+# ---------------------------------------------------------------------------
+
+
+def _illumina_name(tile: int, x: int, y: int, index: str = "AA+CC") -> str:
+    return f"M00150:2:AABCCC:1:{tile:04d}:{x:04d}:{y:04d} 1:N:0:{index}"
+
+
+def _write_fastq(path: pathlib.Path, records: list[tuple[str, str]], gz: bool = True):
+    data = "".join(f"@{name}\n{seq}\n+\n{'I' * len(seq)}\n" for name, seq in records)
+    if gz:
+        with gzip.open(path, "wt") as fh:
+            fh.write(data)
+    else:
+        path.write_text(data)
+
+
+def _reference_scan(path: pathlib.Path):
+    """Reference: the per-record loop from nspector.main()."""
+    tiles, xs, ys, cycles = [], [], [], []
+    fmt_err = None
+    with dnaio.open(path) as reader:
+        for i, rec in enumerate(reader):
+            npos = [j for j, c in enumerate(rec.sequence) if c == "N"]
+            if npos:
+                coords = extract_tile_coordinates(rec.name)
+                if coords is None:
+                    fmt_err = i
+                    break
+                t, x, y = coords
+                tiles.append(t)
+                xs.append(x)
+                ys.append(y)
+                cycles.append(npos)
+    return fmt_err, tiles, xs, ys, cycles
+
+
+def _kernel_scan(path: pathlib.Path, threads: int = 1):
+    res = biomate_kernels.scan_n_content([str(path)], threads)[0]
+    fmt_err, tiles, xs, ys, cycles = res
+    return fmt_err, list(tiles), list(xs), list(ys), [list(c) for c in cycles]
+
+
+class TestScanNContentParity:
+    """scan_n_content must equal the dnaio/extract_tile_coordinates loop."""
+
+    def test_mixed_records(self, tmp_path):
+        records = [
+            (_illumina_name(101, 100, 100), "ACGTNACGTNAC"),  # Ns @4,9
+            (_illumina_name(102, 101, 101), "ACGTACGT"),  # no Ns
+            (_illumina_name(103, 102, 102), "NNNN"),  # all Ns
+            ("short:bad:name", "ACGTN"),  # bad name, no Ns -> ignored
+            (_illumina_name(104, 103, 103), "ACGnTN"),  # lowercase n ignored
+            (_illumina_name(105, 104, 104), "ACGTACGTNN"),  # Ns @8,9
+        ]
+        p = tmp_path / "mixed.fastq.gz"
+        _write_fastq(p, records)
+        assert _kernel_scan(p) == _reference_scan(p)
+
+    def test_format_error_stops_file(self, tmp_path):
+        records = [
+            (_illumina_name(101, 1, 1), "ACGTNACGT"),  # ok (record 0)
+            ("only:six:fields:1:2:3", "ACGTN"),  # 5 fields, has N -> error (record 1)
+            (_illumina_name(102, 2, 2), "ACGTN"),  # never read
+        ]
+        p = tmp_path / "bad.fastq.gz"
+        _write_fastq(p, records)
+        got = _kernel_scan(p)
+        ref = _reference_scan(p)
+        assert got == ref
+        assert got[0] == 1  # 0-based index of the offending record
+
+    def test_no_n_records(self, tmp_path):
+        p = tmp_path / "clean.fastq.gz"
+        _write_fastq(p, [(_illumina_name(1, 2, 3), "ACGT")])
+        assert _kernel_scan(p) == _reference_scan(p) == (None, [], [], [], [])
+
+    def test_plain_fastq(self, tmp_path):
+        records = [
+            (_illumina_name(11, 12, 13), "NNACGT"),
+            (_illumina_name(14, 15, 16), "ACGT"),
+        ]
+        p = tmp_path / "plain.fastq"
+        _write_fastq(p, records, gz=False)
+        assert _kernel_scan(p) == _reference_scan(p)
+
+    def test_coordinate_formats(self, tmp_path):
+        records = [
+            ("M1:1:FC:1:0101:1000:2000 1:N:0:AA+CC", "ACGTN"),  # 7 fields
+            ("M1:1:FC:1:1101:1000:2000 1:N:0:AA+CC", "NN"),  # 5-digit tile
+            ("M1:1:FC:1:1101:1000:2000:9 1:N:0:AA+CC", "N"),  # 8 fields
+        ]
+        p = tmp_path / "coords.fastq.gz"
+        _write_fastq(p, records)
+        assert _kernel_scan(p) == _reference_scan(p)
+
+    def test_multi_file_threads(self, tmp_path):
+        paths = []
+        for f in range(3):
+            p = tmp_path / f"f{f}.fastq.gz"
+            _write_fastq(
+                p,
+                [
+                    (_illumina_name(100 + f * 10 + i, i, i * 2), f"ACGTN{i}ACGT")
+                    for i in range(20)
+                ],
+            )
+            paths.append(p)
+        got = biomate_kernels.scan_n_content([str(p) for p in paths], 3)
+        ref = [_reference_scan(p) for p in paths]
+        assert [
+            (g[0], list(g[1]), list(g[2]), list(g[3]), [list(c) for c in g[4]])
+            for g in got
+        ] == ref

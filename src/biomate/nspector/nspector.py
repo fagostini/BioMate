@@ -8,6 +8,11 @@ import dnaio
 import polars
 import altair as alt
 
+try:
+    import biomate_kernels
+except ImportError:  # optional native kernel
+    biomate_kernels = None
+
 from biomate.setup import setup_logging
 
 
@@ -77,6 +82,14 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         default=pathlib.Path("./output"),
         help="Path to the output directory where the results will be saved (default: ./output).",
     )
+    parser.add_argument(
+        "--engine",
+        type=str,
+        default="python",
+        choices=["python", "rust"],
+        help="Scan engine: pure Python (default) or the native biomate_kernels "
+        "Rust scan (falls back to Python if biomate_kernels is not installed).",
+    )
     parser.set_defaults(parse=validate_args, run=main)
 
     return parser
@@ -87,10 +100,13 @@ def generate_cycles_filler(data: polars.DataFrame, cycles: int) -> polars.DataFr
     return (
         polars.DataFrame(
             {
+                # sorted so the filler (and the charts built on it) are
+                # deterministic across runs
                 "tile": data.group_by(["cycles", "tile"])
                 .agg(polars.len().alias("n_sequences"))
                 .get_column("tile")
                 .unique()
+                .sort()
                 .to_list()
             }
         )
@@ -168,6 +184,9 @@ def plot_n_per_cycle_and_tile(
             .cast(polars.Int16)
             .alias("segment"),
         )
+        # fixed row order so the surface/swath/segment category order (and
+        # hence the rendered facet layout) is deterministic across runs
+        .sort(["surface", "swath", "segment", "cycles"])
     )
 
     height = chart.get_column("segment").n_unique() * 12
@@ -198,60 +217,76 @@ def plot_n_per_cycle_and_tile(
     chart.save(output_path)
 
 
+def _tile_chart(source: polars.DataFrame) -> alt.VConcatChart:
+    """Build the per-tile composite chart (top histogram, points, right histogram).
+
+    ``source`` must already be sorted by (x, y) so that the order in which
+    overlapping semi-transparent bars are drawn is deterministic.
+    """
+    base = alt.Chart(source)
+    base_bar = base.mark_bar(opacity=0.3, binSpacing=0)
+
+    xscale = alt.Scale(
+        domainMin=min(source.get_column("x").to_list()),
+        domainMax=max(source.get_column("x").to_list()),
+    )
+    yscale = alt.Scale(
+        domainMin=min(source.get_column("y").to_list()),
+        domainMax=max(source.get_column("y").to_list()),
+    )
+
+    points = (
+        base.mark_circle()
+        .encode(
+            alt.X("x").scale(xscale),
+            alt.Y("y").scale(yscale),
+            # color="Species",
+        )
+        .properties(width=500, height=500)
+    )
+
+    top_hist = base_bar.encode(
+        alt.X("x:Q")
+        # when using bins, the axis scale is set through
+        # the bin extent, so we do not specify the scale here
+        # (which would be ignored anyway)
+        .bin(maxbins=200, extent=xscale.domain)
+        .stack(None)
+        .title(""),
+        alt.Y("count()").stack(None).title(""),
+        # alt.Color("Species:N"),
+    ).properties(width=500, height=60)
+
+    right_hist = base_bar.encode(
+        alt.Y("y:Q").bin(maxbins=200, extent=yscale.domain).stack(None).title(""),
+        alt.X("count()").stack(None).title(""),
+        # alt.Color("Species:N"),
+    ).properties(width=60, height=500)
+
+    return top_hist & (points | right_hist)
+
+
 def plot_individual_tiles(data: polars.DataFrame, output_path: pathlib.Path) -> None:
-    """Plot the distribution of N-containing sequences for individual tiles."""
+    """Plot the distribution of N-containing sequences for individual tiles.
+
+    Saves one composite chart per tile as
+    ``individual_tiles/tile_{tile}_n_distribution.png``. Tiles are processed
+    in sorted order and each per-tile source is sorted by (x, y), which makes
+    the rendered images deterministic across runs.
+    """
     output_path.joinpath("individual_tiles").mkdir(parents=True, exist_ok=True)
 
-    for tile in data.get_column("tile").unique().to_list():
+    for tile in sorted(data.get_column("tile").unique().to_list()):
         source = (
             data.filter(polars.col("tile") == tile)
             .group_by(["x", "y"])
             .agg(polars.len().alias("z"))
+            .sort(["x", "y"])
         )
 
-        base = alt.Chart(source)
-        base_bar = base.mark_bar(opacity=0.3, binSpacing=0)
-
-        xscale = alt.Scale(
-            domainMin=min(source.get_column("x").to_list()),
-            domainMax=max(source.get_column("x").to_list()),
+        _tile_chart(source).save(
+            output_path / "individual_tiles" / f"tile_{tile}_n_distribution.png"
         )
-        yscale = alt.Scale(
-            domainMin=min(source.get_column("y").to_list()),
-            domainMax=max(source.get_column("y").to_list()),
-        )
-
-        points = (
-            base.mark_circle()
-            .encode(
-                alt.X("x").scale(xscale),
-                alt.Y("y").scale(yscale),
-                # color="Species",
-            )
-            .properties(width=500, height=500)
-        )
-
-        top_hist = base_bar.encode(
-            alt.X("x:Q")
-            # when using bins, the axis scale is set through
-            # the bin extent, so we do not specify the scale here
-            # (which would be ignored anyway)
-            .bin(maxbins=200, extent=xscale.domain)
-            .stack(None)
-            .title(""),
-            alt.Y("count()").stack(None).title(""),
-            # alt.Color("Species:N"),
-        ).properties(width=500, height=60)
-
-        right_hist = base_bar.encode(
-            alt.Y("y:Q").bin(maxbins=200, extent=yscale.domain).stack(None).title(""),
-            alt.X("count()").stack(None).title(""),
-            # alt.Color("Species:N"),
-        ).properties(width=60, height=500)
-
-        chart = top_hist & (points | right_hist)
-
-        chart.save(output_path / "individual_tiles" / f"tile_{tile}_n_distribution.png")
 
 
 def main(args: argparse.Namespace) -> None:
@@ -259,35 +294,62 @@ def main(args: argparse.Namespace) -> None:
     setup_logging(args)
     logging.info("Running nspector module...")
 
-    for input_file in args.input:
+    rust_results = None
+    if args.engine == "rust":
+        if biomate_kernels is None:
+            logging.warning(
+                "biomate_kernels is not available; falling back to the Python scan."
+            )
+        else:
+            rust_results = biomate_kernels.scan_n_content(
+                [str(p) for p in args.input], args.threads
+            )
+
+    for input_file, rust_res in zip(
+        args.input,
+        rust_results if rust_results is not None else [None] * len(args.input),
+    ):
         logging.debug(f"Processing file: {input_file}")
-        records_with_n = []
-        has_format_error = False
 
-        with dnaio.open(input_file, open_threads=args.threads) as reader:
-            for record in reader:
-                n_positions = [i for i, c in enumerate(record.sequence) if c == "N"]
-                if n_positions:
-                    coords = extract_tile_coordinates(record.name)
-                    if coords is None:
-                        logging.warning(
-                            f"Skipping file {input_file.name} due to read name format issues."
+        if rust_res is not None:
+            format_error, tiles, xs, ys, cycles = rust_res
+            if format_error is not None:
+                logging.warning(
+                    f"Skipping file {input_file.name} due to read name format issues."
+                )
+                continue
+            records_with_n = [
+                {"tile": t, "x": x, "y": y, "cycles": list(c)}
+                for t, x, y, c in zip(tiles, xs, ys, cycles)
+            ]
+        else:
+            records_with_n = []
+            has_format_error = False
+
+            with dnaio.open(input_file, open_threads=args.threads) as reader:
+                for record in reader:
+                    n_positions = [i for i, c in enumerate(record.sequence) if c == "N"]
+                    if n_positions:
+                        coords = extract_tile_coordinates(record.name)
+                        if coords is None:
+                            logging.warning(
+                                f"Skipping file {input_file.name} due to read name format issues."
+                            )
+                            has_format_error = True
+                            break
+                        tile, x, y = coords
+                        records_with_n.append(
+                            {
+                                "tile": tile,
+                                "x": x,
+                                "y": y,
+                                "cycles": n_positions,
+                            }
                         )
-                        has_format_error = True
-                        break
-                    tile, x, y = coords
-                    records_with_n.append(
-                        {
-                            "tile": tile,
-                            "x": x,
-                            "y": y,
-                            "cycles": n_positions,
-                        }
-                    )
 
-        # Skip if we encountered format errors
-        if has_format_error:
-            continue
+            # Skip if we encountered format errors
+            if has_format_error:
+                continue
 
         if not records_with_n:
             logging.warning(f"No N bases found in {input_file}. Skipping analysis.")

@@ -1,12 +1,19 @@
 """Tests for the nspector module."""
 
 import argparse
+import pathlib
 
 import polars
 import pytest
 
 from tests.conftest import illumina_header, write_fastq_gz
-from biomate.nspector.nspector import generate_cycles_filler, validate_args
+from biomate.nspector.nspector import (
+    generate_cycles_filler,
+    plot_individual_tiles,
+    plot_n_per_cycle_and_tile,
+    plot_n_per_sequence,
+    validate_args,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -150,3 +157,77 @@ class TestValidateArgs:
         args = self._make_args(tmp_path, input_files=[f1, f2])
         result = validate_args(args)
         assert result is args
+
+
+# ---------------------------------------------------------------------------
+# plot functions
+# ---------------------------------------------------------------------------
+
+
+class TestPlotFunctions:
+    """Tests for the plot functions: file creation and determinism."""
+
+    @pytest.fixture()
+    def data(self) -> polars.DataFrame:
+        """Small exploded frame with three tiles and repeated (x, y) positions."""
+        return _data_df(
+            tiles=[1101, 1101, 1101, 1102, 1102, 1103],
+            x_coords=[1, 1, 2, 5, 5, 9],
+            y_coords=[1, 2, 1, 3, 4, 2],
+            cycles_lists=[[1, 2], [3], [5], [2], [4, 6], [1]],
+        )
+
+    def test_plot_n_per_sequence_creates_file(self, tmp_path, data):
+        """plot_n_per_sequence saves a PNG at the given path."""
+        out = tmp_path / "n_count.png"
+        plot_n_per_sequence(data, out)
+        assert out.is_file()
+        assert out.stat().st_size > 0
+
+    def test_plot_n_per_cycle_and_tile_creates_file(self, tmp_path, data):
+        """plot_n_per_cycle_and_tile saves a PNG at the given path."""
+        out = tmp_path / "n_cycle_tile.png"
+        plot_n_per_cycle_and_tile(data, out)
+        assert out.is_file()
+        assert out.stat().st_size > 0
+
+    def test_plot_individual_tiles_creates_one_file_per_tile(self, tmp_path, data):
+        """plot_individual_tiles saves tile_{tile}_n_distribution.png per tile."""
+        plot_individual_tiles(data, tmp_path)
+        out_dir = tmp_path / "individual_tiles"
+        assert out_dir.is_dir()
+        assert {p.name for p in out_dir.iterdir()} == {
+            "tile_1101_n_distribution.png",
+            "tile_1102_n_distribution.png",
+            "tile_1103_n_distribution.png",
+        }
+        for p in out_dir.iterdir():
+            assert p.stat().st_size > 0
+
+    def test_plots_are_deterministic(self, tmp_path, data):
+        """Rendering the same data twice yields byte-identical PNGs.
+
+        Guards the sorted tile/category orderings: without them, polars
+        group_by hash order leaked into the altair scales and the PNGs
+        differed between runs.
+        """
+        run_a = tmp_path / "run_a"
+        run_b = tmp_path / "run_b"
+        run_a.mkdir()
+        run_b.mkdir()
+
+        for run in (run_a, run_b):
+            plot_n_per_sequence(data, run / "n_count.png")
+            plot_n_per_cycle_and_tile(data, run / "n_cycle_tile.png")
+            plot_individual_tiles(data, run)
+
+        for name in [
+            "n_count.png",
+            "n_cycle_tile.png",
+            "individual_tiles/tile_1101_n_distribution.png",
+            "individual_tiles/tile_1102_n_distribution.png",
+            "individual_tiles/tile_1103_n_distribution.png",
+        ]:
+            a = pathlib.Path(run_a, name).read_bytes()
+            b = pathlib.Path(run_b, name).read_bytes()
+            assert a == b, f"non-deterministic output: {name}"
