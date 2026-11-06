@@ -199,3 +199,6 @@ test/*
 
 # BCL-convert
 **/bcl-convert
+
+# Personal performance work notes (not for release)
+docs/todo/

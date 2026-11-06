@@ -12,6 +12,14 @@ from jellyfish import levenshtein_distance
 
 from biomate.setup import setup_logging
 
+try:
+    import biomate_kernels
+except ImportError:  # optional acceleration kernel
+    biomate_kernels = None
+
+# Number of sequences passed to the rust scan engine per call
+_KERNEL_CHUNK = 100_000
+
 
 def _detect_input_type(filename: str) -> str | None:
     """Detect the input file type based on filename."""
@@ -69,6 +77,13 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         default="s",
         help="Type of error to consider: 'i' for insertion, 'd' for deletion, 's' for substitution, 'e' for any edit",
     )
+    parser.add_argument(
+        "--engine",
+        type=str,
+        choices=["regex", "rust"],
+        default="regex",
+        help="Search engine: 'regex' (default) or 'rust' (requires the optional biomate_kernels package)",
+    )
     parser.set_defaults(parse=validate_args, run=main)
 
     return parser
@@ -102,6 +117,16 @@ def compile_index_regex(index_regex: str, distance: int, error_type: str) -> re.
     return re.compile(f"({index_regex}){{{error_pattern}}}")
 
 
+def _sorted_by_count(counter: Counter) -> list[tuple[tuple[str, ...], int]]:
+    """Counter items by descending count, then ascending group text.
+
+    ``most_common()`` keeps first-seen order among ties, which differs between
+    the regex path (insertion order) and the rust path (hash-map iteration),
+    so the tie order would not be reproducible across engines or runs.
+    """
+    return sorted(counter.items(), key=lambda kv: (-kv[1], " ".join(list(kv[0]))))
+
+
 def write_results(
     results: dict, total_records: int, output_path: pathlib.Path, file_index: int = 1
 ) -> None:
@@ -117,7 +142,7 @@ def write_results(
         output_path.joinpath(f"pattern{file_index}_matches.txt"), "w"
     ) as output_file:
         for key, value in results.items():
-            for seq, cnt in value.most_common():
+            for seq, cnt in _sorted_by_count(value):
                 output_file.write(
                     f"{key} {' '.join(list(seq)):<{max_len}} {cnt} {cnt / total_records:.2%}\n"
                 )
@@ -251,15 +276,48 @@ def main(args: argparse.Namespace) -> None:
             Counter, [(str(x), Counter()) for x in range(args.distance + 1)]
         )
         total_records = 0
-        with dnaio.open(args.input) as reader:
-            for record in reader:
-                match = regex_pattern.search(
-                    record.sequence,
+
+        rust_kernel = None
+        if args.engine == "rust":
+            if biomate_kernels is None:
+                logging.warning(
+                    "biomate_kernels is not installed; falling back to the regex engine"
                 )
-                if match:
-                    fuzziness = str(sum(match.fuzzy_counts))
-                    results[fuzziness][(match.groups()[1:])] += 1
+            else:
+                rust_kernel = biomate_kernels.IndexPattern(
+                    pattern, args.distance, args.error_type
+                )
+                logging.info("Using the rust scan engine (biomate_kernels)")
+
+        def count_match(seq: str) -> None:
+            match = regex_pattern.search(seq)
+            if match:
+                fuzziness = str(sum(match.fuzzy_counts))
+                results[fuzziness][(match.groups()[1:])] += 1
+
+        def flush_chunk(chunk: list[str]) -> None:
+            """Count one chunk with the rust engine; re-run fallbacks via regex."""
+            aggregated, fallback = rust_kernel.scan_batch(chunk)
+            for fuzziness, groups in aggregated.items():
+                counter = results[fuzziness]
+                for key, count in groups.items():
+                    counter[tuple(key.split(" "))] += count
+            for idx in fallback:
+                count_match(chunk[idx])
+
+        with dnaio.open(args.input) as reader:
+            chunk: list[str] = []
+            for record in reader:
+                if rust_kernel is None:
+                    count_match(record.sequence)
+                else:
+                    chunk.append(record.sequence)
+                    if len(chunk) >= _KERNEL_CHUNK:
+                        flush_chunk(chunk)
+                        chunk = []
                 total_records += 1
+            if chunk:
+                flush_chunk(chunk)
         logging.debug(f"Total records processed: {total_records}")
         if not [x for x in results.values() if x]:
             logging.warning("   No matches found.")
@@ -269,7 +327,7 @@ def main(args: argparse.Namespace) -> None:
             write_results(results, total_records, args.output, file_index=i)
         else:
             for key, value in results.items():
-                for seq, cnt in value.most_common():
+                for seq, cnt in _sorted_by_count(value):
                     logging.info(
                         f"{key} {' '.join(list(seq))} {cnt} {cnt / total_records:.2%}"
                     )

@@ -3,6 +3,7 @@
 import argparse
 from contextlib import contextmanager
 import gzip
+import logging
 import pathlib
 import re
 import struct
@@ -11,14 +12,17 @@ import xml.etree.ElementTree as ET
 import pytest
 import biomate.fastrewind.fastrewind as fastrewind_module
 
+from biomate.blabber.blabber import main as blabber_main
 from biomate.fastrewind.fastrewind import (
     INTEROP_INDEX_VERSION,
+    build_index_lookup,
     build_index_records,
     clean_directory,
     generate_run_id,
     parse_fastq_groups,
     parse_sequence_mask,
     preprocess_and_write_bcls,
+    synthesize_undetermined_recipe,
     validate_args,
     write_index_metrics,
     write_run_info_xml,
@@ -1104,6 +1108,454 @@ def test_parse_fastq_groups_without_index_counts_unchanged(tmp_path, monkeypatch
 
 
 # ---------------------------------------------------------------------------
+# build_index_lookup
+# ---------------------------------------------------------------------------
+
+
+class TestBuildIndexLookup:
+    """Tests for build_index_lookup."""
+
+    SAMPLE_SHEET = """\
+[Header]
+FileFormatVersion,2
+RunName,DummyRun
+InstrumentPlatform,NextSeq2000
+[Reads]
+Read1Cycles,151
+Read2Cycles,151
+Index1Cycles,10
+Index2Cycles,10
+[BCLConvert_Data]
+Lane,Sample_ID,Sample_Name,index,index2,Sample_Project,OverrideCycles
+1,S1,Sample_1,ACGT,TGCA,Proj_A,Y151;I10;I10;Y151
+1,S2,Sample_2,AAAA,,Proj_B,Y151;I10;I10;Y151
+2,S3,Sample_3,TTTT,,Proj_C,Y151;I10;I10;Y151
+"""
+
+    RECIPES = {
+        "Sample_1_S1_L001_001": {
+            "sample_name": "Sample_1",
+            "sample_project": "Proj_A",
+            "R1B": "",
+            "R1": 151,
+            "R1A": "",
+            "I1": "ACGTNNNNNN",
+            "I2": "TGCA",
+            "R2B": "",
+            "R2": 151,
+            "R2A": "",
+        },
+        "Sample_2_S2_L001_001": {
+            "sample_name": "Sample_2",
+            "sample_project": "Proj_B",
+            "R1B": "",
+            "R1": 151,
+            "R1A": "",
+            "I1": "AAAA",
+            "I2": "",
+            "R2B": "",
+            "R2": 151,
+            "R2A": "",
+        },
+        "Sample_3_S3_L002_001": {
+            "sample_name": "Sample_3",
+            "sample_project": "Proj_C",
+            "R1B": "",
+            "R1": 151,
+            "R1A": "",
+            "I1": "TTTT",
+            "I2": "",
+            "R2B": "",
+            "R2": 151,
+            "R2A": "",
+        },
+    }
+
+    def _sheet(self, tmp_path, content=SAMPLE_SHEET) -> pathlib.Path:
+        """Write the given sheet content and return its path."""
+        sheet = tmp_path / "SampleSheet.csv"
+        sheet.write_text(content)
+        return sheet
+
+    def test_maps_informative_index_pairs_per_lane(self, tmp_path):
+        """Each (lane, index1, index2) informative pair maps to the sample's recipe."""
+        lookup = build_index_lookup(self._sheet(tmp_path), self.RECIPES)
+        assert lookup[("L001", "ACGT", "TGCA")] is self.RECIPES["Sample_1_S1_L001_001"]
+        assert lookup[("L001", "AAAA", "")] is self.RECIPES["Sample_2_S2_L001_001"]
+        assert lookup[("L002", "TTTT", "")] is self.RECIPES["Sample_3_S3_L002_001"]
+        assert len(lookup) == 3
+
+    def test_rows_without_sample_name_are_skipped(self, tmp_path):
+        """A blank data row is skipped but still consumes a sample index number,
+        so the following sample keeps the group name of its physical row."""
+        sheet = self._sheet(
+            tmp_path,
+            self.SAMPLE_SHEET
+            + ",,,,,,\n2,S4,Sample_4,CCCC,,Proj_D,Y151;I10;I10;Y151\n",
+        )
+        recipes = dict(
+            self.RECIPES,
+            # Sample_4 sits on data row 5: the blank row above it is skipped
+            # by the lookup but still consumes the index number 4
+            Sample_4_S5_L002_001={
+                "sample_name": "Sample_4",
+                "sample_project": "Proj_D",
+                "R1B": "",
+                "R1": 151,
+                "R1A": "",
+                "I1": "CCCC",
+                "I2": "",
+                "R2B": "",
+                "R2": 151,
+                "R2A": "",
+            },
+        )
+        lookup = build_index_lookup(sheet, recipes)
+        assert lookup[("L002", "CCCC", "")] is recipes["Sample_4_S5_L002_001"]
+        assert len(lookup) == 4
+
+    def test_duplicate_informative_index_keeps_first_and_warns(self, tmp_path, caplog):
+        """When two samples of the same lane share the same full index, the first
+        recipe is kept and a warning is logged."""
+        caplog.set_level(logging.WARNING)
+        sheet = self._sheet(
+            tmp_path,
+            self.SAMPLE_SHEET.replace(
+                "1,S2,Sample_2,AAAA,,Proj_B", "1,S2,Sample_2,ACGT,TGCA,Proj_B"
+            ),
+        )
+        lookup = build_index_lookup(sheet, self.RECIPES)
+        assert lookup[("L001", "ACGT", "TGCA")] is self.RECIPES["Sample_1_S1_L001_001"]
+        assert len(lookup) == 2
+        assert "Duplicate informative index" in caplog.text
+
+    def test_sheet_without_index_columns_returns_empty(self, tmp_path):
+        """A sheet whose data section has no index columns yields an empty lookup."""
+        sheet = self._sheet(
+            tmp_path,
+            """\
+[Header]
+FileFormatVersion,2
+[BCLConvert_Data]
+Lane,Sample_ID,Sample_Name,Sample_Project,OverrideCycles
+1,S1,Sample_1,Proj_A,Y151
+""",
+        )
+        assert build_index_lookup(sheet, self.RECIPES) == {}
+
+    def test_rows_missing_from_masks_table_are_skipped(self, tmp_path):
+        """Sheet rows without a matching masks table recipe produce no entries."""
+        sheet = self._sheet(tmp_path)
+        assert build_index_lookup(sheet, {}) == {}
+        partial = {"Sample_1_S1_L001_001": self.RECIPES["Sample_1_S1_L001_001"]}
+        lookup = build_index_lookup(sheet, partial)
+        assert len(lookup) == 1
+        assert lookup[("L001", "ACGT", "TGCA")] is self.RECIPES["Sample_1_S1_L001_001"]
+
+
+# ---------------------------------------------------------------------------
+# synthesize_undetermined_recipe
+# ---------------------------------------------------------------------------
+
+
+class TestSynthesizeUndeterminedRecipe:
+    """Tests for synthesize_undetermined_recipe."""
+
+    RECIPE = {
+        "sample_name": "Sample_1",
+        "sample_project": "Proj_A",
+        "R1B": "N" * 3,
+        "R1": 148,
+        "R1A": "N" * 5,
+        "I1": "ACGTNNNNNN",
+        "I2": "TGCA",
+        "R2B": "N" * 2,
+        "R2": 149,
+        "R2A": "N",
+    }
+
+    def test_preserves_geometry_and_replaces_indexes_with_n(self):
+        """The original recipe's geometry is preserved while the informative
+        index cycles are replaced by N, one per original index cycle."""
+        result = synthesize_undetermined_recipe(
+            self.RECIPE, {"R1": 151, "I1": 10, "I2": 10, "R2": 151}
+        )
+        assert result["sample_name"] == "Undetermined"
+        assert result["sample_project"] == "Undetermined"
+        assert result["R1B"] == "N" * 3
+        assert result["R1"] == 148
+        assert result["R1A"] == "N" * 5
+        assert result["I1"] == "N" * 10
+        assert result["I2"] == "N" * 4
+        assert result["R2B"] == "N" * 2
+        assert result["R2"] == 149
+        assert result["R2A"] == "N"
+
+    def test_fallback_without_recipe_uses_full_length_n_indexes(self):
+        """Without a resolved recipe, unpadded reads and full-length N indexes
+        from the run's cycle counts are used."""
+        result = synthesize_undetermined_recipe(
+            None, {"R1": 151, "I1": 10, "I2": 10, "R2": 151}
+        )
+        assert result["R1B"] == ""
+        assert result["R1A"] == ""
+        assert result["R2B"] == ""
+        assert result["R2A"] == ""
+        assert result["R1"] == 0
+        assert result["R2"] == 0
+        assert result["I1"] == "N" * 10
+        assert result["I2"] == "N" * 10
+
+    def test_fallback_without_index_cycles(self):
+        """A run without index cycles yields empty index segments."""
+        result = synthesize_undetermined_recipe(None, {"R1": 151, "R2": 151})
+        assert result["I1"] == ""
+        assert result["I2"] == ""
+
+
+# ---------------------------------------------------------------------------
+# parse_fastq_groups undetermined groups
+# ---------------------------------------------------------------------------
+
+
+class _FakeRead:
+    """Stand-in for a named dnaio read."""
+
+    def __init__(self, name: str, sequence: str, qualities: str):
+        """Store the read name, sequence and qualities."""
+        self.name = name
+        self.sequence = sequence
+        self.qualities = qualities
+
+
+def _patch_dnaio(monkeypatch, records: list, written: list) -> None:
+    """Patch fastrewind_module.dnaio.open with a fake reader over `records`
+    and a writer that records every written read into `written`."""
+
+    class FakeWriter:
+        """Writer that records every written read."""
+
+        def write(self, read):
+            """Record the read's name, sequence and qualities."""
+            written.append((read.name, read.sequence, read.qualities))
+            return None
+
+    class FakeWriterContext:
+        """Context manager yielding a FakeWriter."""
+
+        def __enter__(self):
+            """Return a new FakeWriter."""
+            return FakeWriter()
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            """Never suppress exceptions."""
+            return False
+
+    class FakeReaderContext:
+        """Context manager yielding an iterator over the fake records."""
+
+        def __init__(self, records):
+            """Store the records to be iterated."""
+            self.records = records
+
+        def __enter__(self):
+            """Return an iterator over the stored records."""
+            return iter(self.records)
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            """Never suppress exceptions."""
+            return False
+
+    def fake_dnaio_open(*args, **kwargs):
+        """Return a writer or a reader context depending on the open mode."""
+        if "mode" in kwargs:
+            return FakeWriterContext()
+        return FakeReaderContext(records)
+
+    monkeypatch.setattr(fastrewind_module.dnaio, "open", fake_dnaio_open)
+
+
+INDEXED_RECIPES = {
+    ("L001", "ACGT", "TGCA"): {
+        "sample_name": "Sample_1",
+        "sample_project": "Proj_A",
+        "R1B": "",
+        "R1": 2,
+        "R1A": "",
+        "I1": "ACGTNNNNNN",
+        "I2": "TGCA",
+        "R2B": "",
+        "R2": 2,
+        "R2A": "",
+    },
+    ("L001", "TTTT", "CCCC"): {
+        "sample_name": "Sample_2",
+        "sample_project": "Proj_B",
+        "R1B": "",
+        "R1": 2,
+        "R1A": "",
+        "I1": "TTTT",
+        "I2": "CCCC",
+        "R2B": "",
+        "R2": 2,
+        "R2A": "",
+    },
+}
+
+
+def test_parse_fastq_groups_undetermined_resolves_recipe_from_index(
+    tmp_path, monkeypatch, caplog
+):
+    """Undetermined paired-end reads are written with the N-padded index of
+    their original sample's recipe, resolved per read from the index carried in
+    the read name, and are not counted for the InterOp index metrics."""
+    caplog.set_level(logging.WARNING)
+    written = []
+    tempdir = tmp_path / "lane_tmp"
+    tempdir.mkdir(parents=True)
+    read_a = "INST:1:FC:1:1101:1001:1002 1:N:0:ACGT+TGCA"
+    read_b = "INST:1:FC:1:1102:1003:1004 1:N:0:TTTT+CCCC"
+    records = [
+        (
+            _FakeRead(read_a, "AC", "II"),
+            _FakeRead(read_a.replace(" 1:", " 2:"), "TA", "II"),
+        ),
+        (
+            _FakeRead(read_b, "GT", "II"),
+            _FakeRead(read_b.replace(" 1:", " 2:"), "CG", "II"),
+        ),
+    ]
+    _patch_dnaio(monkeypatch, records, written)
+
+    index_counts = {}
+    result = parse_fastq_groups(
+        lane="L001",
+        name="Undetermined_S0_L001_001",
+        filenames=[
+            tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz",
+            tmp_path / "Undetermined_S0_L001_R2_001.fastq.gz",
+        ],
+        masks_table={},
+        tempdir=tempdir,
+        threads=0,
+        instrument="NovaSeqXPlus",
+        index_counts=index_counts,
+        index_lookup=INDEXED_RECIPES,
+        cycles_dict={"R1": 2, "I1": 4, "I2": 4, "R2": 2},
+    )
+
+    # Undetermined clusters are excluded from the InterOp index metrics
+    assert index_counts == {}
+    # The N-padded indexes of each original sample's recipe are used:
+    # read_a comes from a sample with I1="ACGTNNNNNN" (10 cycles) + I2="TGCA"
+    # (4 cycles), read_b from one with I1="TTTT" (4) + I2="CCCC" (4)
+    by_name = {name: (seq, qual) for name, seq, qual in written}
+    assert by_name[read_a][0] == "AC" + "N" * 10 + "N" * 4 + "TA"
+    assert by_name[read_b][0] == "GT" + "N" * 4 + "N" * 4 + "CG"
+    # Qualities are all 'I', one per cycle of the synthesised layout
+    assert by_name[read_a][1] == "I" * 18
+    assert by_name[read_b][1] == "I" * 12
+    # Positions are returned like for regular sample groups
+    assert (1001, 1002) in result["1101"]
+    assert (1003, 1004) in result["1102"]
+    assert caplog.text == ""
+
+
+def test_parse_fastq_groups_undetermined_falls_back_for_unknown_index(
+    tmp_path, monkeypatch, caplog
+):
+    """An undetermined read whose index matches no sample of the lane is
+    written with the fallback recipe and a warning is logged."""
+    caplog.set_level(logging.WARNING)
+    written = []
+    tempdir = tmp_path / "lane_tmp"
+    tempdir.mkdir(parents=True)
+    known = "INST:1:FC:1:1101:1001:1002 1:N:0:ACGT+TGCA"
+    unknown = "INST:1:FC:1:1101:1003:1004 1:N:0:GATC+TGCA"
+    records = [
+        (
+            _FakeRead(known, "AC", "II"),
+            _FakeRead(known.replace(" 1:", " 2:"), "TA", "II"),
+        ),
+        (
+            _FakeRead(unknown, "GT", "II"),
+            _FakeRead(unknown.replace(" 1:", " 2:"), "CG", "II"),
+        ),
+    ]
+    _patch_dnaio(monkeypatch, records, written)
+
+    parse_fastq_groups(
+        lane="L001",
+        name="Undetermined_S0_L001_001",
+        filenames=[
+            tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz",
+            tmp_path / "Undetermined_S0_L001_R2_001.fastq.gz",
+        ],
+        masks_table={},
+        tempdir=tempdir,
+        threads=0,
+        instrument="NovaSeqXPlus",
+        index_lookup=INDEXED_RECIPES,
+        cycles_dict={"R1": 2, "I1": 4, "I2": 4, "R2": 2},
+    )
+
+    sequences = {name: seq for name, seq, _ in written}
+    # Known index: original recipe geometry (10 + 4 N index cycles)
+    assert sequences[known] == "AC" + "N" * 10 + "N" * 4 + "TA"
+    # Unknown index: fallback recipe (full-length 4 + 4 N index cycles)
+    assert sequences[unknown] == "GT" + "N" * 4 + "N" * 4 + "CG"
+    assert "carries index 'GATC+TGCA'" in caplog.text
+
+
+def test_parse_fastq_groups_undetermined_single_end(
+    tmp_path, monkeypatch, caplog
+):
+    """Undetermined single-end reads get the N-padded I1 of their original
+    sample appended to the read, like regular single-end reads."""
+    caplog.set_level(logging.WARNING)
+    written = []
+    tempdir = tmp_path / "lane_tmp"
+    tempdir.mkdir(parents=True)
+    read_name = "INST:1:FC:1:1101:1001:1002 1:N:0:ACGT"
+    records = [_FakeRead(read_name, "AC", "II")]
+    _patch_dnaio(monkeypatch, records, written)
+
+    index_counts = {}
+    result = parse_fastq_groups(
+        lane="L001",
+        name="Undetermined_S0_L001_001",
+        filenames=[tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"],
+        masks_table={},
+        tempdir=tempdir,
+        threads=0,
+        instrument="NovaSeqXPlus",
+        index_counts=index_counts,
+        index_lookup={
+            ("L001", "ACGT", ""): {
+                "sample_name": "Sample_1",
+                "sample_project": "Proj_A",
+                "R1B": "",
+                "R1": 2,
+                "R1A": "",
+                "I1": "ACGTNNNNNN",
+                "I2": "",
+                "R2B": "",
+                "R2": 0,
+                "R2A": "",
+            }
+        },
+        cycles_dict={"R1": 2, "I1": 10},
+    )
+
+    assert index_counts == {}
+    # Only the N-padded I1 is appended in single-end mode
+    assert [seq for _, seq, _ in written] == ["AC" + "N" * 10]
+    assert [qual for _, _, qual in written] == ["I" * 12]
+    assert (1001, 1002) in result["1101"]
+    assert caplog.text == ""
+
+
+# ---------------------------------------------------------------------------
 # InterOp read-back with the official Illumina interop library
 # ---------------------------------------------------------------------------
 
@@ -1178,3 +1630,113 @@ class TestInteropReadBack:
             (1, 1101): ("ACGT-TGCA", "Sample_1", 42),
             (1, 1102): ("AAAA-CCCC", "Sample_2", 7),
         }
+
+
+# ---------------------------------------------------------------------------
+# blabber -> fastrewind round trip with taint count
+# ---------------------------------------------------------------------------
+
+
+def _count_reads(fastq: pathlib.Path) -> int:
+    """Count the number of records in a gzip-compressed FASTQ file."""
+    with gzip.open(fastq, "rt") as fh:
+        return sum(1 for line in fh if line.startswith("@"))
+
+
+def _cbcl_cluster_count(cbcl_path: pathlib.Path) -> int:
+    """Sum the per-tile cluster counts stored in a cbcl file header."""
+    data = cbcl_path.read_bytes()
+    (ntiles,) = struct.unpack_from("<I", data, 44)
+    clusters = 0
+    offset = 48
+    for _ in range(ntiles):
+        _, tile_clusters, _, _ = struct.unpack_from("<IIII", data, offset)
+        clusters += tile_clusters
+        offset += 16
+    return clusters
+
+
+def test_blabber_taint_count_round_trip_through_fastrewind(tmp_path, caplog):
+    """Undetermined files produced by blabber --taint-count are processed by
+    fastrewind: every undetermined read becomes a real BCL cluster on top of
+    the sample clusters, no group is skipped, and no InterOp index metrics
+    record is produced for the undetermined clusters."""
+    caplog.set_level(logging.WARNING)
+    sample_sheet = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "assets"
+        / "SampleSheet_SingleIndex.csv"
+    )
+    sheet = tmp_path / "SampleSheet.csv"
+    sheet.write_text(sample_sheet.read_text())
+    flowcell_id = "20260310_LM43898_0388_D74LKJHGF8"
+
+    blabber_main(
+        argparse.Namespace(
+            verbose=False,
+            quiet=True,
+            random_seed=42,
+            alphabet="ACGT",
+            format="fastq",
+            sample_sheet=sheet,
+            output=tmp_path,
+            flowcell_id=flowcell_id,
+            seq_number=4,
+            seq_length=151,
+            seq_mask=None,
+            index1=None,
+            index2=None,
+            taint=True,
+            taint_count=2,
+        )
+    )
+
+    output_path = tmp_path / "bcl_out"
+    fastrewind_module.main(
+        argparse.Namespace(
+            verbose=False,
+            quiet=True,
+            input_path=tmp_path,
+            output_path=output_path,
+            sample_sheet=sheet,
+            total_cycles=None,
+            interop_dir=None,
+            instrument="NovaSeqXPlus",
+            flowcell_id=flowcell_id,
+            threads=0,
+            force=False,
+        )
+    )
+
+    # No FASTQ group was skipped and every undetermined read found its
+    # original sample in the index lookup
+    assert "Skipping FASTQ group" not in caplog.text
+    assert "matches no sample in lane" not in caplog.text
+
+    demux_path = tmp_path / flowcell_id / "Demultiplexing"
+    for lane, sample_count in (("L001", 3), ("L002", 5), ("L003", 4), ("L004", 5)):
+        lane_files = sorted(demux_path.rglob(f"*_{lane}_R1_001.fastq.gz"))
+        sample_reads = sum(
+            _count_reads(f) for f in lane_files if "Undetermined" not in f.name
+        )
+        undetermined = [f for f in lane_files if "Undetermined" in f.name]
+        assert len(undetermined) == 1
+        assert _count_reads(undetermined[0]) == 2
+        assert sample_reads == sample_count * 4
+
+        clusters = 0
+        for surface in ("1", "2"):
+            cbcl = (
+                output_path
+                / f"Data/Intensities/BaseCalls/{lane}/C1.1/{lane}_{surface}.cbcl"
+            )
+            if cbcl.exists():
+                clusters += _cbcl_cluster_count(cbcl)
+        # The BCL holds every sample cluster plus the two undetermined ones
+        assert clusters == sample_reads + 2
+
+    records = _unpack_index_metrics(
+        (output_path / "InterOp" / "IndexMetricsOut.bin").read_bytes(), 2
+    )
+    assert records
+    assert all(record[5] != "Undetermined" for record in records)

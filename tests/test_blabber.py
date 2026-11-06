@@ -465,12 +465,14 @@ def _blabber_args(
     seq_number: int,
     taint: bool = False,
     flowcell_id: str = "TESTFC",
+    taint_count: int | None = None,
+    seed: int = 42,
 ) -> argparse.Namespace:
     """Build the argument namespace used to run blabber.main in the tests."""
     return argparse.Namespace(
         verbose=False,
         quiet=True,
-        random_seed=42,
+        random_seed=seed,
         alphabet="ACGT",
         format="fastq",
         sample_sheet=sheet,
@@ -482,6 +484,7 @@ def _blabber_args(
         index1=None,
         index2=None,
         taint=taint,
+        taint_count=taint_count,
     )
 
 
@@ -563,6 +566,186 @@ class TestSingleEndAndTaint:
             assert _count_reads(r1) == _count_reads(r2)
 
 
+SINGLE_END_INDEXED_SHEET = """\
+[Header]
+FileFormatVersion,2
+RunName,DummyRun
+InstrumentPlatform,NextSeq2000
+[Reads]
+Read1Cycles,151
+[BCLConvert_Data]
+Lane,Sample_ID,Sample_Name,index,index2,Sample_Project,OverrideCycles
+1,S1,Sample1,GAACTGAGCG,,ProjA,Y151;I10
+2,S2,Sample2,AGGTCAGATA,,ProjB,Y151;I10
+"""
+
+MIXED_INDEX_SHEET = """\
+[Header]
+FileFormatVersion,2
+RunName,DummyRun
+InstrumentPlatform,NovaSeqXSeries
+[Reads]
+Read1Cycles,151
+Read2Cycles,151
+Index1Cycles,10
+Index2Cycles,10
+[BCLConvert_Data]
+Lane,Sample_ID,Sample_Name,index,index2,Sample_Project,OverrideCycles
+1,S1,Sample1,,,ProjA,Y151
+1,S2,Sample2,,,ProjA,Y151
+2,S3,Sample3,GAACTGAGCG,CGCTCCACGA,ProjB,Y151;I10;I10;Y151
+2,S4,Sample4,AGGTCAGATA,TATCTTGTAG,ProjB,Y151;I10;I10;Y151
+"""
+
+
+def _read_indexes(fastq: pathlib.Path) -> list[str]:
+    """Return the index sequence(s) of every record in a gzip-compressed FASTQ."""
+    indexes = []
+    with gzip.open(fastq, "rt") as fh:
+        for line in fh:
+            if line.startswith("@"):
+                indexes.append(line.rsplit(":", 1)[1].strip())
+    return indexes
+
+
+_POSITION_RE = re.compile(r":(\d+):(\d{4}):(\d{4}):(\d{4})(?::\S+)? \d:N:0:")
+
+
+def _read_positions(fastq: pathlib.Path) -> list[tuple[str, str, str, str]]:
+    """Return (lane, tile, x, y) for every record in a gzip-compressed FASTQ."""
+    positions = []
+    with gzip.open(fastq, "rt") as fh:
+        for line in fh:
+            if line.startswith("@"):
+                match = _POSITION_RE.search(line)
+                assert match, f"Could not parse position from read name: {line}"
+                positions.append(match.groups())
+    return positions
+
+
+class TestTaintCount:
+    """Tests for the deterministic --taint-count undetermined reads."""
+
+    def test_taint_count_implies_taint_and_writes_exactly_n(self, tmp_path):
+        """--taint-count alone (without --taint) writes exactly N reads to the
+        R1 and R2 Undetermined files of each indexed lane."""
+        sheet = tmp_path / "SampleSheet.csv"
+        sheet.write_text(TWO_LANE_SAMPLE_SHEET)
+        main(_blabber_args(tmp_path, sheet, seq_number=16, taint_count=5))
+
+        demux_path = tmp_path / "TESTFC" / "Demultiplexing"
+        for lane in ["L001", "L002"]:
+            r1 = demux_path / f"Undetermined_S0_{lane}_R1_001.fastq.gz"
+            r2 = demux_path / f"Undetermined_S0_{lane}_R2_001.fastq.gz"
+            assert r1.is_file(), f"Missing {r1.name}"
+            assert r2.is_file(), f"Missing {r2.name}"
+            assert _count_reads(r1) == 5
+            assert _count_reads(r2) == 5
+
+    def test_taint_count_round_robin_selection(self, tmp_path):
+        """The undetermined reads follow the deterministic round-robin over the
+        lane's samples in sheet order."""
+        sheet = tmp_path / "SampleSheet.csv"
+        sheet.write_text(TWO_LANE_SAMPLE_SHEET)
+        main(_blabber_args(tmp_path, sheet, seq_number=16, taint_count=5))
+
+        demux_path = tmp_path / "TESTFC" / "Demultiplexing"
+        r1 = demux_path / "Undetermined_S0_L001_R1_001.fastq.gz"
+        # 4 samples per lane: one read from each sample in sheet order, then
+        # the second read of the first sample
+        assert _read_indexes(r1) == [
+            "GAACTGAGCG+CGCTCCACGA",  # Sample1
+            "AGGTCAGATA+TATCTTGTAG",  # Sample2
+            "TAAACCCTAG+TTCCTATCAG",  # Sample3
+            "CGTCTCATAT+AGCTACTATA",  # Sample4
+            "GAACTGAGCG+CGCTCCACGA",  # Sample1 again
+        ]
+
+    def test_taint_count_unique_positions(self, tmp_path):
+        """Undetermined copies get unique cluster positions: no (lane, tile, x,
+        y) coordinate is shared by any two reads, sample reads included."""
+        sheet = tmp_path / "SampleSheet.csv"
+        sheet.write_text(TWO_LANE_SAMPLE_SHEET)
+        main(_blabber_args(tmp_path, sheet, seq_number=16, taint_count=5))
+
+        demux_path = tmp_path / "TESTFC" / "Demultiplexing"
+        all_positions = []
+        for fastq in sorted(demux_path.rglob("*_R1_001.fastq.gz")):
+            all_positions.extend(_read_positions(fastq))
+        assert len(all_positions) == len(set(all_positions))
+
+    def test_taint_count_selection_is_seed_independent(self, tmp_path):
+        """The undetermined selection (which sample contributes in which round)
+        does not depend on --random-seed."""
+        sheet = tmp_path / "SampleSheet.csv"
+        sheet.write_text(TWO_LANE_SAMPLE_SHEET)
+        main(_blabber_args(tmp_path / "run1", sheet, seq_number=16, taint_count=5))
+        main(
+            _blabber_args(
+                tmp_path / "run2", sheet, seq_number=16, taint_count=5, seed=7
+            )
+        )
+
+        for lane in ["L001", "L002"]:
+            r1_a = (
+                tmp_path
+                / "run1"
+                / "TESTFC"
+                / "Demultiplexing"
+                / f"Undetermined_S0_{lane}_R1_001.fastq.gz"
+            )
+            r1_b = (
+                tmp_path
+                / "run2"
+                / "TESTFC"
+                / "Demultiplexing"
+                / f"Undetermined_S0_{lane}_R1_001.fastq.gz"
+            )
+            assert _count_reads(r1_a) == _count_reads(r1_b) == 5
+            assert _read_indexes(r1_a) == _read_indexes(r1_b)
+
+    def test_taint_count_single_end_creates_r1_only(self, tmp_path):
+        """Taint counting a single-end indexed lane writes exactly N reads to
+        the R1 Undetermined file and no R2 file."""
+        sheet = tmp_path / "SampleSheet.csv"
+        sheet.write_text(SINGLE_END_INDEXED_SHEET)
+        main(_blabber_args(tmp_path, sheet, seq_number=16, taint_count=4))
+
+        demux_path = tmp_path / "TESTFC" / "Demultiplexing"
+        undetermined = sorted(demux_path.glob("Undetermined*"))
+        assert [f.name for f in undetermined] == [
+            "Undetermined_S0_L001_R1_001.fastq.gz",
+            "Undetermined_S0_L002_R1_001.fastq.gz",
+        ]
+        assert all(_count_reads(f) == 4 for f in undetermined)
+
+    def test_taint_count_skips_no_index_lane(self, tmp_path):
+        """Lanes with only no-index designs get no Undetermined files in count
+        mode, while the indexed lane of the same run gets exactly N reads."""
+        sheet = tmp_path / "SampleSheet.csv"
+        sheet.write_text(MIXED_INDEX_SHEET)
+        main(_blabber_args(tmp_path, sheet, seq_number=16, taint_count=3))
+
+        demux_path = tmp_path / "TESTFC" / "Demultiplexing"
+        undetermined = sorted(demux_path.glob("Undetermined*"))
+        assert [f.name for f in undetermined] == [
+            "Undetermined_S0_L002_R1_001.fastq.gz",
+            "Undetermined_S0_L002_R2_001.fastq.gz",
+        ]
+        assert all(_count_reads(f) == 3 for f in undetermined)
+
+    def test_taint_count_capped_at_available_reads(self, tmp_path):
+        """Requesting more reads than a lane has yields only the available ones."""
+        sheet = tmp_path / "SampleSheet.csv"
+        sheet.write_text(SINGLE_END_INDEXED_SHEET)
+        main(_blabber_args(tmp_path, sheet, seq_number=3, taint_count=10))
+
+        demux_path = tmp_path / "TESTFC" / "Demultiplexing"
+        for lane in ["L001", "L002"]:
+            r1 = demux_path / f"Undetermined_S0_{lane}_R1_001.fastq.gz"
+            assert _count_reads(r1) == 3
+
+
 class TestFlowcellIdPinning:
     """Tests for pinning the read name identity from a full run folder name."""
 
@@ -602,3 +785,71 @@ class TestFlowcellIdPinning:
         prefix = ":".join(self._first_read_name(demux_path).split(":")[:3])
         # Random identity: <2 letters><5 digits>:<3 digits>:<2 digits><6 letters><digit>
         assert re.fullmatch(r"[A-Z]{2}[0-9]{5}:[0-9]{3}:[0-9]{2}[A-Z]{6}[0-9]", prefix)
+
+
+# ---------------------------------------------------------------------------
+# Simple-mode (no sample sheet) FASTQ generation — structural regression
+# ---------------------------------------------------------------------------
+
+
+class TestSimpleFastqGeneration:
+    """Structural invariants of the vectorized simple-mode generator."""
+
+    def _run(self, tmp_path, seq_number=1000, seq_length=150, fmt="fastq", seed=42):
+        out = tmp_path / (f"sequences.{fmt}" + (".gz" if fmt == "fastq" else ""))
+        args = argparse.Namespace(
+            verbose=False,
+            quiet=True,
+            random_seed=seed,
+            alphabet="ACGT",
+            format=fmt,
+            sample_sheet=None,
+            output=out,
+            flowcell_id=None,
+            seq_number=seq_number,
+            seq_length=seq_length,
+            seq_mask=None,
+            index1=None,
+            index2=None,
+            taint=False,
+        )
+        main(args)
+        return out
+
+    def test_fastq_structural_invariants(self, tmp_path):
+        """Record count, name format, length, alphabet and composition."""
+        from collections import Counter
+
+        import dnaio
+
+        out = self._run(tmp_path)
+        comp = Counter()
+        n = 0
+        name_re = re.compile(
+            r"^[A-Z]{2}[0-9]{5}:[0-9]{3}:[0-9]{2}[A-Z]{6}:[0-9]+:[0-9]+:[0-9]+$"
+        )
+        with dnaio.open(out) as reader:
+            for rec in reader:
+                assert name_re.fullmatch(rec.name), rec.name
+                assert len(rec.sequence) == 150
+                assert set(rec.sequence) <= set("ACGT")
+                assert rec.qualities == "I" * 150
+                comp.update(rec.sequence)
+                n += 1
+        assert n == 1000
+        total = sum(comp.values())
+        for base in "ACGT":
+            assert abs(comp[base] / total - 0.25) < 0.05
+
+    def test_sequences_deterministic_per_seed(self, tmp_path):
+        """The same seed yields the same set of sequences (in-process)."""
+        import numpy as np
+
+        import biomate.blabber.blabber as b
+
+        b.rng = np.random.default_rng(7)
+        seqs_a = b.generate_sequences_set(set("ACGT"), 150, 2000)
+        b.rng = np.random.default_rng(7)
+        seqs_b = b.generate_sequences_set(set("ACGT"), 150, 2000)
+        assert seqs_a == seqs_b
+        assert len(seqs_a) == 2000

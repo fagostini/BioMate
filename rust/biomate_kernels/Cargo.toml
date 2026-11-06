@@ -1,0 +1,17 @@
+[package]
+name = "biomate_kernels"
+version = "0.1.0"
+edition = "2021"
+description = "Rust kernels for BioMate (index matching, sequence scanning)"
+
+[lib]
+name = "biomate_kernels"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.26", features = ["extension-module", "abi3-py39"] }
+flate2 = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,295 @@
+"""Differential parity tests: biomate_kernels vs the production code paths.
+
+IndexPattern must be byte-identical to the `regex`-module path on (match?,
+span, fuzzy_counts, groups[1:]); scan_n_content must equal the per-record
+dnaio loop in `biomate.nspector.nspector`. These tests are the definition of
+done for the kernels (see docs/todo/index.md and nspector.md); they skip when
+the optional biomate_kernels package is not installed.
+"""
+
+import gzip
+import pathlib
+import random
+
+import dnaio
+import pytest
+
+biomate_kernels = pytest.importorskip("biomate_kernels")
+
+from biomate.index.index import compile_index_regex  # noqa: E402
+from biomate.nspector.nspector import extract_tile_coordinates  # noqa: E402
+
+M = "ATCGATCGAT"
+G8 = "GGGGGGGG"
+ACGT = "ACGT"
+SEQ_LEN = 150
+
+PATTERNS = [
+    (M, 0, "e"),
+    (M, 1, "e"),
+    (M, 2, "e"),
+    (M, 3, "e"),
+    (M, 2, "s"),
+    (M, 2, "i"),
+    (M, 2, "d"),
+    (M, 1, "s"),
+    (M, 1, "i"),
+    (M, 1, "d"),
+    (M, 2, "is"),
+    (M, 2, "sd"),
+    (M, 3, "id"),
+    (f"{M}+{G8}", 2, "e"),
+    (f"{M}+{G8}", 1, "e"),
+    (f"{M}+{G8}", 2, "s"),
+]
+
+
+def _reference(pypat, seq):
+    """Reference result from the production regex engine."""
+    m = pypat.search(seq)
+    if m is None:
+        return None
+    return (m.span(), tuple(m.fuzzy_counts), m.groups()[1:])
+
+
+def _kernel(rustpat, seq):
+    """Kernel result in the reference shape."""
+    got = rustpat.search(seq)
+    if got is None:
+        return None
+    start, end, counts, parts = got
+    return ((start, end), counts, tuple(parts))
+
+
+def _rand_seq(rng, length=SEQ_LEN):
+    return "".join(rng.choice(ACGT) for _ in range(length))
+
+
+def _plant(rng, base, kind, pos):
+    """Insert one 'N' edit into the motif region of a random sequence."""
+    seq = list(base)
+    start = rng.randrange(0, SEQ_LEN - len(M))
+    seg = list(M)
+    if kind == "s":
+        seg[pos] = "N"
+    elif kind == "i":
+        seg.insert(pos, "N")
+    elif kind == "d":
+        del seg[pos]
+    seq[start : start + len(M)] = seg
+    return "".join(seq)
+
+
+class TestIndexPatternParity:
+    """Kernel vs regex on random sequences across all pattern configs."""
+
+    @pytest.mark.parametrize("motif,distance,error_type", PATTERNS)
+    def test_random_sequences(self, motif, distance, error_type):
+        rng = random.Random(42)
+        pypat = compile_index_regex(motif, distance, error_type)
+        rustpat = biomate_kernels.IndexPattern(motif, distance, error_type)
+        for _ in range(500):
+            seq = _rand_seq(rng)
+            assert _kernel(rustpat, seq) == _reference(pypat, seq), seq
+
+    @pytest.mark.parametrize(
+        "motif,distance,error_type",
+        [(M, 2, "e"), (M, 3, "e"), (M, 2, "s"), (M, 2, "i"), (f"{M}+{G8}", 2, "e")],
+    )
+    @pytest.mark.parametrize("kind", ["s", "i", "d"])
+    def test_planted_edits_all_positions(self, motif, distance, error_type, kind):
+        """Single planted edit at every position of the motif."""
+        rng = random.Random(7)
+        base = _rand_seq(rng)
+        pypat = compile_index_regex(motif, distance, error_type)
+        rustpat = biomate_kernels.IndexPattern(motif, distance, error_type)
+        positions = range(len(M) + (1 if kind == "i" else 0))
+        for pos in positions:
+            seq = _plant(rng, base, kind, pos)
+            assert _kernel(rustpat, seq) == _reference(pypat, seq), (kind, pos, seq)
+
+    def test_known_semantic_cases(self):
+        """Probe cases that pin down the engine's documented behaviors."""
+        pypat = compile_index_regex(M, 2, "e")
+        rustpat = biomate_kernels.IndexPattern(M, 2, "e")
+        cases = [
+            M,  # exact
+            "XXX" + M,  # leftmost start beats fewer errors
+            "X" + M,  # non-minimal sub+ins split
+            M + M,  # repetition tie-break: shorter span
+            "N" + M,
+            "NN" + M,
+            "ATCGAATCGAT",  # planted insertion
+            "ATCGACGAT",  # planted deletion
+            "",  # never matches empty
+            "ACGTACGT",  # no motif
+        ]
+        for seq in cases:
+            assert _kernel(rustpat, seq) == _reference(pypat, seq), seq
+
+
+class TestScanBatchParity:
+    """scan_batch aggregation must equal the per-record regex aggregation."""
+
+    def test_aggregation_and_fallback(self):
+        rng = random.Random(99)
+        motif, distance, error_type = M, 2, "e"
+        pypat = compile_index_regex(motif, distance, error_type)
+        rustpat = biomate_kernels.IndexPattern(motif, distance, error_type)
+
+        seqs = [_rand_seq(rng) for _ in range(500)]
+        # one non-ASCII sequence is routed to the fallback list (the caller
+        # re-runs those through the regex engine)
+        seqs[123] = seqs[123][:50] + "ACGTé" + seqs[123][51:]
+
+        aggregated, fallback = rustpat.scan_batch(seqs)
+        assert fallback == [123]
+
+        reference = {}
+        for i, seq in enumerate(seqs):
+            if i in fallback:
+                continue
+            m = pypat.search(seq)
+            if m:
+                key = str(sum(m.fuzzy_counts))
+                groups = " ".join(m.groups()[1:])
+                reference.setdefault(key, {})
+                reference[key][groups] = reference[key].get(groups, 0) + 1
+
+        got = {k: dict(v) for k, v in aggregated.items()}
+        assert got == reference
+
+    def test_fallback_indices(self):
+        rustpat = biomate_kernels.IndexPattern(M, 2, "e")
+        pypat = compile_index_regex(M, 2, "e")
+        rng = random.Random(1)
+        seqs = [_rand_seq(rng) for _ in range(50)]
+        seqs[10] = "ACGTé" + "N" * 50  # non-ASCII char
+        seqs[49] = "ACGTé" * 30  # non-ASCII char
+        aggregated, fallback = rustpat.scan_batch(seqs)
+        assert fallback == [10, 49]
+        # every other sequence must still be aggregated (match or not)
+        expected_matches = sum(
+            1
+            for i, seq in enumerate(seqs)
+            if i not in (10, 49) and pypat.search(seq) is not None
+        )
+        total = sum(c for groups in aggregated.values() for c in groups.values())
+        assert total == expected_matches
+
+
+# ---------------------------------------------------------------------------
+# nspector N-content scan parity
+# ---------------------------------------------------------------------------
+
+
+def _illumina_name(tile: int, x: int, y: int, index: str = "AA+CC") -> str:
+    return f"M00150:2:AABCCC:1:{tile:04d}:{x:04d}:{y:04d} 1:N:0:{index}"
+
+
+def _write_fastq(path: pathlib.Path, records: list[tuple[str, str]], gz: bool = True):
+    data = "".join(f"@{name}\n{seq}\n+\n{'I' * len(seq)}\n" for name, seq in records)
+    if gz:
+        with gzip.open(path, "wt") as fh:
+            fh.write(data)
+    else:
+        path.write_text(data)
+
+
+def _reference_scan(path: pathlib.Path):
+    """Reference: the per-record loop from nspector.main()."""
+    tiles, xs, ys, cycles = [], [], [], []
+    fmt_err = None
+    with dnaio.open(path) as reader:
+        for i, rec in enumerate(reader):
+            npos = [j for j, c in enumerate(rec.sequence) if c == "N"]
+            if npos:
+                coords = extract_tile_coordinates(rec.name)
+                if coords is None:
+                    fmt_err = i
+                    break
+                t, x, y = coords
+                tiles.append(t)
+                xs.append(x)
+                ys.append(y)
+                cycles.append(npos)
+    return fmt_err, tiles, xs, ys, cycles
+
+
+def _kernel_scan(path: pathlib.Path, threads: int = 1):
+    res = biomate_kernels.scan_n_content([str(path)], threads)[0]
+    fmt_err, tiles, xs, ys, cycles = res
+    return fmt_err, list(tiles), list(xs), list(ys), [list(c) for c in cycles]
+
+
+class TestScanNContentParity:
+    """scan_n_content must equal the dnaio/extract_tile_coordinates loop."""
+
+    def test_mixed_records(self, tmp_path):
+        records = [
+            (_illumina_name(101, 100, 100), "ACGTNACGTNAC"),  # Ns @4,9
+            (_illumina_name(102, 101, 101), "ACGTACGT"),  # no Ns
+            (_illumina_name(103, 102, 102), "NNNN"),  # all Ns
+            ("short:bad:name", "ACGTN"),  # bad name, no Ns -> ignored
+            (_illumina_name(104, 103, 103), "ACGnTN"),  # lowercase n ignored
+            (_illumina_name(105, 104, 104), "ACGTACGTNN"),  # Ns @8,9
+        ]
+        p = tmp_path / "mixed.fastq.gz"
+        _write_fastq(p, records)
+        assert _kernel_scan(p) == _reference_scan(p)
+
+    def test_format_error_stops_file(self, tmp_path):
+        records = [
+            (_illumina_name(101, 1, 1), "ACGTNACGT"),  # ok (record 0)
+            ("only:six:fields:1:2:3", "ACGTN"),  # 5 fields, has N -> error (record 1)
+            (_illumina_name(102, 2, 2), "ACGTN"),  # never read
+        ]
+        p = tmp_path / "bad.fastq.gz"
+        _write_fastq(p, records)
+        got = _kernel_scan(p)
+        ref = _reference_scan(p)
+        assert got == ref
+        assert got[0] == 1  # 0-based index of the offending record
+
+    def test_no_n_records(self, tmp_path):
+        p = tmp_path / "clean.fastq.gz"
+        _write_fastq(p, [(_illumina_name(1, 2, 3), "ACGT")])
+        assert _kernel_scan(p) == _reference_scan(p) == (None, [], [], [], [])
+
+    def test_plain_fastq(self, tmp_path):
+        records = [
+            (_illumina_name(11, 12, 13), "NNACGT"),
+            (_illumina_name(14, 15, 16), "ACGT"),
+        ]
+        p = tmp_path / "plain.fastq"
+        _write_fastq(p, records, gz=False)
+        assert _kernel_scan(p) == _reference_scan(p)
+
+    def test_coordinate_formats(self, tmp_path):
+        records = [
+            ("M1:1:FC:1:0101:1000:2000 1:N:0:AA+CC", "ACGTN"),  # 7 fields
+            ("M1:1:FC:1:1101:1000:2000 1:N:0:AA+CC", "NN"),  # 5-digit tile
+            ("M1:1:FC:1:1101:1000:2000:9 1:N:0:AA+CC", "N"),  # 8 fields
+        ]
+        p = tmp_path / "coords.fastq.gz"
+        _write_fastq(p, records)
+        assert _kernel_scan(p) == _reference_scan(p)
+
+    def test_multi_file_threads(self, tmp_path):
+        paths = []
+        for f in range(3):
+            p = tmp_path / f"f{f}.fastq.gz"
+            _write_fastq(
+                p,
+                [
+                    (_illumina_name(100 + f * 10 + i, i, i * 2), f"ACGTN{i}ACGT")
+                    for i in range(20)
+                ],
+            )
+            paths.append(p)
+        got = biomate_kernels.scan_n_content([str(p) for p in paths], 3)
+        ref = [_reference_scan(p) for p in paths]
+        assert [
+            (g[0], list(g[1]), list(g[2]), list(g[3]), [list(c) for c in g[4]])
+            for g in got
+        ] == ref
