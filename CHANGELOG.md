@@ -1,3 +1,11 @@
+## Unreleased
+
+### Feat
+
+- **blabber**: Add `--taint-count` option to write exactly N undetermined reads to the Undetermined files of each lane with an indexed design (deterministic, `--random-seed`-independent, implies `--taint`)
+- **fastrewind**: Process `Undetermined` FASTQ groups with a per-read recipe synthesised from the original index (original geometry, all-N indexes) so that the clusters survive `bcl-convert` as undetermined reads
+- **Makefile, Jenkinsfile**: Generate tainted test data (`TAINT_COUNT ?= 5`, fixed `--random-seed 42`) and fail when the per-lane undetermined read count in the `bcl-convert` output does not match the expected value
+
 ## 0.5.0 (2026-09-30)
 
 ### Feat

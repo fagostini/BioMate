@@ -20,14 +20,19 @@ DISS = assets/SampleSheet_DualIndex.csv
 MISS = assets/SampleSheet_MixedIndexes.csv
 
 TEMP_DIR = temp
-FLOWCELL_ID = 20260310_LM43899_0385_A12GGASZR5
+FLOWCELL_ID = 20261105_LM43899_0385_A12GGASZR5
 FLOWCELL_ID_NONE ?= $(FLOWCELL_ID)
-FLOWCELL_ID_SINGLE ?= 20260310_LM43896_0386_B98QWERTY6
-FLOWCELL_ID_DUAL ?= 20260310_LM43897_0387_C36MNBVCX7
-FLOWCELL_ID_MIX ?= 20260310_LM43898_0388_D74LKJHGF8
+FLOWCELL_ID_SINGLE ?= 20261105_LM43896_0386_B98QWERTY6
+FLOWCELL_ID_DUAL ?= 20261105_LM43897_0387_C36MNBVCX7
+FLOWCELL_ID_MIX ?= 20261105_LM43898_0388_D74LKJHGF8
 SEQ_NUM = 10
+# Number of undetermined reads written to the Undetermined files of each lane
+# with an indexed design (blabber --taint-count); lanes with a no-index design
+# are expected to have 0. Used by report_results to verify the bcl-convert output.
+TAINT_COUNT ?= 5
 
 RELEASE_DATA = DemuxCasesData.tar.gz
+RELEASE_DIR = $(basename $(basename $(RELEASE_DATA)))
 TEST_PATH ?= tests
 PYTEST_ARGS ?=
 
@@ -152,15 +157,30 @@ deploy: check-uv
 	@$(UV) run mkdocs gh-deploy
 
 
+# The release runs the full pipeline (blabber, fastrewind, bcl-convert) for
+# every flowcell and packages each flowcell directory in its post-fastrewind
+# state. BCL-convert results (temp/Demultiplexed and its logs) are excluded
+# from the archive. Every test_* deepcleans temp/ before running, so each
+# flowcell directory is staged away right after its test completes, before
+# the next test's deepclean wipes it.
 .PHONY: release
-## Create a new release
-release: $(RELEASE_DATA)
-
-
-$(RELEASE_DATA): test_mix
-	mv $(TEMP_DIR) $(basename $(basename $(RELEASE_DATA)))
-	tar -czf $(RELEASE_DATA) $(basename $(basename $(RELEASE_DATA)))
-	@rm -r $(basename $(basename $(RELEASE_DATA)))
+## Create a new release: runs the full pipeline for every flowcell and
+## packages each flowcell directory (post-fastrewind, BCL-convert results
+## excluded) into the release archive
+release:
+	@rm -rf $(RELEASE_DIR)
+	@mkdir -p $(RELEASE_DIR)
+	@$(MAKE) test_none
+	mv $(TEMP_DIR)/$(FLOWCELL_ID_NONE) $(RELEASE_DIR)/
+	@$(MAKE) test_single
+	mv $(TEMP_DIR)/$(FLOWCELL_ID_SINGLE) $(RELEASE_DIR)/
+	@$(MAKE) test_dual
+	mv $(TEMP_DIR)/$(FLOWCELL_ID_DUAL) $(RELEASE_DIR)/
+	@$(MAKE) test_mix
+	mv $(TEMP_DIR)/$(FLOWCELL_ID_MIX) $(RELEASE_DIR)/
+	tar -czf $(RELEASE_DATA) $(RELEASE_DIR)
+	rm -r $(RELEASE_DIR)
+	@$(MAKE) deepclean
 
 $(TEMP_DIR):
 	@mkdir -p $(TEMP_DIR)
@@ -178,7 +198,7 @@ copy_mix: $(TEMP_DIR) $(MISS) clean_samplesheet
 	@cp $(MISS) $(TEMP_DIR)/SampleSheet.csv && echo "Copied SampleSheet (Mixed Indexes) to working folder." || { echo "Error copying SampleSheet to working folder!"; exit 1; }
 
 $(TEMP_DIR)/$(FLOWCELL_ID): check-uv $(TEMP_DIR) clean_flowcell
-	@$(UV) run biomate --verbose blabber --format fastq --sample-sheet $(TEMP_DIR)/SampleSheet.csv --seq-number $(SEQ_NUM) --output $(TEMP_DIR) --flowcell-id $(FLOWCELL_ID) > $(TEMP_DIR)/blabber.out 2> $(TEMP_DIR)/blabber.err && echo "Blabber module executed successfully!" || { echo "Error executing Blabber module!"; exit 1; }
+	@$(UV) run biomate --verbose blabber --format fastq --sample-sheet $(TEMP_DIR)/SampleSheet.csv --seq-number $(SEQ_NUM) --taint --taint-count $(TAINT_COUNT) --random-seed 42 --output $(TEMP_DIR) --flowcell-id $(FLOWCELL_ID) > $(TEMP_DIR)/blabber.out 2> $(TEMP_DIR)/blabber.err && echo "Blabber module executed successfully!" || { echo "Error executing Blabber module!"; exit 1; }
 
 $(TEMP_DIR)/$(FLOWCELL_ID)/Data $(TEMP_DIR)/$(FLOWCELL_ID)/RunInfo.xml $(TEMP_DIR)/$(FLOWCELL_ID)/RunParameters.xml: check-uv $(TEMP_DIR)/$(FLOWCELL_ID) clean_data
 	@$(UV) run biomate --verbose fastrewind --input-path $(TEMP_DIR) --output-path $(TEMP_DIR)/$(FLOWCELL_ID) --flowcell-id $(FLOWCELL_ID) --threads 8 > $(TEMP_DIR)/fastrewind.out 2> $(TEMP_DIR)/fastrewind.err  && echo "Fastrewind module executed successfully!" || { echo "Error executing Fastrewind module!"; exit 1; }
@@ -210,6 +230,18 @@ $(TEMP_DIR)/Demultiplexed: check-bclconvert $(TEMP_DIR)/$(FLOWCELL_ID)/RunInfo.x
 report_results: $(TEMP_DIR)/Demultiplexed results_message
 	@find $(TEMP_DIR)/Demultiplexed -name "*.fastq.gz" | grep -v -e "Undetermined" -e "_I1_" -e "_I2_" | xargs -r zgrep -c ^@ || true
 	@find $(TEMP_DIR)/Demultiplexed -name "*.fastq.gz" | grep "Undetermined" | grep -v -e "_I1_" -e "_I2_" | xargs -r zgrep -c ^@ || true
+	@echo "Verifying undetermined read counts ($(TAINT_COUNT) expected per indexed lane)..."
+	@for lane in $$(awk -F, '/^\[BCLConvert_Data\]$$/ { s=1; next } /^\[/ { s=0 } s && $$1 ~ /^[0-9]+$$/ { print "L" sprintf("%03d", $$1) }' $(TEMP_DIR)/SampleSheet.csv | sort -u); do \
+		file=$$(find $(TEMP_DIR)/Demultiplexed -name "Undetermined_S0_$${lane}_R1_*.fastq.gz" | head -n 1); \
+		if [ -n "$$file" ]; then actual=$$(zgrep -c ^@ "$$file"); else actual=0; fi; \
+		indexed=$$(awk -F, -v lane="$$lane" '/^\[BCLConvert_Data\]$$/ { d=1; next } /^\[/ { d=0 } d && $$1 ~ /^[0-9]+$$/ && sprintf("L%03d", $$1) == lane && ($$4 != "" || $$5 != "") { found=1; exit } END { print found+0 }' $(TEMP_DIR)/SampleSheet.csv); \
+		if [ "$$indexed" = "1" ]; then expected=$(TAINT_COUNT); else expected=0; fi; \
+		if [ "$$actual" != "$$expected" ]; then \
+			echo "ERROR: lane $$lane has $$actual undetermined R1 reads, expected $$expected."; \
+			exit 1; \
+		fi; \
+		echo "  lane $$lane: $$actual/$$expected undetermined R1 reads"; \
+	done
 
 
 compare_results: $(TEMP_DIR)/Demultiplexed comparison_message
@@ -258,16 +290,26 @@ comparison_message:
 
 
 .PHONY: deepclean
-deepclean: cleanup_message clean_samplesheet clean_flowcell clean_data
+deepclean: cleanup_message clean_samplesheet clean_flowcells clean_data
 	if [[ -d $(TEMP_DIR) ]]; then rm -r $(TEMP_DIR); fi
 
 .PHONY: clean_samplesheet
 clean_samplesheet:
 	if [[ -f $(TEMP_DIR)/SampleSheet.csv ]]; then rm $(TEMP_DIR)/SampleSheet.csv; fi
 
-.PHONY: clean_flowcell
+.PHONY: clean_flowcell clean_flowcells
 clean_flowcell:
 	if [[ -d $(TEMP_DIR)/$(FLOWCELL_ID) ]]; then rm -r $(TEMP_DIR)/$(FLOWCELL_ID); fi
+
+# Remove every flowcell directory found in the working folder, regardless of
+# which FLOWCELL_ID is currently in effect (run folders follow the Illumina
+# YYYYMMDD_ naming convention, so the glob never matches other entries).
+clean_flowcells:
+	@if [[ -d $(TEMP_DIR) ]]; then \
+	  for fc in $(TEMP_DIR)/????????_*; do \
+	    if [[ -d $$fc ]]; then rm -r "$$fc"; fi; \
+	  done; \
+	fi
 
 .PHONY: clean_data
 clean_data:

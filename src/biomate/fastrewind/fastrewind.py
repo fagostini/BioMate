@@ -395,6 +395,78 @@ def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
     return data
 
 
+def build_index_lookup(sample_sheet: pathlib.Path, masks_table: dict) -> dict:
+    """Map (lane, index1, index2) informative index pairs to the sample's recipe.
+
+    Undetermined FASTQ reads retain the informative index of their sample of
+    origin in the read name, so this lookup lets their recipe be synthesised
+    from the original sample's geometry (see
+    ``synthesize_undetermined_recipe``). Indexes are matched exactly as written
+    in the sample sheet, per lane; (lane, index1, index2) is expected to be
+    unique within a lane.
+    """
+    data = extract_data_from_samplesheet(sample_sheet)
+    if "index" not in data.columns or "index2" not in data.columns:
+        return {}
+    lookup = {}
+    for row_number, row in enumerate(data.iter_rows(named=True), start=1):
+        sample_name = row["Sample_Name"]
+        if not sample_name:
+            continue
+        lane = "L" + str(int(row["Lane"])).zfill(3)
+        group_name = f"{sample_name}_S{row_number}_{lane}_001"
+        recipe = masks_table.get(group_name)
+        if recipe is None:
+            continue
+        key = (lane, str(row["index"] or ""), str(row["index2"] or ""))
+        if key in lookup and key[1]:
+            logging.warning(
+                f"Duplicate informative index {key[1]}{('+' + key[2]) if key[2] else ''} "
+                f"in lane {lane}; keeping the first matching recipe."
+            )
+            continue
+        lookup[key] = recipe
+    return lookup
+
+
+def synthesize_undetermined_recipe(
+    recipe: dict | None, cycles_dict: dict
+) -> dict:
+    """Build the recipe used to write an undetermined read into the BCL.
+
+    The geometry (N-padded read lengths) is taken from the original sample's
+    recipe, while the informative index cycles are replaced by N so that no
+    sample-sheet barcode can match the cluster and the demultiplexer leaves it
+    undetermined. When the original recipe cannot be resolved, a fallback
+    recipe with unpadded reads and full-length N indexes is returned.
+    """
+    if recipe is not None:
+        return {
+            "sample_name": "Undetermined",
+            "sample_project": "Undetermined",
+            "R1B": recipe["R1B"],
+            "R1": recipe["R1"],
+            "R1A": recipe["R1A"],
+            "I1": "N" * len(recipe["I1"]),
+            "I2": "N" * len(recipe["I2"]),
+            "R2B": recipe["R2B"],
+            "R2": recipe["R2"],
+            "R2A": recipe["R2A"],
+        }
+    return {
+        "sample_name": "Undetermined",
+        "sample_project": "Undetermined",
+        "R1B": "",
+        "R1": 0,
+        "R1A": "",
+        "I1": "N" * cycles_dict.get("I1", 0),
+        "I2": "N" * cycles_dict.get("I2", 0),
+        "R2B": "",
+        "R2": 0,
+        "R2A": "",
+    }
+
+
 def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict[str, int]]":
     """
     Parse the sample sheet file and return the total number of cycles.
@@ -499,6 +571,8 @@ def parse_fastq_groups(
     threads: int = 0,
     instrument: str = "NovaSeqXPlus",
     index_counts: dict | None = None,
+    index_lookup: dict | None = None,
+    cycles_dict: dict | None = None,
 ) -> dict:
     """Parse the FASTQ files and dumps reads and positions into separate files."""
     # Tiles list, used to update the Counter
@@ -564,7 +638,27 @@ def parse_fastq_groups(
     )
     avro_file = tempdir.joinpath("tile_positions.avro")
 
-    sample_recipe = masks_table[name]
+    is_undetermined = name.startswith("Undetermined")
+    if is_undetermined:
+        # Undetermined reads do not have a sample-sheet recipe of their own;
+        # each read's recipe is resolved from its original index, below
+        sample_recipe = None
+
+        def resolve_recipe(read_name: str) -> dict:
+            """Resolve the recipe for one undetermined read from its original index."""
+            split_name = read_name.split(" ")
+            barcode = split_name[1].split(":")[-1] if len(split_name) > 1 else ""
+            i1, _, i2 = barcode.partition("+")
+            recipe = (index_lookup or {}).get((lane, i1, i2))
+            if recipe is None and barcode:
+                logging.warning(
+                    f"Undetermined read {read_name} carries index '{barcode}', which "
+                    f"matches no sample in lane '{lane}'; writing it with a full-N index."
+                )
+            return synthesize_undetermined_recipe(recipe, cycles_dict or {})
+
+    else:
+        sample_recipe = masks_table[name]
 
     # Keep only one R1/R2 file per sample group. Index-read files and duplicate
     # R1/R2 entries can appear when previous demultiplex outputs are present.
@@ -590,9 +684,15 @@ def parse_fastq_groups(
         if len(filenames) == 1:
             for buffer_counter, r1 in enumerate(reader, start=1):
                 split_name, indexes, umis = process_read_name(r1.name)
-                count_index_cluster(split_name[4])
+                if is_undetermined:
+                    # Undetermined clusters carry no index call, so they are
+                    # not counted for the InterOp index metrics
+                    read_recipe = resolve_recipe(r1.name)
+                else:
+                    count_index_cluster(split_name[4])
+                    read_recipe = sample_recipe
                 # Assume the index is at the end
-                indexes = f"{sample_recipe['I1']}"
+                indexes = f"{read_recipe['I1']}"
                 r1.sequence += indexes
                 r1.qualities += "I" * len(indexes)
 
@@ -628,31 +728,37 @@ def parse_fastq_groups(
         elif len(filenames) == 2:
             for buffer_counter, (r1, r2) in enumerate(reader, start=1):
                 split_name, indexes, umis = process_read_name(r1.name)
-                count_index_cluster(split_name[4])
+                if is_undetermined:
+                    # Undetermined clusters carry no index call, so they are
+                    # not counted for the InterOp index metrics
+                    read_recipe = resolve_recipe(r1.name)
+                else:
+                    count_index_cluster(split_name[4])
+                    read_recipe = sample_recipe
                 # Redefine the indexes to include 'N's, if any
                 umi1, umi2 = umis if len(umis) == 2 else [""] + umis
-                indexes = f"{sample_recipe['I1']}{sample_recipe['I2']}"
+                indexes = f"{read_recipe['I1']}{read_recipe['I2']}"
                 r1.sequence = (
-                    sample_recipe["R1B"]
+                    read_recipe["R1B"]
                     + umi1
                     + r1.sequence
-                    + sample_recipe["R1A"]
+                    + read_recipe["R1A"]
                     + indexes
-                    + sample_recipe["R2B"]
+                    + read_recipe["R2B"]
                     + umi2
                     + r2.sequence
-                    + sample_recipe["R2A"]
+                    + read_recipe["R2A"]
                 )
                 r1.qualities = (
-                    "I" * len(sample_recipe["R1B"])
+                    "I" * len(read_recipe["R1B"])
                     + "I" * len(umi1)
                     + str(r1.qualities)
-                    + "I" * len(sample_recipe["R1A"])
+                    + "I" * len(read_recipe["R1A"])
                     + "I" * len(indexes)
-                    + "I" * len(sample_recipe["R2B"])
+                    + "I" * len(read_recipe["R2B"])
                     + "I" * len(umi2)
                     + str(r2.qualities)
-                    + "I" * len(sample_recipe["R2A"])
+                    + "I" * len(read_recipe["R2A"])
                 )
                 formatted_key = f"{split_name[4][0]}_{split_name[4]}"
 
@@ -1290,6 +1396,10 @@ def main(args: argparse.Namespace) -> None:
     # Get individual and total number of cycles
     total_cycles, cycles_dict = get_cycles(sample_sheet)
 
+    # Lookup of (lane, index1, index2) informative index pairs to sample
+    # recipes, used to synthesise the recipe of undetermined reads
+    index_lookup = build_index_lookup(sample_sheet, masks_table)
+
     # Check that the detected number of cycles is not lower than the one from the user, if provided
     total_cycles = (
         args.total_cycles
@@ -1354,7 +1464,8 @@ def main(args: argparse.Namespace) -> None:
             # Dictionary containing the cluster counts by tile
             unique_locs_by_tile = defaultdict(set)
             for name, filenames in files.items():
-                if name not in masks_table:
+                is_undetermined = name.startswith("Undetermined")
+                if not is_undetermined and name not in masks_table:
                     logging.warning(
                         f"Skipping FASTQ group '{name}' because no matching SampleSheet recipe was found."
                     )
@@ -1369,7 +1480,9 @@ def main(args: argparse.Namespace) -> None:
                     tempdir,
                     args.threads,
                     args.instrument,
-                    index_counts,
+                    None if is_undetermined else index_counts,
+                    index_lookup if is_undetermined else None,
+                    cycles_dict if is_undetermined else None,
                 )
 
                 for k, v in tiles_and_locs.items():

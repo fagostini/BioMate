@@ -14,6 +14,10 @@ The minimal command is `biomate blabber`, which will generate 100 random 50 nucl
 - `--output`: Path to the output file. If not specified, the output will be printed to the standard output. If a sample sheet is provided, this must be a directory where the flowcell folder will be created.
 - `--format`: Format of the output sequences. Can be 'fasta', 'fastq', 'fastq-ext' or 'text'. Default is 'text'. The 'fastq-ext' format includes additional information in the FASTQ header.
 - `--sample-sheet`: Path to a sample sheet file. If provided, the output will be generated based on the sample sheet, creating a flowcell folder structure. The sample sheet should be in the format used by Illumina sequencing systems, with the
+- `--flowcell-id`: Full run folder name (`date_instrument_run_number_flowcell_id`) to use as the output folder; when given, the instrument, run number and flowcell in the read names are also pinned to its parts (default: a random identity is generated).
+- `--taint`: Add reads from the samples to the Undetermined files of lanes with mixed sequencing designs (see below).
+- `--taint-count`: Write exactly this many reads to the Undetermined files of each lane with an indexed design (implies `--taint`, deterministic selection, see below).
+- `--random-seed`: Seed for the random number generator. Only affects the percentage-based `--taint` selection; `--taint-count` selection is seed-independent.
 
 ## Sample Sheet Usage
 
@@ -53,7 +57,12 @@ The input sample sheet will be copied to the flowcell folder as `SampleSheet.csv
 
 ### Simulating Mixed Design Recipes
 
-When generating sequences based on a sample sheet, it is possible to simulate cases in which multiple recipes are present on the same lane. Running the demux process sequentially for each recipe will result in the unassigned files containing redundant reads belonging to the other recipes. By using the `taint` option, the unassigned reads contain ~10% of the reads from each sample present in the shared lane.
+When generating sequences based on a sample sheet, it is possible to simulate cases in which multiple recipes are present on the same lane. Running the demux process sequentially for each recipe will result in the unassigned files containing redundant reads belonging to the other recipes. Two options exist to populate the Undetermined files with such reads:
+
+- `--taint` adds a percentage-based taint: roughly 10% of each sample's reads are flagged as candidates and, per lane, about 10% of the collected candidates (at least one) are written to the Undetermined files — around 1% of each sample's reads in total. The selection depends on `--random-seed`.
+- `--taint-count N` (implies `--taint`) writes **exactly `N`** reads to the Undetermined files of every lane with an indexed design, spreading them round-robin over the lane's samples in sample-sheet order (bounded by the reads available in the lane, with a warning when fewer could be collected). Lanes whose samples all use a no-index design are skipped, because position-based demultiplexing cannot keep their reads undetermined. The selection is deterministic and independent of `--random-seed`, so the resulting counts are assertable in tests.
+
+In both cases each tainted read is a full duplicate of a read already written to its sample's FASTQ files (same read name, sequence and qualities); with `--taint-count` the duplicate is placed at a unique tile/x/y position within the lane, so it never collides with the position of another read.
 
 ### Tile Distribution
 
@@ -64,3 +73,5 @@ All available tiles are used by default. If a lane's total number of sequences (
 ## Caveats
 
 When simulating a flowcell run, there are some assumptions and tricks that do not really allow us to create a real-case dataset. These are mainly represented by the random numbers used in reads naming. Specifically, there is no check for duplicate entries (e.g. although unlikely, two reads might end up having the same tile, x and y positions). The balance of the tile distribution across lanes, however, is now guaranteed as described above.
+
+When a tainted flowcell is re-converted with `fastrewind` and `bcl-convert`, undetermined reads belonging to lanes with shorter-than-full-length read designs may end with a run of `A` bases after the real read. This is an artifact of the BCL encoding: `fastrewind` writes the `N` padding cycles with the same base bits as `A` (the BCL base channel has no dedicated `N` slot), and `bcl-convert` trims undetermined clusters differently from sample-sheet reads, which are trimmed to their planned read length. Sample files are unaffected, and the undetermined read count per lane is exact.

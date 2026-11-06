@@ -137,6 +137,16 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         """,
     )
     parser.add_argument(
+        "--taint-count",
+        type=int,
+        default=None,
+        help=(
+            "Write exactly this many reads to the Undetermined files of each lane "
+            "with an indexed design (implies --taint). The selection is "
+            "deterministic and independent of --random-seed."
+        ),
+    )
+    parser.add_argument(
         "--random-seed",
         type=int,
         default=None,
@@ -236,6 +246,10 @@ def validate_args(args) -> argparse.Namespace:
     if args.seq_number <= 0:
         raise argparse.ArgumentTypeError(
             "Number of sequences must be a positive integer."
+        )
+    if getattr(args, "taint_count", None) is not None and args.taint_count <= 0:
+        raise argparse.ArgumentTypeError(
+            "The number of tainted sequences must be a positive integer."
         )
     if args.index1 and not args.index1.isalpha():
         raise argparse.ArgumentTypeError(
@@ -409,6 +423,22 @@ def generate_sequences_set(nucleotides: set, length: int, number: int) -> set:
     return sequences
 
 
+def _first_free_position(used_positions: set, tile: str) -> tuple[int, int]:
+    """Return the first free (x, y) position on a tile and mark it as used.
+
+    Sample reads are drawn from x in [1000, TILE_WIDTH*10] and y in
+    [1000, TILE_HEIGHT*10]; the same range is scanned here so that taint
+    copies stay within the coordinates fastrewind can encode in the LOCS
+    file and the filter matrices.
+    """
+    for x in range(1000, TILE_WIDTH * 10 + 1):
+        for y in range(1000, TILE_HEIGHT * 10 + 1):
+            if (tile, x, y) not in used_positions:
+                used_positions.add((tile, x, y))
+                return x, y
+    raise RuntimeError(f"No free cluster position left on tile {tile}.")
+
+
 def generate_dnaio_fastq_files(
     output_files: list[pathlib.Path],
     nucleotides: set,
@@ -419,6 +449,8 @@ def generate_dnaio_fastq_files(
     tiles: list[str],
     taint: bool = False,
     sequences: list | None = None,
+    taint_count: int | None = None,
+    used_positions: set | None = None,
 ) -> list:
     """Generate FASTQ sequence files using the dnaio library for I/O.
 
@@ -433,6 +465,14 @@ def generate_dnaio_fastq_files(
             round-robin so that every tile is used at least once
         taint: If True, return ~10% of sequences for contamination simulation
         sequences: Pre-generated sequences to use
+        taint_count: If set (with taint=True), return exactly this many of the
+            first generated sequences instead of the ~10% random sample. The
+            copies are given unique (tile, x, y) positions in their names so
+            that they don't share a cluster coordinate with the original reads.
+        used_positions: Mutable set of (tile, x, y) tuples already taken by
+            this lane; when provided, every generated position is recorded in
+            it and copies drawn for taint_count are assigned the first free
+            position on their tile.
 
     Returns:
         List of sampled sequences for tainting (if taint=True), empty list otherwise
@@ -495,8 +535,13 @@ def generate_dnaio_fastq_files(
                 if read2_len
                 else None
             )
-            taint_flags = rng.random(n_chunk) < 0.1 if taint else None
+            collect_prefix = taint and taint_count is not None
+            taint_flags = (
+                rng.random(n_chunk) < 0.1 if taint and not collect_prefix else None
+            )
             for j in range(n_chunk):
+                if used_positions is not None:
+                    used_positions.add((tiles_c[j], int(x_c[j]), int(y_c[j])))
                 suffix = f"{tiles_c[j]}:{x_c[j]}:{y_c[j]}"
                 if umi1:
                     suffix += ":" + umi1_c[j]
@@ -520,8 +565,38 @@ def generate_dnaio_fastq_files(
                     )
                 writer.write(*reads)
 
-                # Collect ~10% of reads for taint contamination if enabled
-                if taint_flags is not None and taint_flags[j]:
+                # Collect reads for taint contamination if enabled
+                if collect_prefix:
+                    if len(sampled_sequences) < taint_count:
+                        # Copies are distinct clusters: give them the first
+                        # free (x, y) position on their tile so that no
+                        # cluster shares a coordinate with a sample read
+                        # (fastrewind collapses coordinates into the filter
+                        # matrices, which would drop one of the two)
+                        x_copy, y_copy = _first_free_position(
+                            used_positions, tiles_c[j]
+                        )
+                        copy_parts = suffix.split(":")
+                        copy_parts[1] = str(x_copy)
+                        copy_parts[2] = str(y_copy)
+                        copy_prefix = f"{prefix}:{':'.join(copy_parts)}"
+                        copies = [
+                            dnaio.SequenceRecord(
+                                name=f"{copy_prefix}{extension}",
+                                sequence=reads[0].sequence,
+                                qualities=reads[0].qualities,
+                            )
+                        ]
+                        if read2_len:
+                            copies.append(
+                                dnaio.SequenceRecord(
+                                    name=f"{copy_prefix}{extension_r2}",
+                                    sequence=reads[1].sequence,
+                                    qualities=reads[1].qualities,
+                                )
+                            )
+                        sampled_sequences.append(copies)
+                elif taint_flags is not None and taint_flags[j]:
                     sampled_sequences.append(reads)
 
     return sampled_sequences
@@ -601,6 +676,7 @@ def generate_undetermined_files(
     output_basepath: pathlib.Path,
     taint_sequences: dict[str, list],
     taint_rate: float = 0.1,
+    taint_count: int | None = None,
 ) -> None:
     """Generate Undetermined FASTQ files with tainted sequences from other samples.
 
@@ -608,10 +684,17 @@ def generate_undetermined_files(
     directory, containing approximately taint_rate*100% reads from other samples.
     This simulates index hopping/cross-project contamination (~10% by default).
 
+    With taint_count set, exactly that many reads are written to each lane using a
+    deterministic round-robin across the per-sample contributions (in sheet order),
+    so the selection is independent of --random-seed and can be asserted in tests.
+
     Args:
         output_basepath: Base output path containing lane directories
-        taint_sequences: Dict mapping lane_key to list of read samples from all projects
+        taint_sequences: Dict mapping lane_key to per-sample lists of read pairs
+            (lists of one or two SequenceRecords), in sheet order
         taint_rate: Fraction of reads to include in undetermined files (default 0.1 = 10%)
+        taint_count: Exact number of reads per lane; enables the deterministic
+            round-robin selection (no shuffling, no randomness)
     """
     for lane_key, sample_sequences in taint_sequences.items():
         # Extract lane number from key (format: S0_L001)
@@ -622,21 +705,46 @@ def generate_undetermined_files(
 
         lane_num = int(lane_match.group(1))
 
-        # Pool the read pairs (lists of one or two SequenceRecords) from all samples
-        # in this lane, keeping the R1/R2 pairing intact
-        all_read_pairs = []
-        for sample_list in sample_sequences:
-            for reads in sample_list:
-                all_read_pairs.append(reads if isinstance(reads, list) else [reads])
+        if taint_count is not None:
+            # Deterministic round-robin: cycle through the per-sample
+            # contributions in sheet order, taking one read pair per sample
+            # per round, until taint_count reads have been collected or every
+            # contribution is exhausted
+            pools = [list(sample_list) for sample_list in sample_sequences]
+            taint_pool = []
+            round_index = 0
+            while len(taint_pool) < taint_count:
+                progressed = False
+                for pool in pools:
+                    if round_index < len(pool):
+                        taint_pool.append(pool[round_index])
+                        progressed = True
+                    if len(taint_pool) >= taint_count:
+                        break
+                if not progressed:
+                    break
+                round_index += 1
+            if len(taint_pool) < taint_count:
+                logging.warning(
+                    f"Only {len(taint_pool)} of the requested {taint_count} "
+                    f"undetermined reads could be collected for lane {lane_num}"
+                )
+        else:
+            # Pool the read pairs (lists of one or two SequenceRecords) from all
+            # samples in this lane, keeping the R1/R2 pairing intact
+            all_read_pairs = []
+            for sample_list in sample_sequences:
+                for reads in sample_list:
+                    all_read_pairs.append(reads if isinstance(reads, list) else [reads])
 
-        if not all_read_pairs:
+            # Shuffle and take taint_rate fraction
+            rng.shuffle(all_read_pairs)
+            n_taint = max(1, int(len(all_read_pairs) * taint_rate))
+            taint_pool = all_read_pairs[:n_taint]
+
+        if not taint_pool:
             logging.debug(f"No taint sequences for lane {lane_num}")
             continue
-
-        # Shuffle and take taint_rate fraction
-        rng.shuffle(all_read_pairs)
-        n_taint = max(1, int(len(all_read_pairs) * taint_rate))
-        taint_pool = all_read_pairs[:n_taint]
 
         logging.info(
             f"Writing {len(taint_pool)} tainted sequences to Undetermined files for lane {lane_num}"
@@ -750,6 +858,14 @@ def main(args: argparse.Namespace) -> None:
         if sample_sheet:
             # unique_lanes = defaultdict(set)
             taint_sequences = defaultdict(list)
+            taint_count = getattr(args, "taint_count", None)
+            taint = args.taint or taint_count is not None
+            # Lanes record the (tile, x, y) positions of all their reads so
+            # that taint copies (with --taint-count) can be assigned unique
+            # cluster coordinates
+            used_positions = (
+                defaultdict(set) if taint_count is not None else None
+            )
             available_tiles = [
                 "".join(x)
                 for x in product(
@@ -820,6 +936,12 @@ def main(args: argparse.Namespace) -> None:
                     if not output_files[0].parent.is_dir():
                         output_files[0].parent.mkdir(parents=True, exist_ok=True)
 
+                    if taint_count is not None and recipe["I1"] == 0:
+                        # No-index designs are demultiplexed by position only,
+                        # so bcl-convert cannot keep their copies undetermined
+                        collect_taint = False
+                    else:
+                        collect_taint = taint
                     sampled_sequences = generate_dnaio_fastq_files(
                         output_files,
                         nucleotides,
@@ -828,13 +950,24 @@ def main(args: argparse.Namespace) -> None:
                         proj_prefix,
                         extension,
                         sample_tiles[(proj, sample)],
-                        args.taint,
+                        collect_taint,
+                        taint_count=taint_count if collect_taint else None,
+                        used_positions=(
+                            used_positions[lane_key]
+                            if used_positions is not None
+                            else None
+                        ),
                     )
                     taint_sequences.setdefault(lane_key, []).append(sampled_sequences)
 
-            # Generate Undetermined FASTQ files with tainted sequences if --taint is enabled
-            if args.taint and taint_sequences:
-                generate_undetermined_files(output_basepath, taint_sequences)
+            # Generate Undetermined FASTQ files with tainted sequences if taint
+            # is enabled (via --taint or --taint-count)
+            if taint and taint_sequences:
+                generate_undetermined_files(
+                    output_basepath,
+                    taint_sequences,
+                    taint_count=taint_count,
+                )
 
         else:
             sequences = generate_sequences_set(
