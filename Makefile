@@ -25,11 +25,11 @@ FLOWCELL_ID_NONE ?= $(FLOWCELL_ID)
 FLOWCELL_ID_SINGLE ?= 20261105_LM43896_0386_B98QWERTY6
 FLOWCELL_ID_DUAL ?= 20261105_LM43897_0387_C36MNBVCX7
 FLOWCELL_ID_MIX ?= 20261105_LM43898_0388_D74LKJHGF8
-SEQ_NUM = 10
+SEQ_NUM = 100
 # Number of undetermined reads written to the Undetermined files of each lane
 # with an indexed design (blabber --taint-count); lanes with a no-index design
 # are expected to have 0. Used by report_results to verify the bcl-convert output.
-TAINT_COUNT ?= 5
+TAINT_COUNT ?= 50
 
 RELEASE_DATA = DemuxCasesData.tar.gz
 RELEASE_DIR = $(basename $(basename $(RELEASE_DATA)))
