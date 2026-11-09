@@ -9,6 +9,7 @@ import re
 from collections import Counter
 
 import dnaio
+import polars
 
 try:
     import biomate_kernels
@@ -64,24 +65,32 @@ def parse_fastq_name(path: pathlib.Path) -> tuple[str, str]:
 
 @dataclasses.dataclass
 class FileScan:
-    """N-content scan of one FASTQ file.
+    """Aggregated N-content scan of one FASTQ file.
 
-    ``lanes``/``tiles``/``xs``/``ys``/``cycles`` are parallel lists over the
-    N-containing reads; ``cycles`` holds 1-based N positions. ``tile_totals``
-    maps (lane, tile) to the number of reads seen on that tile.
+    Counter lists are sorted and hold only non-zero entries; their size depends
+    on lanes x tiles x cycles, never on the number of reads:
+
+    * ``tiles``: (lane, tile, total, reads_with_n, n_bases)
+    * ``tile_cycle``: (lane, tile, cycle, reads_with_n), 1-based cycles
+    * ``n_per_read``: (lane, n_count, reads)
+    * ``spatial``: (lane, tile, x // bin_size, y // bin_size, reads_with_n)
     """
 
     path: pathlib.Path
     sample: str
     read: str
     format_error: int | None = None
-    lanes: list[int] = dataclasses.field(default_factory=list)
-    tiles: list[int] = dataclasses.field(default_factory=list)
-    xs: list[int] = dataclasses.field(default_factory=list)
-    ys: list[int] = dataclasses.field(default_factory=list)
-    cycles: list[list[int]] = dataclasses.field(default_factory=list)
-    tile_totals: dict[tuple[int, int], int] = dataclasses.field(default_factory=dict)
     max_len: int = 0
+    tiles: list[tuple[int, int, int, int, int]] = dataclasses.field(
+        default_factory=list
+    )
+    tile_cycle: list[tuple[int, int, int, int]] = dataclasses.field(
+        default_factory=list
+    )
+    n_per_read: list[tuple[int, int, int]] = dataclasses.field(default_factory=list)
+    spatial: list[tuple[int, int, int, int, int]] = dataclasses.field(
+        default_factory=list
+    )
 
     @property
     def stem(self) -> str:
@@ -91,14 +100,65 @@ class FileScan:
     @property
     def total_reads(self) -> int:
         """Number of reads scanned."""
-        return sum(self.tile_totals.values())
+        return sum(t[2] for t in self.tiles)
+
+    @property
+    def reads_with_n(self) -> int:
+        """Number of reads with at least one N."""
+        return sum(t[3] for t in self.tiles)
 
 
-def scan_file_python(path: pathlib.Path, threads: int = 0) -> FileScan:
-    """Scan one FASTQ with dnaio (reference implementation)."""
+class RawWriter:
+    """Stream per-read N records to ``<directory>/part-NNNNN.parquet`` in batches."""
+
+    def __init__(self, directory: pathlib.Path, batch_size: int = 1_000_000):
+        """Create the output directory and an empty batch."""
+        self.directory = directory
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.batch_size = batch_size
+        self.part = 0
+        self.rows: dict[str, list] = {
+            k: [] for k in ("lane", "tile", "x", "y", "cycles")
+        }
+
+    def add(self, lane: int, tile: int, x: int, y: int, cycles: list[int]) -> None:
+        """Buffer one N-containing read, flushing full batches."""
+        for key, value in zip(self.rows, (lane, tile, x, y, cycles)):
+            self.rows[key].append(value)
+        if len(self.rows["lane"]) >= self.batch_size:
+            self.flush()
+
+    def flush(self) -> None:
+        """Write buffered rows as the next part file."""
+        if not self.rows["lane"]:
+            return
+        polars.DataFrame(
+            self.rows,
+            schema={
+                "lane": polars.UInt8,
+                "tile": polars.UInt16,
+                "x": polars.UInt32,
+                "y": polars.UInt32,
+                "cycles": polars.List(polars.UInt16),
+            },
+        ).write_parquet(self.directory / f"part-{self.part:05d}.parquet")
+        self.part += 1
+        self.rows = {k: [] for k in self.rows}
+
+
+def scan_file_python(
+    path: pathlib.Path,
+    threads: int = 0,
+    bin_size: int = 1000,
+    raw: RawWriter | None = None,
+) -> FileScan:
+    """Scan one FASTQ with dnaio (reference implementation of the Rust kernel)."""
     sample, read = parse_fastq_name(path)
     scan = FileScan(path=path, sample=sample, read=read)
-    totals: Counter[tuple[int, int]] = Counter()
+    tiles: dict[tuple[int, int], list[int]] = {}
+    tile_cycle: Counter[tuple[int, int, int]] = Counter()
+    n_per_read: Counter[tuple[int, int]] = Counter()
+    spatial: Counter[tuple[int, int, int, int]] = Counter()
 
     with dnaio.open(path, open_threads=threads) as reader:
         for idx, record in enumerate(reader):
@@ -107,53 +167,90 @@ def scan_file_python(path: pathlib.Path, threads: int = 0) -> FileScan:
                 scan.format_error = idx
                 break
             lane, tile, x, y = coords
-            totals[(lane, tile)] += 1
             sequence = record.sequence
             if len(sequence) > scan.max_len:
                 scan.max_len = len(sequence)
-            if "N" in sequence:
-                scan.lanes.append(lane)
-                scan.tiles.append(tile)
-                scan.xs.append(x)
-                scan.ys.append(y)
-                scan.cycles.append([i + 1 for i, c in enumerate(sequence) if c == "N"])
+            acc = tiles.setdefault((lane, tile), [0, 0, 0])
+            acc[0] += 1
+            if "N" not in sequence:
+                continue
+            cycles = [i + 1 for i, c in enumerate(sequence) if c == "N"]
+            acc[1] += 1
+            acc[2] += len(cycles)
+            for cycle in cycles:
+                tile_cycle[(lane, tile, cycle)] += 1
+            n_per_read[(lane, len(cycles))] += 1
+            spatial[(lane, tile, x // bin_size, y // bin_size)] += 1
+            if raw is not None:
+                raw.add(lane, tile, x, y, cycles)
 
-    scan.tile_totals = dict(sorted(totals.items()))
+    if raw is not None:
+        raw.flush()
+    scan.tiles = sorted((lane, tile, *acc) for (lane, tile), acc in tiles.items())
+    scan.tile_cycle = sorted((*k, v) for k, v in tile_cycle.items())
+    scan.n_per_read = sorted((*k, v) for k, v in n_per_read.items())
+    scan.spatial = sorted((*k, v) for k, v in spatial.items())
     return scan
 
 
 def _from_kernel(path: pathlib.Path, result: tuple) -> FileScan:
     """Convert one ``biomate_kernels.scan_n_content`` tuple to a FileScan."""
-    fmt_err, lanes, tiles, xs, ys, cycles, totals, max_len = result
+    fmt_err, max_len, tiles, tile_cycle, n_per_read, spatial = result
     sample, read = parse_fastq_name(path)
     return FileScan(
         path=path,
         sample=sample,
         read=read,
         format_error=fmt_err,
-        lanes=list(lanes),
-        tiles=list(tiles),
-        xs=list(xs),
-        ys=list(ys),
-        cycles=[list(c) for c in cycles],
-        tile_totals={(lane, tile): count for lane, tile, count in totals},
         max_len=max_len,
+        tiles=[tuple(t) for t in tiles],
+        tile_cycle=[tuple(t) for t in tile_cycle],
+        n_per_read=[tuple(t) for t in n_per_read],
+        spatial=[tuple(t) for t in spatial],
     )
 
 
+def resolve_engine(engine: str) -> str:
+    """Map ``auto`` to ``rust`` when biomate_kernels imports, else ``python``."""
+    if engine == "auto":
+        return "rust" if biomate_kernels is not None else "python"
+    if engine == "rust" and biomate_kernels is None:
+        logging.warning(
+            "biomate_kernels is not available; falling back to the Python scan."
+        )
+        return "python"
+    return engine
+
+
 def scan_files(
-    paths: list[pathlib.Path], engine: str = "python", threads: int = 0
+    paths: list[pathlib.Path],
+    engine: str = "auto",
+    threads: int = 0,
+    bin_size: int = 1000,
+    raw_dir: pathlib.Path | None = None,
 ) -> list[FileScan]:
     """Scan every input file with the requested engine.
 
-    The Rust engine falls back to Python when ``biomate_kernels`` is missing.
+    With ``raw_dir`` set, per-read records are streamed to
+    ``raw_dir/<stem>_n_sequences/`` and the Python engine is used.
     """
-    if engine == "rust":
-        if biomate_kernels is None:
-            logging.warning(
-                "biomate_kernels is not available; falling back to the Python scan."
+    engine = resolve_engine(engine)
+    if raw_dir is not None:
+        # shortcut: raw export only in the Python engine; add a Rust writer if --raw is used on big runs
+        if engine == "rust":
+            logging.info("--raw uses the Python scan engine.")
+        return [
+            scan_file_python(
+                p,
+                threads,
+                bin_size,
+                RawWriter(raw_dir / f"{fastq_stem(p)}_n_sequences"),
             )
-        else:
-            results = biomate_kernels.scan_n_content([str(p) for p in paths], threads)
-            return [_from_kernel(p, r) for p, r in zip(paths, results)]
-    return [scan_file_python(p, threads) for p in paths]
+            for p in paths
+        ]
+    if engine == "rust":
+        results = biomate_kernels.scan_n_content(
+            [str(p) for p in paths], threads, bin_size
+        )
+        return [_from_kernel(p, r) for p, r in zip(paths, results)]
+    return [scan_file_python(p, threads, bin_size) for p in paths]

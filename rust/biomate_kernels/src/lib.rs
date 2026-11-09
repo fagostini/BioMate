@@ -335,41 +335,43 @@ impl IndexPattern {
     }
 }
 
-/// Per-file N-content scan result (nspector).
-///
-/// `format_error` is the 0-based index of the first record whose name fails
-/// coordinate parsing; when set, the reference implementation stops reading
-/// the file and skips it entirely (parity: data after the error is neither
-/// produced nor needed). Every record header is parsed, because every record
-/// contributes to the per-tile totals.
-///
-/// `lanes`/`tiles`/`xs`/`ys`/`n_positions` are parallel: entry `i` describes
-/// the i-th N-containing record (records without Ns are omitted). Positions
-/// are 1-based sequencing cycles.
-///
-/// `tile_totals` holds `(lane, tile, reads)` for every record, sorted by
-/// `(lane, tile)`; `max_len` is the longest sequence seen.
-struct FileScan {
-    format_error: Option<usize>,
-    lanes: Vec<i32>,
-    tiles: Vec<i32>,
-    xs: Vec<i32>,
-    ys: Vec<i32>,
-    n_positions: Vec<Vec<u16>>,
-    tile_totals: Vec<(i32, i32, u64)>,
-    max_len: u32,
+/// Per-tile accumulator for one FASTQ file (nspector).
+#[derive(Default)]
+struct TileAcc {
+    total: u64,
+    reads_with_n: u64,
+    n_bases: u64,
+    /// reads with an N at cycle `i + 1`
+    cycles: Vec<u64>,
 }
 
-/// Python tuple returned per file by `scan_n_content`.
+/// Per-file N-content scan result (nspector), aggregated while streaming.
+///
+/// Memory depends on lanes × tiles × cycles (plus occupied spatial bins),
+/// never on the number of reads. `format_error` is the 0-based index of the
+/// first record whose name fails coordinate parsing; the file is then
+/// abandoned, exactly like the Python reference.
+struct FileScan {
+    format_error: Option<usize>,
+    max_len: u32,
+    tiles: HashMap<(i32, i32), TileAcc>,
+    n_per_read: HashMap<(i32, u32), u64>,
+    spatial: HashMap<(i32, i32, i32, i32), u64>,
+}
+
+/// Python tuple returned per file by `scan_n_content`:
+/// `(format_error, max_len, tiles, tile_cycle, n_per_read, spatial)` with
+/// `tiles = [(lane, tile, total, reads_with_n, n_bases)]`,
+/// `tile_cycle = [(lane, tile, cycle, reads_with_n)]` (1-based, non-zero only),
+/// `n_per_read = [(lane, n_count, reads)]`,
+/// `spatial = [(lane, tile, x // bin, y // bin, reads_with_n)]`, all sorted.
 type ScanTuple = (
     Option<usize>,
-    Vec<i32>,
-    Vec<i32>,
-    Vec<i32>,
-    Vec<i32>,
-    Vec<Vec<u16>>,
-    Vec<(i32, i32, u64)>,
     u32,
+    Vec<(i32, i32, u64, u64, u64)>,
+    Vec<(i32, i32, u32, u64)>,
+    Vec<(i32, u32, u64)>,
+    Vec<(i32, i32, i32, i32, u64)>,
 );
 
 /// Port of `biomate.nspector.scan.extract_tile_coordinates`.
@@ -391,114 +393,209 @@ fn parse_tile_coordinates(name: &str) -> Option<(i32, i32, i32, i32)> {
     Some((lane, tile, x, y))
 }
 
-/// Scan one FASTQ (`.gz` suffix => gzip) for N-containing records.
+/// `Read` adapter fed by a background thread that decompresses ahead, so
+/// gzip inflation and FASTQ parsing run on two cores for a single file.
+struct ChannelReader {
+    rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl ChannelReader {
+    fn spawn<R: std::io::Read + Send + 'static>(mut inner: R) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        std::thread::spawn(move || loop {
+            let mut chunk = vec![0u8; 1 << 20];
+            let mut filled = 0;
+            while filled < chunk.len() {
+                match inner.read(&mut chunk[filled..]) {
+                    Ok(0) => break,
+                    Ok(n) => filled += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                }
+            }
+            chunk.truncate(filled);
+            let done = filled == 0;
+            if tx.send(Ok(chunk)).is_err() || done {
+                return; // receiver gone (early stop) or EOF sent
+            }
+        });
+        ChannelReader { rx, buf: Vec::new(), pos: 0 }
+    }
+}
+
+impl std::io::Read for ChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos == self.buf.len() {
+            match self.rx.recv() {
+                Ok(Ok(chunk)) => {
+                    self.buf = chunk;
+                    self.pos = 0;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = out.len().min(self.buf.len() - self.pos);
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+fn trim_eol(line: &[u8]) -> &[u8] {
+    let mut end = line.len();
+    while end > 0 && (line[end - 1] == b'\n' || line[end - 1] == b'\r') {
+        end -= 1;
+    }
+    &line[..end]
+}
+
+/// Scan one FASTQ (`.gz` suffix => gzip) and aggregate N counters.
 ///
 /// Line protocol: `@name` / sequence / `+` / qualities. A name line not
 /// starting with `@`, or a truncated final record, is a hard error (the
 /// reference raises a `dnaio` format error in the same situations).
-fn scan_fastq_file(path: &str) -> Result<FileScan, String> {
+fn scan_fastq_file(path: &str, bin_size: i32) -> Result<FileScan, String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut reader: Box<dyn BufRead> = if path.ends_with(".gz") {
-        Box::new(std::io::BufReader::new(GzDecoder::new(file)))
+        Box::new(std::io::BufReader::with_capacity(
+            1 << 20,
+            ChannelReader::spawn(GzDecoder::new(std::io::BufReader::new(file))),
+        ))
     } else {
-        Box::new(std::io::BufReader::new(file))
+        Box::new(std::io::BufReader::with_capacity(1 << 20, file))
     };
 
     let mut out = FileScan {
         format_error: None,
-        lanes: Vec::new(),
-        tiles: Vec::new(),
-        xs: Vec::new(),
-        ys: Vec::new(),
-        n_positions: Vec::new(),
-        tile_totals: Vec::new(),
         max_len: 0,
+        tiles: HashMap::new(),
+        n_per_read: HashMap::new(),
+        spatial: HashMap::new(),
     };
-    let mut totals: HashMap<(i32, i32), u64> = HashMap::new();
-    let mut name_line = String::new();
-    let mut line = String::new();
+    let mut name_line: Vec<u8> = Vec::new();
+    let mut seq_line: Vec<u8> = Vec::new();
+    let mut line: Vec<u8> = Vec::new();
     let mut record_idx = 0usize;
 
     loop {
         name_line.clear();
         let n = reader
-            .read_line(&mut name_line)
+            .read_until(b'\n', &mut name_line)
             .map_err(|e| e.to_string())?;
         if n == 0 {
             break; // clean EOF
         }
-        if !name_line.starts_with('@') {
+        if !name_line.starts_with(b"@") {
             return Err(format!(
                 "malformed FASTQ at record {record_idx}: name line missing '@'"
             ));
         }
-        // sequence: scan for N positions immediately (line is reused below)
-        line.clear();
-        reader.read_line(&mut line).map_err(|e| e.to_string())?;
-        let seq = line.trim_end_matches(['\n', '\r']);
-        let seq_len = seq.len() as u32;
-        let positions: Vec<u16> = seq
-            .bytes()
-            .enumerate()
-            .filter(|(_, b)| *b == b'N')
-            .map(|(i, _)| (i + 1) as u16)
-            .collect();
+        seq_line.clear();
+        reader
+            .read_until(b'\n', &mut seq_line)
+            .map_err(|e| e.to_string())?;
         // '+' separator
         line.clear();
-        reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        reader.read_until(b'\n', &mut line).map_err(|e| e.to_string())?;
         // qualities
         line.clear();
-        let nq = reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        let nq = reader.read_until(b'\n', &mut line).map_err(|e| e.to_string())?;
         if nq == 0 {
             return Err(format!("truncated FASTQ at record {record_idx}"));
         }
 
         // dnaio strips the leading '@' from record.name
-        let rec_name = &name_line.trim_end_matches(['\n', '\r'])[1..];
+        let rec_name = std::str::from_utf8(&trim_eol(&name_line)[1..]).unwrap_or("");
+        let Some((lane, tile, x, y)) = parse_tile_coordinates(rec_name) else {
+            out.format_error = Some(record_idx);
+            break; // reference stops reading this file
+        };
 
-        match parse_tile_coordinates(rec_name) {
-            Some((lane, tile, x, y)) => {
-                *totals.entry((lane, tile)).or_insert(0) += 1;
-                out.max_len = out.max_len.max(seq_len);
-                if !positions.is_empty() {
-                    out.lanes.push(lane);
-                    out.tiles.push(tile);
-                    out.xs.push(x);
-                    out.ys.push(y);
-                    out.n_positions.push(positions);
+        let seq = trim_eol(&seq_line);
+        out.max_len = out.max_len.max(seq.len() as u32);
+        let acc = out.tiles.entry((lane, tile)).or_default();
+        acc.total += 1;
+
+        let mut n_count = 0u32;
+        for (i, b) in seq.iter().enumerate() {
+            if *b == b'N' {
+                if acc.cycles.len() <= i {
+                    acc.cycles.resize(i + 1, 0);
                 }
+                acc.cycles[i] += 1;
+                n_count += 1;
             }
-            None => {
-                out.format_error = Some(record_idx);
-                break; // reference stops reading this file
-            }
+        }
+        if n_count > 0 {
+            acc.reads_with_n += 1;
+            acc.n_bases += n_count as u64;
+            *out.n_per_read.entry((lane, n_count)).or_insert(0) += 1;
+            *out
+                .spatial
+                .entry((lane, tile, x / bin_size, y / bin_size))
+                .or_insert(0) += 1;
         }
         record_idx += 1;
     }
-    let mut tile_totals: Vec<(i32, i32, u64)> =
-        totals.into_iter().map(|((l, t), c)| (l, t, c)).collect();
-    tile_totals.sort_unstable();
-    out.tile_totals = tile_totals;
     Ok(out)
+}
+
+fn to_tuple(s: FileScan) -> ScanTuple {
+    let mut tiles = Vec::with_capacity(s.tiles.len());
+    let mut tile_cycle = Vec::new();
+    for ((lane, tile), acc) in s.tiles {
+        tiles.push((lane, tile, acc.total, acc.reads_with_n, acc.n_bases));
+        for (i, c) in acc.cycles.iter().enumerate() {
+            if *c > 0 {
+                tile_cycle.push((lane, tile, (i + 1) as u32, *c));
+            }
+        }
+    }
+    tiles.sort_unstable();
+    tile_cycle.sort_unstable();
+    let mut n_per_read: Vec<_> = s.n_per_read.into_iter().map(|((l, n), c)| (l, n, c)).collect();
+    n_per_read.sort_unstable();
+    let mut spatial: Vec<_> = s
+        .spatial
+        .into_iter()
+        .map(|((l, t, xb, yb), c)| (l, t, xb, yb, c))
+        .collect();
+    spatial.sort_unstable();
+    (s.format_error, s.max_len, tiles, tile_cycle, n_per_read, spatial)
 }
 
 /// Scan N content of one or more FASTQ files.
 ///
 /// `paths` are processed by up to `threads` OS threads (work-stealing over
-/// the list); results come back in input order. Returns, per file:
-/// `(format_error, lanes, tiles, xs, ys, n_positions, tile_totals, max_len)`
-/// (see `FileScan`).
+/// the list); results come back in input order, one `ScanTuple` per file.
+/// `bin_size` is the spatial bin width in read-name coordinate units.
 #[pyfunction]
-fn scan_n_content(paths: Vec<String>, threads: u32) -> PyResult<Vec<ScanTuple>> {
+#[pyo3(signature = (paths, threads, bin_size=1000))]
+fn scan_n_content(
+    py: Python<'_>,
+    paths: Vec<String>,
+    threads: u32,
+    bin_size: i32,
+) -> PyResult<Vec<ScanTuple>> {
+    if bin_size < 1 {
+        return Err(PyValueError::new_err("bin_size must be >= 1"));
+    }
     let n = paths.len();
     if n == 0 {
         return Ok(Vec::new());
     }
     let nthreads = (threads.max(1) as usize).min(n);
 
-    let scanned: Vec<Result<FileScan, String>> = if nthreads <= 1 {
-        paths.iter().map(|p| scan_fastq_file(p)).collect()
-    } else {
+    let scanned: Vec<Result<FileScan, String>> = py.detach(|| {
+        if nthreads <= 1 {
+            return paths.iter().map(|p| scan_fastq_file(p, bin_size)).collect();
+        }
         let paths = Arc::new(paths);
         let next = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = std::sync::mpsc::channel();
@@ -512,7 +609,7 @@ fn scan_n_content(paths: Vec<String>, threads: u32) -> PyResult<Vec<ScanTuple>> 
                 if i >= n {
                     break;
                 }
-                tx.send((i, scan_fastq_file(&paths[i]))).ok();
+                tx.send((i, scan_fastq_file(&paths[i], bin_size))).ok();
             }));
         }
         drop(tx);
@@ -524,23 +621,11 @@ fn scan_n_content(paths: Vec<String>, threads: u32) -> PyResult<Vec<ScanTuple>> 
             out[i] = Some(r);
         }
         out.into_iter().map(|o| o.expect("result for every index")).collect()
-    };
+    });
 
     scanned
         .into_iter()
-        .map(|r| match r {
-            Ok(s) => Ok((
-                s.format_error,
-                s.lanes,
-                s.tiles,
-                s.xs,
-                s.ys,
-                s.n_positions,
-                s.tile_totals,
-                s.max_len,
-            )),
-            Err(e) => Err(PyValueError::new_err(e)),
-        })
+        .map(|r| r.map(to_tuple).map_err(PyValueError::new_err))
         .collect()
 }
 

@@ -18,16 +18,17 @@ The minimal command is `biomate nspector --input <FASTQ_FILE> [<FASTQ_FILE> ...]
 ```bash
 biomate nspector \
     --input Run1/SampleA_S1_L00{1,2}_R{1,2}_001.fastq.gz Run1/SampleB_S2_L00{1,2}_R{1,2}_001.fastq.gz \
-    --output ./nspector_results --engine rust
+    --output ./nspector_results
 ```
 
 ## Options
 
 - `--input`: one or more FASTQ files (`.fastq`, `.fq`, optionally gzipped). Required.
 - `--output`: output directory, created if missing (default: `./output`).
-- `--engine`: `python` (default) or `rust`. `rust` uses the native `biomate_kernels` scanner and falls back to Python if it is not installed. Both engines produce identical results.
-- `--threads`: extra decompression threads (Python engine) or parallel files (Rust engine).
-- `--spatial-bins`: grid size per axis for the per-tile spatial maps (default: `50`). Lower it if the report gets large.
+- `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` falls back to Python with a warning. Both engines produce identical results.
+- `--threads`: extra decompression threads (Python engine) or files scanned in parallel (Rust engine). The Rust engine always decompresses each gzip file on its own thread, ahead of parsing.
+- `--spatial-bin-size`: width of the spatial bins in read-name X/Y coordinate units (default: `1000`). Raise it if the report gets large.
+- `--raw`: also write every N-containing read (lane, tile, X, Y, N cycles) as Parquet parts under `<stem>_n_sequences/`. This output grows with the number of reads and always uses the Python engine.
 - `--png`: also write the static PNG charts for each input file.
 - `--no-html`: skip the HTML report.
 - `--no-multiqc`: skip the MultiQC files.
@@ -70,7 +71,12 @@ Under the charts, the page lists:
 - the cycles with the highest N rate;
 - each input file with its read counts.
 
-If the spatial data would exceed about 300,000 rows, only the tiles with the highest N rate keep a spatial map, and a warning is logged.
+The embedded data depends on lanes, tiles and cycles, not on the number of reads. Two budgets keep it bounded:
+
+- If the spatial data would exceed about 300,000 rows, only the tiles with the highest N rate keep a spatial map.
+- If the tile × cycle data would exceed about 200,000 rows, cycles are merged into fixed windows in the report. The Parquet table keeps every cycle.
+
+Both log a warning. With more than 200 samples, the cycle chart shows the median and interquartile range across samples, and draws only the samples you click. Charts render on a canvas, which stays fast with large heatmaps.
 
 ## Tables
 
@@ -83,7 +89,7 @@ Each table is written as `nspector_<table>.parquet`:
 | `tile_summary` | sample, read, lane, tile | `surface`, `swath`, `segment`, `n`, `n_bases`, `total`, `n_rate`, `mean_n_per_affected_read` |
 | `tile_cycle` | read, lane, tile, cycle (summed over samples; only cycles with an N) | `n`, `total`, `n_rate` |
 | `n_per_read` | sample, read, lane, number of N bases | `n_reads` |
-| `spatial` | read, lane, tile, `x_bin`, `y_bin` (summed over samples) | `n` |
+| `spatial` | read, lane, tile, `x_bin`, `y_bin` (summed over samples; bin = coordinate // `--spatial-bin-size`) | `n` |
 
 In these tables:
 
@@ -91,7 +97,13 @@ In these tables:
 - `n_bases` is the number of N base calls.
 - `total` is the number of reads scanned.
 
-The raw per-file data (one row per N base, with tile, X, Y and cycle) is also kept as `<stem>_n_sequences.parquet`.
+All tables are aggregated while the files are read, so memory use does not grow with the number of reads. Per-read data is only written with `--raw`:
+
+```python
+import polars as pl
+
+raw = pl.read_parquet("nspector_results/SampleA_S1_L001_R1_001_n_sequences/*.parquet")
+```
 
 Example queries:
 
@@ -144,7 +156,7 @@ nspector_results/
 ├── nspector_tile_cycle.parquet
 ├── nspector_n_per_read.parquet
 ├── nspector_spatial.parquet
-├── SampleA_S1_L001_R1_001_n_sequences.parquet
+├── SampleA_S1_L001_R1_001_n_sequences/   # only with --raw
 ├── ...
 ├── multiqc/
 │   ├── nspector_tile_rate_mqc.json

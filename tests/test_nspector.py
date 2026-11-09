@@ -11,7 +11,6 @@ import pytest
 from tests.conftest import illumina_header, write_fastq_gz
 from biomate.nspector import nspector
 from biomate.nspector.nspector import (
-    exploded_frame,
     plot_individual_tiles,
     plot_n_per_cycle_and_tile,
     plot_n_per_sequence,
@@ -116,8 +115,8 @@ class TestScan:
         )
         scan = scan_file_python(path)
         assert scan.format_error is None
-        assert scan.cycles == [[1], [5]]
-        assert scan.tile_totals == {(1, 1101): 3, (1, 1102): 1}
+        assert scan.tile_cycle == [(1, 1101, 1, 1), (1, 1101, 5, 1)]
+        assert scan.tiles == [(1, 1101, 3, 2, 2), (1, 1102, 1, 0, 0)]
         assert scan.max_len == 6
         assert scan.total_reads == 4
         assert (scan.sample, scan.read) == ("S", "R1")
@@ -146,7 +145,7 @@ class TestTables:
 
     @pytest.fixture()
     def tables(self, run_files):
-        return build_tables(scan_files(run_files), spatial_bins=4)
+        return build_tables(scan_files(run_files, bin_size=25), bin_size=25)
 
     def test_sample_lane_rates(self, tables):
         row = tables.sample_lane.filter(
@@ -195,9 +194,10 @@ class TestTables:
         )
         assert dict(zip(hist["n_count"], hist["n_reads"])) == {1: 1, 2: 4}
 
-    def test_spatial_bins_in_range(self, tables):
-        assert tables.spatial["x_bin"].max() < 4
-        assert tables.spatial["y_bin"].max() < 4
+    def test_spatial_bins_use_coordinate_width(self, tables):
+        # fixture x = 100..170, y = 500..549, bin width 25
+        assert set(tables.spatial["x_bin"]) <= {4, 5, 6}
+        assert set(tables.spatial["y_bin"]) <= {20, 21}
         assert tables.spatial["n"].sum() == tables.tile_summary["n"].sum()
 
     def test_select_spatial_trims_to_worst_tiles(self, tables):
@@ -227,7 +227,7 @@ class TestReport:
     @pytest.fixture()
     def built(self, run_files):
         scans = scan_files(run_files)
-        return scans, build_tables(scans, spatial_bins=4)
+        return scans, build_tables(scans, bin_size=25)
 
     def test_chart_has_linked_params(self, built):
         spec = build_chart(built[1]).to_dict()
@@ -236,6 +236,39 @@ class TestReport:
         text = json.dumps(spec)
         for selection in ("pick_sample", "pick_tile", "cycle_brush"):
             assert selection in text
+
+    def test_many_samples_use_median_band(self, built, monkeypatch):
+        from biomate.nspector import report
+
+        monkeypatch.setattr(report, "MANY_SAMPLES", 1)
+        text = json.dumps(build_chart(built[1]).to_dict())
+        assert '"op": "median"' in text and "q3" in text
+
+    def test_tile_cycle_windows_when_large(self, built):
+        from biomate.nspector.report import window_tile_cycle
+
+        tables = built[1]
+        assert tables.tile_cycle.height == 4
+        frame, window = window_tile_cycle(tables, max_rows=3)
+        assert window > 1 and frame.height == 3
+        # 3 lane/tile groups cannot fit in 2 rows: stops at one window per tile
+        frame, window = window_tile_cycle(tables, max_rows=2)
+        assert window == 8 and frame.height == 3
+        same, one = window_tile_cycle(tables)
+        assert one == 1 and same.height == tables.tile_cycle.height
+
+    def test_report_above_altair_row_limit(self, tmp_path):
+        """More than Altair's default 5000 rows must not raise MaxRowsError."""
+        path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+        write_fastq_gz(path, [_rec("NA", x=str(i), y=str(i)) for i in range(6000)])
+        scans = scan_files([path], "python", bin_size=1)
+        tables = build_tables(scans, bin_size=1)
+        assert tables.spatial.height == 6000
+        assert write_report(scans, tables, tmp_path).is_file()
+
+    def test_report_uses_canvas(self, built, tmp_path):
+        html = write_report(*built, tmp_path).read_text()
+        assert '"renderer": "canvas"' in html
 
     def test_report_is_self_contained(self, built, tmp_path):
         path = write_report(*built, tmp_path)
@@ -275,7 +308,9 @@ class TestReport:
 class TestValidateArgs:
     """Tests for validate_args."""
 
-    def _make_args(self, tmp_path, input_files=None, output=None, spatial_bins=50):
+    def _make_args(
+        self, tmp_path, input_files=None, output=None, spatial_bin_size=1000
+    ):
         """Create valid input files and a Namespace pointing at them."""
         if input_files is None:
             f = tmp_path / "sample.fastq.gz"
@@ -284,7 +319,7 @@ class TestValidateArgs:
         if output is None:
             output = tmp_path / "output"
         return argparse.Namespace(
-            input=input_files, output=output, spatial_bins=spatial_bins
+            input=input_files, output=output, spatial_bin_size=spatial_bin_size
         )
 
     def test_valid_args_returned(self, tmp_path):
@@ -315,9 +350,9 @@ class TestValidateArgs:
         with pytest.raises(argparse.ArgumentTypeError, match="directory"):
             validate_args(args)
 
-    def test_spatial_bins_must_be_positive(self, tmp_path):
-        args = self._make_args(tmp_path, spatial_bins=0)
-        with pytest.raises(argparse.ArgumentTypeError, match="spatial-bins"):
+    def test_spatial_bin_size_must_be_positive(self, tmp_path):
+        args = self._make_args(tmp_path, spatial_bin_size=0)
+        with pytest.raises(argparse.ArgumentTypeError, match="spatial-bin-size"):
             validate_args(args)
 
 
@@ -332,7 +367,8 @@ def _main_args(files, output, **kwargs):
         output=output,
         threads=0,
         engine="python",
-        spatial_bins=10,
+        spatial_bin_size=25,
+        raw=False,
         png=False,
         no_html=False,
         no_multiqc=False,
@@ -358,9 +394,22 @@ class TestMain:
         assert (out / "nspector_report.html").is_file()
         assert (out / "multiqc" / "nspector_tile_rate_mqc.json").is_file()
         assert (out / "nspector_tile_cycle.parquet").is_file()
-        assert (out / "SampA_S1_L001_R1_001_n_sequences.parquet").is_file()
+        assert not (out / "SampA_S1_L001_R1_001_n_sequences").exists()
         assert not (out / "individual_tiles").exists()
         assert not list(out.glob("*.png"))
+
+    def test_raw_streams_parts(self, run_files, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        nspector.main(
+            _main_args(run_files[:1], out, raw=True, no_html=True, no_multiqc=True)
+        )
+        raw = polars.read_parquet(
+            out / "SampA_S1_L001_R1_001_n_sequences" / "*.parquet"
+        )
+        # 1 read with an N at cycle 1 plus 4 tile-1102 reads with Ns at 7 and 8
+        assert raw.height == 5
+        assert sorted(raw["cycles"].to_list()) == [[1], [7, 8], [7, 8], [7, 8], [7, 8]]
 
     def test_opt_outs(self, run_files, tmp_path):
         out = tmp_path / "out"
@@ -390,53 +439,52 @@ class TestPlotFunctions:
     """Tests for the PNG plot functions: file creation and determinism."""
 
     @pytest.fixture()
-    def data(self) -> polars.DataFrame:
-        scan = FileScan(
-            path=pathlib.Path("x_R1_001.fastq.gz"),
-            sample="x",
-            read="R1",
-            lanes=[1] * 6,
-            tiles=[1101, 1101, 1101, 1102, 1102, 1103],
-            xs=[1, 1, 2, 5, 5, 9],
-            ys=[1, 2, 1, 3, 4, 2],
-            cycles=[[1, 2], [3], [5], [2], [4, 6], [1]],
-            tile_totals={(1, 1101): 3, (1, 1102): 2, (1, 1103): 1},
-            max_len=6,
-        )
-        return exploded_frame(scan)
+    def scan(self, tmp_path) -> FileScan:
+        path = tmp_path / "x_R1_001.fastq.gz"
+        records = [
+            _rec("NNACGT", tile="1101", x="1", y="1"),
+            _rec("ACNCGT", tile="1101", x="1", y="2"),
+            _rec("ACGTNC", tile="1101", x="2", y="1"),
+            _rec("ANGTAC", tile="1102", x="5", y="3"),
+            _rec("ACGNAN", tile="1102", x="5", y="4"),
+            _rec("NCGTAC", tile="1103", x="9", y="2"),
+            _rec("ACGTAC", tile="1103", x="9", y="9"),
+        ]
+        write_fastq_gz(path, records)
+        return scan_file_python(path, bin_size=2)
 
-    def test_plot_n_per_sequence_creates_file(self, tmp_path, data):
+    def test_plot_n_per_sequence_creates_file(self, tmp_path, scan):
         out = tmp_path / "n_count.png"
-        plot_n_per_sequence(data, out)
+        plot_n_per_sequence(scan, out)
         assert out.stat().st_size > 0
 
-    def test_plot_n_per_cycle_and_tile_creates_file(self, tmp_path, data):
+    def test_plot_n_per_cycle_and_tile_creates_file(self, tmp_path, scan):
         out = tmp_path / "n_cycle_tile.png"
-        plot_n_per_cycle_and_tile(data, out, max_cycle=6)
+        plot_n_per_cycle_and_tile(scan, out)
         assert out.stat().st_size > 0
 
-    def test_plot_individual_tiles_creates_one_file_per_tile(self, tmp_path, data):
-        plot_individual_tiles(data, tmp_path, "x_R1_001")
+    def test_plot_individual_tiles_creates_one_file_per_tile(self, tmp_path, scan):
+        plot_individual_tiles(scan, tmp_path, 2)
         assert {p.name for p in (tmp_path / "individual_tiles").iterdir()} == {
             "x_R1_001_tile_1101.png",
             "x_R1_001_tile_1102.png",
             "x_R1_001_tile_1103.png",
         }
 
-    def test_plots_are_deterministic(self, tmp_path, data):
+    def test_plots_are_deterministic(self, tmp_path, scan):
         """Rendering the same data twice yields byte-identical PNGs."""
         runs = [tmp_path / "run_a", tmp_path / "run_b"]
         for run in runs:
             run.mkdir()
-            plot_n_per_sequence(data, run / "n_count.png")
-            plot_n_per_cycle_and_tile(data, run / "n_cycle_tile.png", max_cycle=6)
-            plot_individual_tiles(data, run, "x")
+            plot_n_per_sequence(scan, run / "n_count.png")
+            plot_n_per_cycle_and_tile(scan, run / "n_cycle_tile.png")
+            plot_individual_tiles(scan, run, 2)
 
         for name in [
             "n_count.png",
             "n_cycle_tile.png",
-            "individual_tiles/x_tile_1101.png",
-            "individual_tiles/x_tile_1102.png",
-            "individual_tiles/x_tile_1103.png",
+            "individual_tiles/x_R1_001_tile_1101.png",
+            "individual_tiles/x_R1_001_tile_1102.png",
+            "individual_tiles/x_R1_001_tile_1103.png",
         ]:
             assert (runs[0] / name).read_bytes() == (runs[1] / name).read_bytes(), name

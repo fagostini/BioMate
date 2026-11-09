@@ -6,6 +6,7 @@ import datetime
 import html
 import json
 import logging
+import math
 import pathlib
 
 import altair as alt
@@ -17,6 +18,12 @@ from biomate.nspector.tables import NspectorTables
 # Upper bound on spatial rows embedded in the report; beyond this only the
 # tiles with the highest N rate keep their spatial map.
 MAX_SPATIAL_ROWS = 300_000
+# Upper bound on tile x cycle rows embedded in the report; beyond this cycles
+# are merged into fixed windows (the Parquet table keeps full detail).
+MAX_TILE_CYCLE_ROWS = 200_000
+# Above this many samples the cycle chart shows a median/IQR band and only
+# draws the clicked samples as lines.
+MANY_SAMPLES = 200
 # Inlined data above this size triggers a warning (browsers slow down).
 SIZE_WARNING_BYTES = 20 * 1024 * 1024
 
@@ -51,10 +58,45 @@ def select_spatial(tables: NspectorTables, max_rows: int = MAX_SPATIAL_ROWS):
     )
     logging.warning(
         f"Spatial data has {spatial.height} rows; the report keeps the "
-        f"{ranked.height} tiles with the highest N rate. Use a smaller "
-        "--spatial-bins to include every tile."
+        f"{ranked.height} tiles with the highest N rate. Use a larger "
+        "--spatial-bin-size to include every tile."
     )
     return spatial.join(ranked, on=["read", "lane", "tile"], how="semi")
+
+
+def window_tile_cycle(
+    tables: NspectorTables, max_rows: int = MAX_TILE_CYCLE_ROWS
+) -> tuple[polars.DataFrame, int]:
+    """Return the tile x cycle rows to embed and the cycle window size.
+
+    Cycles are merged into windows of ``w`` cycles until the table fits;
+    ``n`` becomes the mean per cycle so rates stay comparable.
+    """
+    frame = tables.tile_cycle.select("read", "lane", "tile", "cycle", "n", "total")
+    if frame.height <= max_rows:
+        return frame, 1
+    window = math.ceil(frame.height / max_rows)
+    max_cycle = int(frame["cycle"].max())
+    while True:
+        merged = (
+            frame.with_columns(
+                ((polars.col("cycle") - 1) // window * window + 1).alias("cycle")
+            )
+            .group_by("read", "lane", "tile", "cycle")
+            .agg(
+                (polars.col("n").sum() / window).alias("n"), polars.col("total").first()
+            )
+            .sort("read", "lane", "tile", "cycle")
+        )
+        # one window per tile is the floor; tiles alone may exceed the budget
+        if merged.height <= max_rows or window >= max_cycle:
+            break
+        window = min(window * 2, max_cycle)
+    logging.warning(
+        f"Tile x cycle data has {frame.height} rows; the report merges cycles "
+        f"into windows of {window}. The Parquet table keeps every cycle."
+    )
+    return merged, window
 
 
 def _tile_layout_calcs(chart: alt.Chart) -> alt.Chart:
@@ -130,34 +172,76 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
     )
 
     # -- B: per-sample N rate along the read, with cycle brush --------------
-    sample_cycle = (
+    cycle_base = (
         alt.Chart(
             tables.sample_cycle.select("sample", "read", "lane", "cycle", "n", "total")
         )
         .transform_filter(LANE_READ_FILTER)
         .transform_calculate(value=VALUE_EXPR, rate="datum.n / datum.total")
-        .mark_line(interpolate="step-after")
-        .encode(
-            x=alt.X("cycle:Q", title="Cycle (drag to select a window)"),
-            y=alt.Y("value:Q", title=_value_title()),
-            detail="sample:N",
-            color=alt.when(pick_sample, empty=False)
-            .then(alt.value("#d62728"))
-            .otherwise(alt.value("#4c78a8")),
-            opacity=alt.when(pick_sample)
-            .then(alt.value(0.9))
-            .otherwise(alt.value(0.15)),
-            tooltip=["sample:N", "cycle:Q", *rate_tooltip],
-        )
-        .add_params(cycle_brush)
-        .properties(title="N per cycle, one line per sample", width=560, height=240)
     )
+    cycle_x = alt.X("cycle:Q", title="Cycle (drag to select a window)")
+    if n_samples <= MANY_SAMPLES:
+        sample_cycle = (
+            cycle_base.mark_line(interpolate="step-after")
+            .encode(
+                x=cycle_x,
+                y=alt.Y("value:Q", title=_value_title()),
+                detail="sample:N",
+                color=alt.when(pick_sample, empty=False)
+                .then(alt.value("#d62728"))
+                .otherwise(alt.value("#4c78a8")),
+                opacity=alt.when(pick_sample)
+                .then(alt.value(0.9))
+                .otherwise(alt.value(0.15)),
+                tooltip=["sample:N", "cycle:Q", *rate_tooltip],
+            )
+            .add_params(cycle_brush)
+            .properties(title="N per cycle, one line per sample")
+        )
+    else:
+        stats = cycle_base.transform_aggregate(
+            median="median(value)",
+            q1="q1(value)",
+            q3="q3(value)",
+            groupby=["cycle"],
+        )
+        band = (
+            stats.mark_area(opacity=0.3, interpolate="step-after", color="#4c78a8")
+            .encode(
+                x=cycle_x,
+                y=alt.Y("q1:Q", title=_value_title()),
+                y2="q3:Q",
+                tooltip=[
+                    "cycle:Q",
+                    alt.Tooltip("median:Q", format=".4g"),
+                    alt.Tooltip("q1:Q", format=".4g"),
+                    alt.Tooltip("q3:Q", format=".4g"),
+                ],
+            )
+            .add_params(cycle_brush)
+        )
+        median = stats.mark_line(interpolate="step-after", color="#4c78a8").encode(
+            x="cycle:Q", y="median:Q"
+        )
+        picked = (
+            cycle_base.transform_filter({"param": "pick_sample", "empty": False})
+            .mark_line(interpolate="step-after", color="#d62728")
+            .encode(
+                x="cycle:Q",
+                y="value:Q",
+                detail="sample:N",
+                tooltip=["sample:N", "cycle:Q", *rate_tooltip],
+            )
+        )
+        sample_cycle = alt.layer(band, median, picked).properties(
+            title=f"N per cycle: median and IQR of {n_samples} samples, clicked samples in red"
+        )
+    sample_cycle = sample_cycle.properties(width=560, height=240)
 
     # -- C: flowcell tile map, restricted to the brushed cycles -------------
+    tile_cycle_data, window = window_tile_cycle(tables)
     tile_base = (
-        alt.Chart(
-            tables.tile_cycle.select("read", "lane", "tile", "cycle", "n", "total")
-        )
+        alt.Chart(tile_cycle_data)
         .transform_filter(LANE_READ_FILTER)
         .transform_filter(cycle_brush)
         .transform_aggregate(n="sum(n)", total="max(total)", groupby=["tile"])
@@ -190,9 +274,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
     n_tiles = tables.tile_cycle["tile"].n_unique()
     max_cycle = int(tables.sample_cycle["cycle"].max())
     tile_cycle = (
-        alt.Chart(
-            tables.tile_cycle.select("read", "lane", "tile", "cycle", "n", "total")
-        )
+        alt.Chart(tile_cycle_data)
         .transform_filter(LANE_READ_FILTER)
         .transform_calculate(value=VALUE_EXPR, rate="datum.n / datum.total")
         .mark_rect()
@@ -200,9 +282,9 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             x=alt.X(
                 "cycle:O",
                 title="Cycle",
-                scale=alt.Scale(domain=list(range(1, max_cycle + 1))),
+                scale=alt.Scale(domain=list(range(1, max_cycle + 1, window))),
                 axis=alt.Axis(
-                    labelExpr="datum.value % 10 == 0 ? datum.label : ''",
+                    labelExpr=f"(datum.value - 1) % {10 * window} == 0 ? datum.label : ''",
                     labelAngle=0,
                 ),
             ),
@@ -212,14 +294,15 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             tooltip=["tile:O", "cycle:O", *rate_tooltip],
         )
         .properties(
-            title="Tile × cycle (empty cells have no N)",
-            width=alt.Step(max(2, min(8, 1100 // max_cycle))),
+            title="Tile × cycle (empty cells have no N)"
+            + (f"; cycles merged in windows of {window}" if window > 1 else ""),
+            width=alt.Step(max(2, min(8, 1100 * window // max_cycle))),
             height=alt.Step(max(3, min(14, 700 // max(n_tiles, 1)))),
         )
     )
 
     # -- E: spatial distribution for the clicked tile -----------------------
-    grid = tables.spatial_grid
+    size = tables.bin_size
     spatial = (
         alt.Chart(select_spatial(tables))
         .transform_filter(LANE_READ_FILTER)
@@ -228,10 +311,10 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
     xy = (
         spatial.transform_aggregate(n="sum(n)", groupby=["x_bin", "y_bin"])
         .transform_calculate(
-            x0=f"{grid['x_min']} + datum.x_bin * {grid['x_width']}",
-            x1=f"{grid['x_min']} + (datum.x_bin + 1) * {grid['x_width']}",
-            y0=f"{grid['y_min']} + datum.y_bin * {grid['y_width']}",
-            y1=f"{grid['y_min']} + (datum.y_bin + 1) * {grid['y_width']}",
+            x0=f"datum.x_bin * {size}",
+            x1=f"(datum.x_bin + 1) * {size}",
+            y0=f"datum.y_bin * {size}",
+            y1=f"(datum.y_bin + 1) * {size}",
         )
         .mark_rect()
         .encode(
@@ -325,7 +408,7 @@ def summary_tables(scans: list[FileScan], tables: NspectorTables, top: int = 10)
             "sample": [s.sample for s in scans],
             "read": [s.read for s in scans],
             "reads scanned": [s.total_reads for s in scans],
-            "reads with N": [len(s.tiles) for s in scans],
+            "reads with N": [s.reads_with_n for s in scans],
         }
     ).with_columns(
         (polars.col("reads with N") / polars.col("reads scanned")).alias("N rate")
@@ -427,7 +510,7 @@ _PAGE = """<!DOCTYPE html>
 </main>
 <script type="text/javascript">
   const spec = {spec};
-  vegaEmbed('#vis', spec, {{"mode": "vega-lite", "actions": {{"export": true, "source": false, "compiled": false, "editor": false}}}})
+  vegaEmbed('#vis', spec, {{"mode": "vega-lite", "renderer": "canvas", "actions": {{"export": true, "source": false, "compiled": false, "editor": false}}}})
     .then((result) => {{
       window.nspectorView = result.view;
       const bindings = document.querySelector('#vis .vega-bindings');
@@ -452,11 +535,13 @@ def write_report(
     scans: list[FileScan], tables: NspectorTables, output: pathlib.Path
 ) -> pathlib.Path:
     """Write the self-contained interactive report to ``output/nspector_report.html``."""
-    spec = json.dumps(build_chart(tables).to_dict(), separators=(",", ":"))
+    # row counts are bounded by MAX_SPATIAL_ROWS / MAX_TILE_CYCLE_ROWS instead
+    with alt.data_transformers.disable_max_rows():
+        spec = json.dumps(build_chart(tables).to_dict(), separators=(",", ":"))
     if len(spec) > SIZE_WARNING_BYTES:
         logging.warning(
             f"The report embeds {len(spec) / 2**20:.0f} MB of data and may be slow "
-            "to open. Consider a smaller --spatial-bins."
+            "to open. Consider a larger --spatial-bin-size."
         )
     # keep "</script>" in string data from closing the script element
     spec = spec.replace("</", "<\\/")

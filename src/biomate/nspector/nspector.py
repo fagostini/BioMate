@@ -13,7 +13,7 @@ from biomate.nspector.scan import (
     extract_tile_coordinates,  # noqa: F401  (re-exported for callers/tests)
     scan_files,
 )
-from biomate.nspector.tables import build_tables, reads_frame, tile_layout
+from biomate.nspector.tables import build_tables, tile_layout
 from biomate.setup import setup_logging
 
 
@@ -25,8 +25,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         elif not input_file.is_file():
             raise argparse.ArgumentTypeError(f"Input path {input_file} is not a file.")
 
-    if getattr(args, "spatial_bins", 1) < 1:
-        raise argparse.ArgumentTypeError("--spatial-bins must be at least 1.")
+    if getattr(args, "spatial_bin_size", 1) < 1:
+        raise argparse.ArgumentTypeError("--spatial-bin-size must be at least 1.")
 
     if args.output.exists() and not args.output.is_dir():
         raise argparse.ArgumentTypeError(
@@ -74,16 +74,22 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     parser.add_argument(
         "--engine",
         type=str,
-        default="python",
-        choices=["python", "rust"],
-        help="Scan engine: pure Python (default) or the native biomate_kernels "
-        "Rust scan (falls back to Python if biomate_kernels is not installed).",
+        default="auto",
+        choices=["auto", "python", "rust"],
+        help="Scan engine: auto (default; Rust when biomate_kernels is installed, "
+        "else Python), python, or rust (falls back to Python if unavailable).",
     )
     parser.add_argument(
-        "--spatial-bins",
+        "--spatial-bin-size",
         type=int,
-        default=50,
-        help="Grid size (bins per axis) for the per-tile spatial N maps (default: 50).",
+        default=1000,
+        help="Width of the spatial bins in read-name X/Y coordinate units (default: 1000).",
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Also write every N-containing read (lane, tile, x, y, cycles) to "
+        "<stem>_n_sequences/ Parquet parts. Large; uses the Python engine.",
     )
     parser.add_argument(
         "--png",
@@ -110,23 +116,16 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
 # ---------------------------------------------------------------------------
 
 
-def exploded_frame(scan: FileScan) -> polars.DataFrame:
-    """One row per N base: tile, x, y and 1-based cycle."""
-    return (
-        reads_frame(scan)
-        .select("tile", "x", "y", "cycles")
-        .explode("cycles")
-        .with_columns(polars.col("cycles").cast(polars.UInt16))
-    )
+def _scan_frame(scan: FileScan, field: str, columns: list[str]) -> polars.DataFrame:
+    return polars.DataFrame(getattr(scan, field), schema=columns, orient="row")
 
 
-def plot_n_per_sequence(data: polars.DataFrame, output_path: pathlib.Path) -> None:
+def plot_n_per_sequence(scan: FileScan, output_path: pathlib.Path) -> None:
     """Plot the distribution of N counts per sequence."""
     chart = (
-        data.group_by(["tile", "x", "y"])
-        .agg(polars.len().alias("n_count"))
+        _scan_frame(scan, "n_per_read", ["lane", "n_count", "n_sequences"])
         .group_by("n_count")
-        .agg(polars.len().alias("n_sequences"))
+        .agg(polars.col("n_sequences").sum())
         .sort("n_count")
         .plot.bar(
             x=alt.X("n_count:O", title="Number of N bases"),
@@ -139,21 +138,20 @@ def plot_n_per_sequence(data: polars.DataFrame, output_path: pathlib.Path) -> No
     chart.save(output_path)
 
 
-def plot_n_per_cycle_and_tile(
-    data: polars.DataFrame, output_path: pathlib.Path, max_cycle: int | None = None
-) -> None:
+def plot_n_per_cycle_and_tile(scan: FileScan, output_path: pathlib.Path) -> None:
     """Plot the distribution of N-containing sequences across cycles and tiles."""
-    max_cycle = max_cycle or int(data.get_column("cycles").max())
-    grid = polars.DataFrame({"tile": data.get_column("tile").unique().sort()}).join(
-        polars.DataFrame(
-            {"cycles": polars.arange(1, max_cycle + 1, eager=True).cast(polars.UInt16)}
-        ),
+    max_cycle = scan.max_len
+    tiles = _scan_frame(scan, "tiles", ["lane", "tile", "total", "n", "n_bases"])
+    grid = tiles.select(polars.col("tile").unique().sort()).join(
+        polars.DataFrame({"cycles": polars.arange(1, max_cycle + 1, eager=True)}),
         how="cross",
     )
     source = (
         grid.join(
-            data.group_by(["cycles", "tile"]).agg(polars.len().alias("n_sequences")),
-            on=["cycles", "tile"],
+            _scan_frame(scan, "tile_cycle", ["lane", "tile", "cycles", "n_sequences"])
+            .group_by("tile", "cycles")
+            .agg(polars.col("n_sequences").sum()),
+            on=["tile", "cycles"],
             how="left",
         )
         .with_columns(polars.col("n_sequences").fill_null(0))
@@ -189,76 +187,73 @@ def plot_n_per_cycle_and_tile(
     chart.save(output_path)
 
 
-def _tile_chart(source: polars.DataFrame) -> alt.VConcatChart:
-    """Build the per-tile composite chart (top histogram, points, right histogram).
+def _tile_chart(source: polars.DataFrame, bin_size: int) -> alt.VConcatChart:
+    """Build the per-tile composite chart: binned density plus marginal histograms.
 
-    ``source`` must already be sorted by (x, y) so that the order in which
-    overlapping semi-transparent bars are drawn is deterministic.
+    ``source`` must already be sorted by (x_bin, y_bin) so the rendering is
+    deterministic.
     """
-    base = alt.Chart(source)
-    base_bar = base.mark_bar(opacity=0.3, binSpacing=0)
-
-    xscale = alt.Scale(
-        domainMin=int(source.get_column("x").min()),
-        domainMax=int(source.get_column("x").max()),
+    base = alt.Chart(source).transform_calculate(
+        x0=f"datum.x_bin * {bin_size}",
+        x1=f"(datum.x_bin + 1) * {bin_size}",
+        y0=f"datum.y_bin * {bin_size}",
+        y1=f"(datum.y_bin + 1) * {bin_size}",
     )
-    yscale = alt.Scale(
-        domainMin=int(source.get_column("y").min()),
-        domainMax=int(source.get_column("y").max()),
-    )
-
-    points = (
-        base.mark_circle()
-        .encode(alt.X("x").scale(xscale), alt.Y("y").scale(yscale))
+    density = (
+        base.mark_rect()
+        .encode(
+            alt.X("x0:Q", title="X").scale(zero=False),
+            alt.X2("x1:Q"),
+            alt.Y("y0:Q", title="Y").scale(zero=False),
+            alt.Y2("y1:Q"),
+            alt.Color("n:Q", title="Reads with N").scale(scheme="viridis"),
+        )
         .properties(width=500, height=500)
     )
-    top_hist = base_bar.encode(
-        # when using bins, the axis scale is set through the bin extent
-        alt.X("x:Q").bin(maxbins=200, extent=xscale.domain).stack(None).title(""),
-        alt.Y("count()").stack(None).title(""),
-    ).properties(width=500, height=60)
-    right_hist = base_bar.encode(
-        alt.Y("y:Q").bin(maxbins=200, extent=yscale.domain).stack(None).title(""),
-        alt.X("count()").stack(None).title(""),
-    ).properties(width=60, height=500)
-
-    return top_hist & (points | right_hist)
+    top_hist = (
+        base.mark_bar()
+        .encode(alt.X("x_bin:O", axis=None), alt.Y("sum(n):Q", title=""))
+        .properties(width=500, height=60)
+    )
+    right_hist = (
+        base.mark_bar()
+        .encode(alt.Y("y_bin:O", axis=None), alt.X("sum(n):Q", title=""))
+        .properties(width=60, height=500)
+    )
+    return top_hist & (density | right_hist)
 
 
 def plot_individual_tiles(
-    data: polars.DataFrame, output_path: pathlib.Path, stem: str
+    scan: FileScan, output_path: pathlib.Path, bin_size: int
 ) -> None:
-    """Plot the distribution of N-containing sequences for individual tiles.
+    """Plot the spatial distribution of N-containing reads for each tile.
 
     Saves one composite chart per tile as
-    ``individual_tiles/{stem}_tile_{tile}.png``. Tiles are processed in sorted
-    order and each per-tile source is sorted by (x, y), which makes the
-    rendered images deterministic across runs.
+    ``individual_tiles/{stem}_tile_{tile}.png``, in sorted tile order.
     """
     output_path.joinpath("individual_tiles").mkdir(parents=True, exist_ok=True)
-
-    for tile in sorted(data.get_column("tile").unique().to_list()):
+    spatial = _scan_frame(scan, "spatial", ["lane", "tile", "x_bin", "y_bin", "n"])
+    for tile in sorted(spatial.get_column("tile").unique().to_list()):
         source = (
-            data.filter(polars.col("tile") == tile)
-            .group_by(["x", "y"])
-            .agg(polars.len().alias("z"))
-            .sort(["x", "y"])
+            spatial.filter(polars.col("tile") == tile)
+            .group_by("x_bin", "y_bin")
+            .agg(polars.col("n").sum())
+            .sort("x_bin", "y_bin")
         )
-        _tile_chart(source).save(
-            output_path / "individual_tiles" / f"{stem}_tile_{tile}.png"
+        _tile_chart(source, bin_size).save(
+            output_path / "individual_tiles" / f"{scan.stem}_tile_{tile}.png"
         )
 
 
-def write_pngs(scan: FileScan, output: pathlib.Path) -> None:
+def write_pngs(scan: FileScan, output: pathlib.Path, bin_size: int) -> None:
     """Write the static PNG charts for one input file."""
-    data = exploded_frame(scan)
-    plot_n_per_sequence(data, output / f"{scan.stem}_n_count_distribution.png")
-    plot_n_per_cycle_and_tile(
-        data,
-        output / f"{scan.stem}_n_distribution_per_cycle_and_tile.png",
-        max_cycle=scan.max_len,
-    )
-    plot_individual_tiles(data, output, scan.stem)
+    # aggregated inputs are bounded by tiles x cycles; Altair's 5000-row cap is too low
+    with alt.data_transformers.disable_max_rows():
+        plot_n_per_sequence(scan, output / f"{scan.stem}_n_count_distribution.png")
+        plot_n_per_cycle_and_tile(
+            scan, output / f"{scan.stem}_n_distribution_per_cycle_and_tile.png"
+        )
+        plot_individual_tiles(scan, output, bin_size)
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +273,7 @@ def usable_scans(scans: list[FileScan]) -> list[FileScan]:
         elif scan.total_reads == 0:
             logging.warning(f"No reads found in {scan.path}. Skipping analysis.")
         else:
-            if not scan.tiles:
+            if scan.reads_with_n == 0:
                 logging.warning(f"No N bases found in {scan.path}.")
             kept.append(scan)
     return kept
@@ -289,21 +284,26 @@ def main(args: argparse.Namespace) -> None:
     setup_logging(args)
     logging.info("Running nspector module...")
 
-    scans = usable_scans(scan_files(args.input, args.engine, args.threads))
+    bin_size = args.spatial_bin_size
+    scans = usable_scans(
+        scan_files(
+            args.input,
+            args.engine,
+            args.threads,
+            bin_size,
+            raw_dir=args.output if getattr(args, "raw", False) else None,
+        )
+    )
     if not scans:
         logging.warning("No usable input files; nothing to report.")
         return
 
     for scan in scans:
         logging.debug(
-            f"{scan.path.name}: {len(scan.tiles)} of {scan.total_reads} reads have N bases."
+            f"{scan.path.name}: {scan.reads_with_n} of {scan.total_reads} reads have N bases."
         )
-        if scan.tiles:
-            exploded_frame(scan).write_parquet(
-                args.output / f"{scan.stem}_n_sequences.parquet"
-            )
 
-    tables = build_tables(scans, spatial_bins=args.spatial_bins)
+    tables = build_tables(scans, bin_size=bin_size)
     tables.write_parquet(args.output)
 
     if not getattr(args, "no_html", False):
@@ -313,8 +313,8 @@ def main(args: argparse.Namespace) -> None:
         write_multiqc(tables, args.output)
     if getattr(args, "png", False):
         for scan in scans:
-            if scan.tiles:
+            if scan.reads_with_n:
                 logging.debug(f"Creating PNG charts for file: {scan.path}")
-                write_pngs(scan, args.output)
+                write_pngs(scan, args.output, bin_size)
 
     logging.info("Nspector module finished.")
