@@ -1,13 +1,12 @@
 """Edge case and integration tests for BioMate — unique coverage not in primary test files.
 
 Primary test files cover validate_args, parse_sequence_mask, compile_index_regex,
-generate_cycles_filler, and other functions extensively. This file focuses on
+and other functions extensively. This file focuses on
 edge cases for generate_sequences_set (blabber) which has no dedicated test file.
 """
 
 from collections import Counter
 
-import polars
 import pytest
 
 from biomate.blabber.blabber import generate_sequences_set
@@ -139,24 +138,6 @@ class TestCrossModuleIntegration:
         assert "TTTT" in content
         assert "AAAA" in content
         assert "ACGG" in content
-
-    def test_cycles_filler_schema_consistency(self):
-        """generate_cycles_filler output dtype is stable across runs."""
-        from biomate.nspector.nspector import generate_cycles_filler
-
-        base = polars.DataFrame({"cycles": [1], "tile": [1101]})
-        df1 = generate_cycles_filler(base, 100)
-        df2 = generate_cycles_filler(base, 200)
-
-        assert df1.schema == df2.schema
-
-    def test_cycles_filler_value_consistency(self):
-        """generate_cycles_filler produces expected cycle ranges."""
-        from biomate.nspector.nspector import generate_cycles_filler
-
-        base = polars.DataFrame({"cycles": [1], "tile": [1101]})
-        df = generate_cycles_filler(base, 100)
-        assert list(df["cycles"].unique()) == list(range(1, 101))
 
     def test_parse_mask_roundtrip_consistency(self):
         """Same mask string always produces identical dict."""

@@ -17,7 +17,7 @@ import pytest
 biomate_kernels = pytest.importorskip("biomate_kernels")
 
 from biomate.index.index import compile_index_regex  # noqa: E402
-from biomate.nspector.nspector import extract_tile_coordinates  # noqa: E402
+from biomate.nspector.scan import extract_tile_coordinates  # noqa: E402
 
 M = "ATCGATCGAT"
 G8 = "GGGGGGGG"
@@ -197,29 +197,47 @@ def _write_fastq(path: pathlib.Path, records: list[tuple[str, str]], gz: bool = 
 
 
 def _reference_scan(path: pathlib.Path):
-    """Reference: the per-record loop from nspector.main()."""
-    tiles, xs, ys, cycles = [], [], [], []
+    """Reference: the per-record loop from nspector.scan.scan_file_python()."""
+    lanes, tiles, xs, ys, cycles = [], [], [], [], []
+    totals: dict[tuple[int, int], int] = {}
+    max_len = 0
     fmt_err = None
     with dnaio.open(path) as reader:
         for i, rec in enumerate(reader):
-            npos = [j for j, c in enumerate(rec.sequence) if c == "N"]
+            coords = extract_tile_coordinates(rec.name)
+            if coords is None:
+                fmt_err = i
+                break
+            lane, t, x, y = coords
+            totals[(lane, t)] = totals.get((lane, t), 0) + 1
+            max_len = max(max_len, len(rec.sequence))
+            npos = [j + 1 for j, c in enumerate(rec.sequence) if c == "N"]
             if npos:
-                coords = extract_tile_coordinates(rec.name)
-                if coords is None:
-                    fmt_err = i
-                    break
-                t, x, y = coords
+                lanes.append(lane)
                 tiles.append(t)
                 xs.append(x)
                 ys.append(y)
                 cycles.append(npos)
-    return fmt_err, tiles, xs, ys, cycles
+    tile_totals = [(lane, t, c) for (lane, t), c in sorted(totals.items())]
+    return fmt_err, lanes, tiles, xs, ys, cycles, tile_totals, max_len
+
+
+def _normalise(res):
+    fmt_err, lanes, tiles, xs, ys, cycles, totals, max_len = res
+    return (
+        fmt_err,
+        list(lanes),
+        list(tiles),
+        list(xs),
+        list(ys),
+        [list(c) for c in cycles],
+        [tuple(t) for t in totals],
+        max_len,
+    )
 
 
 def _kernel_scan(path: pathlib.Path, threads: int = 1):
-    res = biomate_kernels.scan_n_content([str(path)], threads)[0]
-    fmt_err, tiles, xs, ys, cycles = res
-    return fmt_err, list(tiles), list(xs), list(ys), [list(c) for c in cycles]
+    return _normalise(biomate_kernels.scan_n_content([str(path)], threads)[0])
 
 
 class TestScanNContentParity:
@@ -230,7 +248,6 @@ class TestScanNContentParity:
             (_illumina_name(101, 100, 100), "ACGTNACGTNAC"),  # Ns @4,9
             (_illumina_name(102, 101, 101), "ACGTACGT"),  # no Ns
             (_illumina_name(103, 102, 102), "NNNN"),  # all Ns
-            ("short:bad:name", "ACGTN"),  # bad name, no Ns -> ignored
             (_illumina_name(104, 103, 103), "ACGnTN"),  # lowercase n ignored
             (_illumina_name(105, 104, 104), "ACGTACGTNN"),  # Ns @8,9
         ]
@@ -251,10 +268,40 @@ class TestScanNContentParity:
         assert got == ref
         assert got[0] == 1  # 0-based index of the offending record
 
+    def test_format_error_without_n(self, tmp_path):
+        """Every header is parsed (for totals), so a bad name without Ns also stops."""
+        records = [
+            (_illumina_name(101, 1, 1), "ACGTNACGT"),
+            ("short:bad:name", "ACGT"),
+            (_illumina_name(102, 2, 2), "ACGTN"),
+        ]
+        p = tmp_path / "bad_no_n.fastq.gz"
+        _write_fastq(p, records)
+        got = _kernel_scan(p)
+        assert got == _reference_scan(p)
+        assert got[0] == 1
+
+    def test_totals_and_lanes(self, tmp_path):
+        records = [
+            ("M1:1:FC:1:1101:10:10 1:N:0:AA", "ACGT"),
+            ("M1:1:FC:1:1101:11:11 1:N:0:AA", "ACGN"),
+            ("M1:1:FC:2:1101:12:12 1:N:0:AA", "ACGTAC"),
+            ("M1:1:FC:2:1102:13:13 1:N:0:AA", "NC"),
+        ]
+        p = tmp_path / "lanes.fastq.gz"
+        _write_fastq(p, records)
+        got = _kernel_scan(p)
+        assert got == _reference_scan(p)
+        assert got[1] == [1, 2]  # lanes of N reads
+        assert got[5] == [[4], [1]]  # 1-based cycles
+        assert got[6] == [(1, 1101, 2), (2, 1101, 1), (2, 1102, 1)]
+        assert got[7] == 6
+
     def test_no_n_records(self, tmp_path):
         p = tmp_path / "clean.fastq.gz"
         _write_fastq(p, [(_illumina_name(1, 2, 3), "ACGT")])
-        assert _kernel_scan(p) == _reference_scan(p) == (None, [], [], [], [])
+        assert _kernel_scan(p) == _reference_scan(p)
+        assert _kernel_scan(p)[1:6] == ([], [], [], [], [])
 
     def test_plain_fastq(self, tmp_path):
         records = [
@@ -289,7 +336,4 @@ class TestScanNContentParity:
             paths.append(p)
         got = biomate_kernels.scan_n_content([str(p) for p in paths], 3)
         ref = [_reference_scan(p) for p in paths]
-        assert [
-            (g[0], list(g[1]), list(g[2]), list(g[3]), [list(c) for c in g[4]])
-            for g in got
-        ] == ref
+        assert [_normalise(g) for g in got] == ref

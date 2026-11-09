@@ -337,37 +337,58 @@ impl IndexPattern {
 
 /// Per-file N-content scan result (nspector).
 ///
-/// `format_error` is the 0-based index of the first N-containing record whose
-/// name fails coordinate parsing; when set, the reference implementation stops
-/// reading the file and skips it entirely (parity: data after the error is
-/// neither produced nor needed).
+/// `format_error` is the 0-based index of the first record whose name fails
+/// coordinate parsing; when set, the reference implementation stops reading
+/// the file and skips it entirely (parity: data after the error is neither
+/// produced nor needed). Every record header is parsed, because every record
+/// contributes to the per-tile totals.
 ///
-/// `tiles`/`xs`/`ys`/`n_positions` are parallel: entry `i` describes the
-/// i-th N-containing record (records without Ns are omitted).
+/// `lanes`/`tiles`/`xs`/`ys`/`n_positions` are parallel: entry `i` describes
+/// the i-th N-containing record (records without Ns are omitted). Positions
+/// are 1-based sequencing cycles.
+///
+/// `tile_totals` holds `(lane, tile, reads)` for every record, sorted by
+/// `(lane, tile)`; `max_len` is the longest sequence seen.
 struct FileScan {
     format_error: Option<usize>,
+    lanes: Vec<i32>,
     tiles: Vec<i32>,
     xs: Vec<i32>,
     ys: Vec<i32>,
     n_positions: Vec<Vec<u16>>,
+    tile_totals: Vec<(i32, i32, u64)>,
+    max_len: u32,
 }
 
-/// Port of `biomate.nspector.nspector.extract_tile_coordinates`.
+/// Python tuple returned per file by `scan_n_content`.
+type ScanTuple = (
+    Option<usize>,
+    Vec<i32>,
+    Vec<i32>,
+    Vec<i32>,
+    Vec<i32>,
+    Vec<Vec<u16>>,
+    Vec<(i32, i32, u64)>,
+    u32,
+);
+
+/// Port of `biomate.nspector.scan.extract_tile_coordinates`.
 ///
 /// Python `int()` trims ASCII whitespace and allows a leading sign; `parse`
 /// after `trim()` matches that for the realistic (digit-only) coordinate
-/// fields. Returns None for <7 colon-fields or non-numeric fields, exactly
-/// like the reference.
-fn parse_tile_coordinates(name: &str) -> Option<(i32, i32, i32)> {
+/// fields. Returns `(lane, tile, x, y)`, or None for <7 colon-fields or
+/// non-numeric fields, exactly like the reference.
+fn parse_tile_coordinates(name: &str) -> Option<(i32, i32, i32, i32)> {
     let base = name.split(' ').next()?;
     let parts = base.split(':').collect::<Vec<_>>();
     if parts.len() < 7 {
         return None;
     }
+    let lane = parts[3].trim().parse::<i32>().ok()?;
     let tile = parts[4].trim().parse::<i32>().ok()?;
     let x = parts[5].trim().parse::<i32>().ok()?;
     let y = parts[6].trim().parse::<i32>().ok()?;
-    Some((tile, x, y))
+    Some((lane, tile, x, y))
 }
 
 /// Scan one FASTQ (`.gz` suffix => gzip) for N-containing records.
@@ -385,11 +406,15 @@ fn scan_fastq_file(path: &str) -> Result<FileScan, String> {
 
     let mut out = FileScan {
         format_error: None,
+        lanes: Vec::new(),
         tiles: Vec::new(),
         xs: Vec::new(),
         ys: Vec::new(),
         n_positions: Vec::new(),
+        tile_totals: Vec::new(),
+        max_len: 0,
     };
+    let mut totals: HashMap<(i32, i32), u64> = HashMap::new();
     let mut name_line = String::new();
     let mut line = String::new();
     let mut record_idx = 0usize;
@@ -410,12 +435,13 @@ fn scan_fastq_file(path: &str) -> Result<FileScan, String> {
         // sequence: scan for N positions immediately (line is reused below)
         line.clear();
         reader.read_line(&mut line).map_err(|e| e.to_string())?;
-        let positions: Vec<u16> = line
-            .trim_end_matches(['\n', '\r'])
+        let seq = line.trim_end_matches(['\n', '\r']);
+        let seq_len = seq.len() as u32;
+        let positions: Vec<u16> = seq
             .bytes()
             .enumerate()
             .filter(|(_, b)| *b == b'N')
-            .map(|(i, _)| i as u16)
+            .map(|(i, _)| (i + 1) as u16)
             .collect();
         // '+' separator
         line.clear();
@@ -430,22 +456,29 @@ fn scan_fastq_file(path: &str) -> Result<FileScan, String> {
         // dnaio strips the leading '@' from record.name
         let rec_name = &name_line.trim_end_matches(['\n', '\r'])[1..];
 
-        if !positions.is_empty() {
-            match parse_tile_coordinates(rec_name) {
-                Some((tile, x, y)) => {
+        match parse_tile_coordinates(rec_name) {
+            Some((lane, tile, x, y)) => {
+                *totals.entry((lane, tile)).or_insert(0) += 1;
+                out.max_len = out.max_len.max(seq_len);
+                if !positions.is_empty() {
+                    out.lanes.push(lane);
                     out.tiles.push(tile);
                     out.xs.push(x);
                     out.ys.push(y);
                     out.n_positions.push(positions);
                 }
-                None => {
-                    out.format_error = Some(record_idx);
-                    break; // reference stops reading this file
-                }
+            }
+            None => {
+                out.format_error = Some(record_idx);
+                break; // reference stops reading this file
             }
         }
         record_idx += 1;
     }
+    let mut tile_totals: Vec<(i32, i32, u64)> =
+        totals.into_iter().map(|((l, t), c)| (l, t, c)).collect();
+    tile_totals.sort_unstable();
+    out.tile_totals = tile_totals;
     Ok(out)
 }
 
@@ -453,14 +486,10 @@ fn scan_fastq_file(path: &str) -> Result<FileScan, String> {
 ///
 /// `paths` are processed by up to `threads` OS threads (work-stealing over
 /// the list); results come back in input order. Returns, per file:
-/// `(format_error, tiles, xs, ys, n_positions)` where `format_error` is the
-/// index of the first bad record or None, and the four arrays are parallel
-/// over the N-containing records (see `FileScan`).
+/// `(format_error, lanes, tiles, xs, ys, n_positions, tile_totals, max_len)`
+/// (see `FileScan`).
 #[pyfunction]
-fn scan_n_content(
-    paths: Vec<String>,
-    threads: u32,
-) -> PyResult<Vec<(Option<usize>, Vec<i32>, Vec<i32>, Vec<i32>, Vec<Vec<u16>>)>> {
+fn scan_n_content(paths: Vec<String>, threads: u32) -> PyResult<Vec<ScanTuple>> {
     let n = paths.len();
     if n == 0 {
         return Ok(Vec::new());
@@ -500,7 +529,16 @@ fn scan_n_content(
     scanned
         .into_iter()
         .map(|r| match r {
-            Ok(s) => Ok((s.format_error, s.tiles, s.xs, s.ys, s.n_positions)),
+            Ok(s) => Ok((
+                s.format_error,
+                s.lanes,
+                s.tiles,
+                s.xs,
+                s.ys,
+                s.n_positions,
+                s.tile_totals,
+                s.max_len,
+            )),
             Err(e) => Err(PyValueError::new_err(e)),
         })
         .collect()
