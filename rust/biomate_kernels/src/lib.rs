@@ -27,7 +27,7 @@
 //!    before the gap shrinks.
 //! 8. `fuzzy_counts` tuple order is (subs, ins, dels).
 
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::collections::{BTreeSet, HashMap};
@@ -465,7 +465,7 @@ fn scan_fastq_file(path: &str, bin_size: i32) -> Result<FileScan, String> {
     let mut reader: Box<dyn BufRead> = if path.ends_with(".gz") {
         Box::new(std::io::BufReader::with_capacity(
             1 << 20,
-            ChannelReader::spawn(GzDecoder::new(std::io::BufReader::new(file))),
+            ChannelReader::spawn(MultiGzDecoder::new(std::io::BufReader::new(file))),
         ))
     } else {
         Box::new(std::io::BufReader::with_capacity(1 << 20, file))

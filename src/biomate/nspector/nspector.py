@@ -3,6 +3,7 @@
 import argparse
 import logging
 import pathlib
+import time
 
 import altair as alt
 import polars
@@ -63,7 +64,8 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         "--threads",
         type=int,
         default=0,
-        help="Number of threads to use for reading FASTQ files (default: 0, which means no extra threads apart from the main thread).",
+        help="Rust engine: files scanned in parallel (default: 0 = one per available core). "
+        "Python engine: extra decompression threads per file (default: 0 = none).",
     )
     parser.add_argument(
         "--output",
@@ -285,6 +287,7 @@ def main(args: argparse.Namespace) -> None:
     logging.info("Running nspector module...")
 
     bin_size = args.spatial_bin_size
+    started = time.perf_counter()
     scans = usable_scans(
         scan_files(
             args.input,
@@ -293,6 +296,11 @@ def main(args: argparse.Namespace) -> None:
             bin_size,
             raw_dir=args.output if getattr(args, "raw", False) else None,
         )
+    )
+    reads = sum(s.total_reads for s in scans)
+    elapsed = time.perf_counter() - started
+    logging.info(
+        f"Scanned {reads:,} reads in {elapsed:.1f} s ({reads / max(elapsed, 1e-9) / 1e6:.2f} M reads/s)."
     )
     if not scans:
         logging.warning("No usable input files; nothing to report.")
@@ -303,14 +311,21 @@ def main(args: argparse.Namespace) -> None:
             f"{scan.path.name}: {scan.reads_with_n} of {scan.total_reads} reads have N bases."
         )
 
+    phase = time.perf_counter()
     tables = build_tables(scans, bin_size=bin_size)
     tables.write_parquet(args.output)
+    logging.info(f"Tables built and written in {time.perf_counter() - phase:.1f} s.")
 
     if not getattr(args, "no_html", False):
+        phase = time.perf_counter()
         path = write_report(scans, tables, args.output)
-        logging.info(f"Interactive report written to {path}")
+        logging.info(
+            f"Interactive report written to {path} in {time.perf_counter() - phase:.1f} s."
+        )
     if not getattr(args, "no_multiqc", False):
+        phase = time.perf_counter()
         write_multiqc(tables, args.output)
+        logging.info(f"MultiQC files written in {time.perf_counter() - phase:.1f} s.")
     if getattr(args, "png", False):
         for scan in scans:
             if scan.reads_with_n:

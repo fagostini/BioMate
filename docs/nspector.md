@@ -26,7 +26,7 @@ biomate nspector \
 - `--input`: one or more FASTQ files (`.fastq`, `.fq`, optionally gzipped). Required.
 - `--output`: output directory, created if missing (default: `./output`).
 - `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` falls back to Python with a warning. Both engines produce identical results.
-- `--threads`: extra decompression threads (Python engine) or files scanned in parallel (Rust engine). The Rust engine always decompresses each gzip file on its own thread, ahead of parsing.
+- `--threads`: Rust engine: files scanned in parallel (default `0` = one per available core). Python engine: extra decompression threads per file. The Rust engine also decompresses each gzip file on its own thread, ahead of parsing, and reads multi-member gzip (as written by BCL Convert).
 - `--spatial-bin-size`: width of the spatial bins in read-name X/Y coordinate units (default: `1000`). Raise it if the report gets large.
 - `--raw`: also write every N-containing read (lane, tile, X, Y, N cycles) as Parquet parts under `<stem>_n_sequences/`. This output grows with the number of reads and always uses the Python engine.
 - `--png`: also write the static PNG charts for each input file.

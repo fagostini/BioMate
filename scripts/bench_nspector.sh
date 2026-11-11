@@ -34,6 +34,10 @@ for engine in $engines; do
         "$out/nspector_sample_lane.parquet")
     report=0
     [[ -f "$out/nspector_report.html" ]] && report=$(stat -c %s "$out/nspector_report.html")
+    # a missing biomate_kernels makes --engine rust fall back silently to Python
+    if grep -q "falling back to the Python scan" "$out/nspector.log"; then
+        engine="$engine(->python!)"
+    fi
     awk -v e="$engine" -v w="$wall" -v r="$reads" -v m="$rss_kb" -v s="$report" 'BEGIN {
         printf "%-7s %10.1f %14d %12.2f %12.0f %12.1f\n", e, w, r, r / w / 1e6, m / 1024, s / 1048576 }'
 done

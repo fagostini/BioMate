@@ -283,6 +283,20 @@ class TestScanNContentParity:
         assert got == _reference_scan(p)
         assert got[3:] == ([], [], [])
 
+    def test_multi_member_gzip(self, tmp_path):
+        """BCL Convert writes concatenated gzip members; all must be read."""
+        p = tmp_path / "multi.fastq.gz"
+        with open(p, "wb") as fh:
+            for i in range(3):
+                fh.write(
+                    gzip.compress(
+                        f"@{_illumina_name(1101 + i, i, i)}\nACGN\n+\nIIII\n".encode()
+                    )
+                )
+        got = _kernel_scan(p)
+        assert got == _reference_scan(p)
+        assert sum(t[2] for t in got[2]) == 3
+
     def test_plain_fastq(self, tmp_path):
         records = [
             (_illumina_name(11, 12, 13), "NNACGT"),

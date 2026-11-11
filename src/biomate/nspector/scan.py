@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import pathlib
 import re
 from collections import Counter
@@ -249,8 +250,10 @@ def scan_files(
             for p in paths
         ]
     if engine == "rust":
+        # 0 = one file per available core (sched_getaffinity respects taskset/cgroups)
+        workers = threads or len(os.sched_getaffinity(0))
         results = biomate_kernels.scan_n_content(
-            [str(p) for p in paths], threads, bin_size
+            [str(p) for p in paths], workers, bin_size
         )
         return [_from_kernel(p, r) for p, r in zip(paths, results)]
     return [scan_file_python(p, threads, bin_size) for p in paths]
