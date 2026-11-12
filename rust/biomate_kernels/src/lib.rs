@@ -341,8 +341,27 @@ struct TileAcc {
     total: u64,
     reads_with_n: u64,
     n_bases: u64,
+    /// reads with at least one called (non-N) base below `min_qual`
+    lowq_reads: u64,
     /// reads with an N at cycle `i + 1`
     cycles: Vec<u64>,
+    /// reads with a called base below `min_qual` at cycle `i + 1`
+    lowq_cycles: Vec<u64>,
+}
+
+/// Cycles at each end of the read used to classify where the first N falls.
+const EDGE_CYCLES: usize = 10;
+
+/// Region of the first N: 0 = first `EDGE_CYCLES` cycles, 2 = last
+/// `EDGE_CYCLES` cycles, 1 = middle (start wins on short reads).
+fn first_n_region(first: usize, len: usize) -> u8 {
+    if first < EDGE_CYCLES {
+        0
+    } else if first + EDGE_CYCLES >= len {
+        2
+    } else {
+        1
+    }
 }
 
 /// Per-file N-content scan result (nspector), aggregated while streaming.
@@ -357,21 +376,26 @@ struct FileScan {
     tiles: HashMap<(i32, i32), TileAcc>,
     n_per_read: HashMap<(i32, u32), u64>,
     spatial: HashMap<(i32, i32, i32, i32), u64>,
+    /// (lane, longest N run, first-N region, all-N flag) -> reads
+    n_shape: HashMap<(i32, u32, u8, u8), u64>,
 }
 
 /// Python tuple returned per file by `scan_n_content`:
-/// `(format_error, max_len, tiles, tile_cycle, n_per_read, spatial)` with
-/// `tiles = [(lane, tile, total, reads_with_n, n_bases)]`,
-/// `tile_cycle = [(lane, tile, cycle, reads_with_n)]` (1-based, non-zero only),
+/// `(format_error, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape)` with
+/// `tiles = [(lane, tile, total, reads_with_n, n_bases, lowq_reads)]`,
+/// `tile_cycle = [(lane, tile, cycle, reads_with_n, reads_with_lowq)]`
+/// (1-based, rows where either count is non-zero),
 /// `n_per_read = [(lane, n_count, reads)]`,
-/// `spatial = [(lane, tile, x // bin, y // bin, reads_with_n)]`, all sorted.
+/// `spatial = [(lane, tile, x // bin, y // bin, reads_with_n)]`,
+/// `n_shape = [(lane, longest_run, first_region, all_n, reads)]`, all sorted.
 type ScanTuple = (
     Option<usize>,
     u32,
-    Vec<(i32, i32, u64, u64, u64)>,
-    Vec<(i32, i32, u32, u64)>,
+    Vec<(i32, i32, u64, u64, u64, u64)>,
+    Vec<(i32, i32, u32, u64, u64)>,
     Vec<(i32, u32, u64)>,
     Vec<(i32, i32, i32, i32, u64)>,
+    Vec<(i32, u32, u8, u8, u64)>,
 );
 
 /// Port of `biomate.nspector.scan.extract_tile_coordinates`.
@@ -460,7 +484,9 @@ fn trim_eol(line: &[u8]) -> &[u8] {
 /// Line protocol: `@name` / sequence / `+` / qualities. A name line not
 /// starting with `@`, or a truncated final record, is a hard error (the
 /// reference raises a `dnaio` format error in the same situations).
-fn scan_fastq_file(path: &str, bin_size: i32) -> Result<FileScan, String> {
+fn scan_fastq_file(path: &str, bin_size: i32, min_qual: u8) -> Result<FileScan, String> {
+    // Phred+33: a quality byte below this is a low-quality call
+    let lowq_byte = min_qual.saturating_add(33);
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut reader: Box<dyn BufRead> = if path.ends_with(".gz") {
         Box::new(std::io::BufReader::with_capacity(
@@ -477,6 +503,7 @@ fn scan_fastq_file(path: &str, bin_size: i32) -> Result<FileScan, String> {
         tiles: HashMap::new(),
         n_per_read: HashMap::new(),
         spatial: HashMap::new(),
+        n_shape: HashMap::new(),
     };
     let mut name_line: Vec<u8> = Vec::new();
     let mut seq_line: Vec<u8> = Vec::new();
@@ -522,7 +549,10 @@ fn scan_fastq_file(path: &str, bin_size: i32) -> Result<FileScan, String> {
         let acc = out.tiles.entry((lane, tile)).or_default();
         acc.total += 1;
 
+        let qual = trim_eol(&line);
         let mut n_count = 0u32;
+        let mut any_lowq = false;
+        let (mut run, mut longest, mut first) = (0u32, 0u32, usize::MAX);
         for (i, b) in seq.iter().enumerate() {
             if *b == b'N' {
                 if acc.cycles.len() <= i {
@@ -530,12 +560,32 @@ fn scan_fastq_file(path: &str, bin_size: i32) -> Result<FileScan, String> {
                 }
                 acc.cycles[i] += 1;
                 n_count += 1;
+                run += 1;
+                longest = longest.max(run);
+                first = first.min(i);
+            } else {
+                run = 0;
+                if qual.get(i).is_some_and(|q| *q < lowq_byte) {
+                    if acc.lowq_cycles.len() <= i {
+                        acc.lowq_cycles.resize(i + 1, 0);
+                    }
+                    acc.lowq_cycles[i] += 1;
+                    any_lowq = true;
+                }
             }
+        }
+        if any_lowq {
+            acc.lowq_reads += 1;
         }
         if n_count > 0 {
             acc.reads_with_n += 1;
             acc.n_bases += n_count as u64;
             *out.n_per_read.entry((lane, n_count)).or_insert(0) += 1;
+            let all_n = (n_count as usize == seq.len()) as u8;
+            *out
+                .n_shape
+                .entry((lane, longest, first_n_region(first, seq.len()), all_n))
+                .or_insert(0) += 1;
             *out
                 .spatial
                 .entry((lane, tile, x / bin_size, y / bin_size))
@@ -550,10 +600,19 @@ fn to_tuple(s: FileScan) -> ScanTuple {
     let mut tiles = Vec::with_capacity(s.tiles.len());
     let mut tile_cycle = Vec::new();
     for ((lane, tile), acc) in s.tiles {
-        tiles.push((lane, tile, acc.total, acc.reads_with_n, acc.n_bases));
-        for (i, c) in acc.cycles.iter().enumerate() {
-            if *c > 0 {
-                tile_cycle.push((lane, tile, (i + 1) as u32, *c));
+        tiles.push((
+            lane,
+            tile,
+            acc.total,
+            acc.reads_with_n,
+            acc.n_bases,
+            acc.lowq_reads,
+        ));
+        for i in 0..acc.cycles.len().max(acc.lowq_cycles.len()) {
+            let n = acc.cycles.get(i).copied().unwrap_or(0);
+            let lowq = acc.lowq_cycles.get(i).copied().unwrap_or(0);
+            if n > 0 || lowq > 0 {
+                tile_cycle.push((lane, tile, (i + 1) as u32, n, lowq));
             }
         }
     }
@@ -567,21 +626,29 @@ fn to_tuple(s: FileScan) -> ScanTuple {
         .map(|((l, t, xb, yb), c)| (l, t, xb, yb, c))
         .collect();
     spatial.sort_unstable();
-    (s.format_error, s.max_len, tiles, tile_cycle, n_per_read, spatial)
+    let mut n_shape: Vec<_> = s
+        .n_shape
+        .into_iter()
+        .map(|((l, run, region, all_n), c)| (l, run, region, all_n, c))
+        .collect();
+    n_shape.sort_unstable();
+    (s.format_error, s.max_len, tiles, tile_cycle, n_per_read, spatial, n_shape)
 }
 
 /// Scan N content of one or more FASTQ files.
 ///
 /// `paths` are processed by up to `threads` OS threads (work-stealing over
 /// the list); results come back in input order, one `ScanTuple` per file.
-/// `bin_size` is the spatial bin width in read-name coordinate units.
+/// `bin_size` is the spatial bin width in read-name coordinate units;
+/// `min_qual` is the Phred (+33) threshold for low-quality called bases.
 #[pyfunction]
-#[pyo3(signature = (paths, threads, bin_size=1000))]
+#[pyo3(signature = (paths, threads, bin_size=1000, min_qual=20))]
 fn scan_n_content(
     py: Python<'_>,
     paths: Vec<String>,
     threads: u32,
     bin_size: i32,
+    min_qual: u8,
 ) -> PyResult<Vec<ScanTuple>> {
     if bin_size < 1 {
         return Err(PyValueError::new_err("bin_size must be >= 1"));
@@ -594,7 +661,10 @@ fn scan_n_content(
 
     let scanned: Vec<Result<FileScan, String>> = py.detach(|| {
         if nthreads <= 1 {
-            return paths.iter().map(|p| scan_fastq_file(p, bin_size)).collect();
+            return paths
+                .iter()
+                .map(|p| scan_fastq_file(p, bin_size, min_qual))
+                .collect();
         }
         let paths = Arc::new(paths);
         let next = Arc::new(AtomicUsize::new(0));
@@ -609,7 +679,7 @@ fn scan_n_content(
                 if i >= n {
                     break;
                 }
-                tx.send((i, scan_fastq_file(&paths[i], bin_size))).ok();
+                tx.send((i, scan_fastq_file(&paths[i], bin_size, min_qual))).ok();
             }));
         }
         drop(tx);
@@ -650,6 +720,17 @@ mod tests {
         let m = p.search("XXXATCGATCGAT").unwrap();
         assert_eq!(m.0, 1); // leftmost wins over the 0-error start at 3
         assert_eq!(m.2, (0, 2, 0));
+    }
+
+    #[test]
+    fn first_n_region_edges() {
+        assert_eq!(first_n_region(0, 150), 0);
+        assert_eq!(first_n_region(9, 150), 0);
+        assert_eq!(first_n_region(10, 150), 1);
+        assert_eq!(first_n_region(139, 150), 1);
+        assert_eq!(first_n_region(140, 150), 2);
+        assert_eq!(first_n_region(5, 12), 0); // start wins on short reads
+        assert_eq!(first_n_region(10, 12), 2);
     }
 }
 

@@ -8,10 +8,13 @@ import time
 import altair as alt
 import polars
 
+from biomate.nspector.flags import build_flags
 from biomate.nspector.report import write_multiqc, write_report
+from biomate.nspector.runmetrics import join_tile_interop, read_tile_metrics
 from biomate.nspector.scan import (
     FileScan,
     extract_tile_coordinates,  # noqa: F401  (re-exported for callers/tests)
+    resolve_engine,
     scan_files,
 )
 from biomate.nspector.tables import build_tables, tile_layout
@@ -26,8 +29,26 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         elif not input_file.is_file():
             raise argparse.ArgumentTypeError(f"Input path {input_file} is not a file.")
 
+    try:
+        resolve_engine(getattr(args, "engine", "auto"))
+    except RuntimeError as err:
+        raise argparse.ArgumentTypeError(str(err)) from err
+
     if getattr(args, "spatial_bin_size", 1) < 1:
         raise argparse.ArgumentTypeError("--spatial-bin-size must be at least 1.")
+    if not 0 <= getattr(args, "min_qual", 20) <= 93:
+        raise argparse.ArgumentTypeError("--min-qual must be between 0 and 93.")
+    warn, fail = getattr(args, "warn_rate", 0.01), getattr(args, "fail_rate", 0.05)
+    if not 0 < warn <= fail <= 1:
+        raise argparse.ArgumentTypeError(
+            "Rates must satisfy 0 < --warn-rate <= --fail-rate <= 1."
+        )
+
+    run_folder = getattr(args, "run_folder", None)
+    if run_folder is not None and not (run_folder / "InterOp").is_dir():
+        raise argparse.ArgumentTypeError(
+            f"--run-folder {run_folder} has no InterOp directory."
+        )
 
     if args.output.exists() and not args.output.is_dir():
         raise argparse.ArgumentTypeError(
@@ -79,13 +100,41 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         default="auto",
         choices=["auto", "python", "rust"],
         help="Scan engine: auto (default; Rust when biomate_kernels is installed, "
-        "else Python), python, or rust (falls back to Python if unavailable).",
+        "else Python), python, or rust (errors out if biomate_kernels is missing).",
     )
     parser.add_argument(
         "--spatial-bin-size",
         type=int,
-        default=1000,
-        help="Width of the spatial bins in read-name X/Y coordinate units (default: 1000).",
+        default=2000,
+        help="Width of the spatial bins in read-name X/Y coordinate units (default: 2000).",
+    )
+    parser.add_argument(
+        "--min-qual",
+        type=int,
+        default=20,
+        help="Phred score below which a called (non-N) base counts as low quality "
+        "for the low-Q rate (default: 20).",
+    )
+    parser.add_argument(
+        "--warn-rate",
+        type=float,
+        default=0.01,
+        help="Flag as WARN when the fraction of reads with an N at a cycle reaches "
+        "this rate, for a tile at one cycle, a tile on average, or most tiles at "
+        "one cycle (dark cycle) (default: 0.01).",
+    )
+    parser.add_argument(
+        "--fail-rate",
+        type=float,
+        default=0.05,
+        help="Flag as FAIL above this rate, same scale as --warn-rate (default: 0.05).",
+    )
+    parser.add_argument(
+        "--run-folder",
+        type=pathlib.Path,
+        default=None,
+        help="Illumina run folder: add per-tile cluster density, %%PF and %%>=Q30 "
+        "from InterOp, plotted against the N rate. Needs biomate[interop].",
     )
     parser.add_argument(
         "--raw",
@@ -143,14 +192,18 @@ def plot_n_per_sequence(scan: FileScan, output_path: pathlib.Path) -> None:
 def plot_n_per_cycle_and_tile(scan: FileScan, output_path: pathlib.Path) -> None:
     """Plot the distribution of N-containing sequences across cycles and tiles."""
     max_cycle = scan.max_len
-    tiles = _scan_frame(scan, "tiles", ["lane", "tile", "total", "n", "n_bases"])
+    tiles = _scan_frame(
+        scan, "tiles", ["lane", "tile", "total", "n", "n_bases", "lowq"]
+    )
     grid = tiles.select(polars.col("tile").unique().sort()).join(
         polars.DataFrame({"cycles": polars.arange(1, max_cycle + 1, eager=True)}),
         how="cross",
     )
     source = (
         grid.join(
-            _scan_frame(scan, "tile_cycle", ["lane", "tile", "cycles", "n_sequences"])
+            _scan_frame(
+                scan, "tile_cycle", ["lane", "tile", "cycles", "n_sequences", "lowq"]
+            )
             .group_by("tile", "cycles")
             .agg(polars.col("n_sequences").sum()),
             on=["tile", "cycles"],
@@ -295,6 +348,7 @@ def main(args: argparse.Namespace) -> None:
             args.threads,
             bin_size,
             raw_dir=args.output if getattr(args, "raw", False) else None,
+            min_qual=getattr(args, "min_qual", 20),
         )
     )
     reads = sum(s.total_reads for s in scans)
@@ -313,7 +367,27 @@ def main(args: argparse.Namespace) -> None:
 
     phase = time.perf_counter()
     tables = build_tables(scans, bin_size=bin_size)
+    tables.flags = build_flags(
+        tables, getattr(args, "warn_rate", 0.01), getattr(args, "fail_rate", 0.05)
+    )
+    if getattr(args, "run_folder", None) is not None:
+        tables.tile_interop = join_tile_interop(
+            tables, read_tile_metrics(args.run_folder)
+        )
+        missing = tables.tile_interop["pct_pf"].null_count()
+        if missing:
+            logging.warning(
+                f"{missing} read/lane/tile rows have no InterOp tile metrics "
+                "(different run folder or tile naming?)."
+            )
     tables.write_parquet(args.output)
+    if tables.flags.height:
+        counts = tables.flags["status"].value_counts().sort("status")
+        logging.warning(
+            "Anomaly flags: "
+            + ", ".join(f"{c} {s}" for s, c in counts.iter_rows())
+            + " (see nspector_flags.parquet)."
+        )
     logging.info(f"Tables built and written in {time.perf_counter() - phase:.1f} s.")
 
     if not getattr(args, "no_html", False):

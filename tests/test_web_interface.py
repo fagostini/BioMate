@@ -274,6 +274,13 @@ class TestFlattenedParameters:
         assert "--error-type" in args
         assert "s" in args
 
+    def test_flatten_multiple_splits_commas(self):
+        """A multi-value field passes each comma-separated item as its own arg."""
+        params = [{"form_name": "input", "cli_name": "input", "multiple": True}]
+        values = {"input": "a_R1.fastq.gz, b_R2.fastq.gz,"}
+        args = flatten_parameters(params, values)
+        assert args == ["--input", "a_R1.fastq.gz", "b_R2.fastq.gz"]
+
     def test_flatten_with_default_value(self):
         """Test that default values are used when provided."""
         params = [

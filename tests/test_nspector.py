@@ -3,13 +3,16 @@
 import argparse
 import json
 import pathlib
+import random
 import re
+import sys
 
 import polars
 import pytest
 
 from tests.conftest import illumina_header, write_fastq_gz
 from biomate.nspector import nspector
+from biomate.nspector import scan as nspector_scan
 from biomate.nspector.nspector import (
     plot_individual_tiles,
     plot_n_per_cycle_and_tile,
@@ -25,11 +28,18 @@ from biomate.nspector.report import (
 )
 from biomate.nspector.scan import (
     FileScan,
+    LowQCounter,
     extract_tile_coordinates,
     fastq_stem,
     parse_fastq_name,
     scan_file_python,
     scan_files,
+)
+from biomate.nspector.flags import build_flags, sample_status
+from biomate.nspector.runmetrics import (
+    INTEROP_SCHEMA,
+    join_tile_interop,
+    read_tile_metrics,
 )
 from biomate.nspector.tables import build_tables
 
@@ -115,11 +125,35 @@ class TestScan:
         )
         scan = scan_file_python(path)
         assert scan.format_error is None
-        assert scan.tile_cycle == [(1, 1101, 1, 1), (1, 1101, 5, 1)]
-        assert scan.tiles == [(1, 1101, 3, 2, 2), (1, 1102, 1, 0, 0)]
+        assert scan.tile_cycle == [(1, 1101, 1, 1, 0), (1, 1101, 5, 1, 0)]
+        assert scan.tiles == [(1, 1101, 3, 2, 2, 0), (1, 1102, 1, 0, 0, 0)]
         assert scan.max_len == 6
         assert scan.total_reads == 4
         assert (scan.sample, scan.read) == ("S", "R1")
+
+    def test_scan_low_quality_and_n_shape(self, tmp_path):
+        path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+        seq_a = "ACGT" * 5 + "NNN" + "ACGTACGTACGT"  # run of 3 in the middle
+        write_fastq_gz(
+            path,
+            [
+                # Q2 ('#') at cycles 1 and 3; Q19 ('4') at cycle 4; N at 2 is not low-Q
+                (illumina_header(), "ANGTA", "##I4I"),
+                (illumina_header(), "AC", "5I"),  # Q20 is not low-Q
+                (illumina_header(), seq_a, "I" * len(seq_a)),
+                (illumina_header(), "NNNN", "####"),
+            ],
+        )
+        scan = scan_file_python(path, min_qual=20)
+        assert scan.tiles == [(1, 1101, 4, 3, 8, 1)]
+        lowq = {c: q for _, _, c, _, q in scan.tile_cycle if q}
+        assert lowq == {1: 1, 4: 1}
+        assert scan.n_shape == [
+            (1, 1, 0, 0, 1),  # ANGTA: first N at cycle 2
+            (1, 3, 1, 0, 1),  # middle run of 3
+            (1, 4, 0, 1, 1),  # all N
+        ]
+        assert scan_file_python(path, min_qual=0).tiles[0][5] == 0
 
     def test_scan_stops_on_bad_header(self, tmp_path):
         path = tmp_path / "bad.fastq.gz"
@@ -350,6 +384,16 @@ class TestValidateArgs:
         with pytest.raises(argparse.ArgumentTypeError, match="directory"):
             validate_args(args)
 
+    def test_rust_engine_without_kernel_raises(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(nspector_scan, "biomate_kernels", None)
+        fq = tmp_path / "x.fastq.gz"
+        fq.touch()
+        args = argparse.Namespace(
+            input=[fq], output=tmp_path / "out", engine="rust", spatial_bin_size=1000
+        )
+        with pytest.raises(argparse.ArgumentTypeError, match="biomate_kernels"):
+            validate_args(args)
+
     def test_spatial_bin_size_must_be_positive(self, tmp_path):
         args = self._make_args(tmp_path, spatial_bin_size=0)
         with pytest.raises(argparse.ArgumentTypeError, match="spatial-bin-size"):
@@ -488,3 +532,172 @@ class TestPlotFunctions:
             "individual_tiles/x_R1_001_tile_1103.png",
         ]:
             assert (runs[0] / name).read_bytes() == (runs[1] / name).read_bytes(), name
+
+
+# ---------------------------------------------------------------------------
+# flags
+# ---------------------------------------------------------------------------
+
+
+class TestFlags:
+    """Anomaly flags: bad tile, dark cycle and a single-cell outlier."""
+
+    @pytest.fixture()
+    def flagged(self, tmp_path):
+        # 10 tiles x 40 reads, 20 cycles; tile 1110 has Ns everywhere,
+        # cycle 5 is dark on every tile, tile 1103 has Ns at cycle 12 only
+        records = []
+        for t in range(1, 11):
+            tile = f"11{t:02d}"
+            for i in range(40):
+                seq = list("ACGT" * 5)
+                if tile == "1110" and i % 4 == 0:
+                    seq[i % 20] = "N"
+                if i < 30:
+                    seq[4] = "N"
+                if tile == "1103" and i < 20:
+                    seq[11] = "N"
+                records.append(_rec("".join(seq), tile=tile, x=str(i), y=str(i)))
+        path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+        write_fastq_gz(path, records)
+        return build_tables(scan_files([path], "python"))
+
+    def test_flag_kinds(self, flagged):
+        flags = build_flags(flagged, warn_rate=0.01, fail_rate=0.05)
+        got = {
+            (r["kind"], r["tile"], r["cycle"], r["status"])
+            for r in flags.iter_rows(named=True)
+        }
+        assert ("dark_cycle", None, 5, "FAIL") in got
+        assert ("tile_cycle", 1103, 12, "FAIL") in got
+        # 10 reads spread over 20 cycles: mean rate 0.0125 per cycle
+        assert ("tile", 1110, None, "WARN") in got
+        # the dark cycle is not repeated per tile and does not raise tile rates
+        assert not any(k == "tile_cycle" and c == 5 for k, _, c, _ in got)
+        # 1103's single bad cycle (20/40 reads) also lifts its mean to ~2.6%
+        assert {t for k, t, _, _ in got if k == "tile"} == {1103, 1110}
+        assert flags["status"].to_list() == sorted(
+            flags["status"].to_list(), key=lambda s: s != "FAIL"
+        )
+
+    def test_high_thresholds_give_no_flags(self, run_files):
+        tables = build_tables(scan_files(run_files, "python"))
+        assert build_flags(tables, warn_rate=0.9, fail_rate=0.95).height == 0
+
+    def test_sample_status(self, flagged):
+        flags = build_flags(flagged)
+        assert sample_status(flagged, flags).to_dicts() == [
+            {"sample": "S", "status": "FAIL"}
+        ]
+
+    def test_report_and_multiqc_show_flags(self, flagged, tmp_path):
+        flagged.flags = build_flags(flagged)
+        scans = []  # summary tables only need the tables for flags
+        page = write_report(scans, flagged, tmp_path).read_text()
+        assert "Anomaly flags" in page and "dark_cycle" in page
+        write_multiqc(flagged, tmp_path)
+        table = json.loads(
+            (tmp_path / "multiqc" / "nspector_flags_mqc.json").read_text()
+        )
+        assert (
+            table["plot_type"] == "table" and len(table["data"]) == flagged.flags.height
+        )
+        stats = (tmp_path / "multiqc" / "nspector_general_stats_mqc.tsv").read_text()
+        assert stats.splitlines()[-1].endswith("\tFAIL")
+
+
+# ---------------------------------------------------------------------------
+# InterOp tile metrics (--run-folder)
+# ---------------------------------------------------------------------------
+
+
+def _write_run_folder(run: pathlib.Path) -> None:
+    """Write RunInfo.xml and TileMetricsOut.bin with the interop library itself."""
+    np = pytest.importorskip("numpy")
+    core = pytest.importorskip("interop.core")
+    import interop.py_interop_metrics as metrics_mod
+    import interop.py_interop_run as run_mod
+    import interop.py_interop_run_metrics as run_metrics_mod
+
+    (run / "InterOp").mkdir(parents=True)
+    info = core._run_info_example_fixture(["1_1101", "1_1102"])
+    metrics = run_metrics_mod.run_metrics(info)
+    tiles = metrics.tile_metric_set()
+    tiles.set_version(metrics_mod.tile_metric.LATEST_VERSION)
+    for tile, pf in ((1101, 0.8), (1102, 0.5)):
+        tiles.insert(metrics_mod.tile_metric(1, tile, 2e5, 2e5 * pf, 1e6, 1e6 * pf))
+    info.write(str(run / "RunInfo.xml"))
+    buf = np.zeros(metrics.calculate_buffer_size(run_mod.Tile), dtype=np.uint8)
+    metrics.write_metrics_to_buffer(run_mod.Tile, buf)
+    (run / "InterOp" / "TileMetricsOut.bin").write_bytes(buf.tobytes())
+
+
+class TestRunMetrics:
+    """--run-folder: InterOp tile metrics joined to N rates."""
+
+    def test_read_tile_metrics(self, tmp_path):
+        _write_run_folder(tmp_path / "run")
+        frame = read_tile_metrics(tmp_path / "run")
+        assert frame.select("read", "lane", "tile", "pct_pf").rows() == [
+            ("R1", 1, 1101, 80.0),
+            ("R1", 1, 1102, 50.0),
+        ]
+        # no Q metrics written: Q30 is null rather than 0
+        assert frame["pct_q30"].null_count() == frame.height
+
+    def test_missing_interop_package(self, tmp_path, monkeypatch):
+        monkeypatch.setitem(sys.modules, "interop", None)
+        with pytest.raises(RuntimeError, match=r"biomate\[interop\]"):
+            read_tile_metrics(tmp_path)
+
+    def test_join_and_report(self, run_files, tmp_path):
+        tables = build_tables(scan_files(run_files, "python"))
+        metrics = polars.DataFrame(
+            [("R1", 1, 1101, 210.0, 80.0, 91.0)],
+            schema=INTEROP_SCHEMA,
+            orient="row",
+        )
+        tables.tile_interop = join_tile_interop(tables, metrics)
+        row = tables.tile_interop.filter(
+            (polars.col("lane") == 1) & (polars.col("tile") == 1101)
+        )
+        assert row["pct_pf"].item() == 80.0 and row["n_rate"].item() == 0.25
+        # tiles without InterOp rows stay, with null metrics
+        assert tables.tile_interop["pct_pf"].null_count() == 3
+        spec = build_chart(tables).to_dict()
+        assert "interop_metric" in {p["name"] for p in spec["params"]}
+        pick = [p for p in spec["params"] if p["name"] == "pick_tile"]
+        assert len(pick) == 1 and len(pick[0]["views"]) == 2
+        assert "nspector_tile_interop.parquet" in {
+            p.name for p in tables.write_parquet(tmp_path)
+        }
+
+    def test_run_folder_needs_interop_dir(self, tmp_path):
+        fq = tmp_path / "x.fastq.gz"
+        fq.touch()
+        args = argparse.Namespace(
+            input=[fq], output=tmp_path / "out", run_folder=tmp_path
+        )
+        with pytest.raises(argparse.ArgumentTypeError, match="InterOp"):
+            validate_args(args)
+
+
+def test_lowq_counter_batches_match_single_pass():
+    """Flushing every few reads (many tiles, mixed lengths) gives the same counts."""
+    rng = random.Random(5)
+    reads = [
+        (
+            1,
+            rng.choice((1101, 1102, 1103)),
+            "".join(rng.choice("ACGTN") for _ in range(n)),
+            "".join(chr(33 + rng.randint(0, 40)) for _ in range(n)),
+        )
+        for n in (rng.choice((4, 9)) for _ in range(500))
+    ]
+    small, big = LowQCounter(20, batch_size=3), LowQCounter(20, batch_size=10_000)
+    for counter in (small, big):
+        for read in reads:
+            counter.add(*read)
+    assert small.finish() == big.finish()
+    assert small.reads == big.reads
+    assert small.buffered == 0

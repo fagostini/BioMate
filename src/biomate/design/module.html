@@ -37,6 +37,7 @@
             </div>
             {% elif param['param_type'] == 'number' %}
             <input type="number"
+                    step="any"
                     class="form-control"
                     id="{{ param['form_name'] }}"
                     name="{{ param['form_name'] }}"

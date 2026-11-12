@@ -406,6 +406,7 @@ MODULES: List[Dict[str, Any]] = [
                 "help": "Input FASTQ file(s) (accepts multiple, comma-separated)",
                 "form_name": "input",
                 "cli_name": "input",
+                "multiple": True,
             },
             {
                 "label": "Output Directory",
@@ -427,10 +428,42 @@ MODULES: List[Dict[str, Any]] = [
             {
                 "label": "Spatial Bin Size",
                 "param_type": "number",
-                "default": "1000",
+                "default": "2000",
                 "help": "Width of the spatial bins in X/Y coordinate units",
                 "form_name": "spatial_bin_size",
                 "cli_name": "spatial-bin-size",
+            },
+            {
+                "label": "Run Folder (optional)",
+                "param_type": "text",
+                "default": "",
+                "help": "Illumina run folder with InterOp, to plot N rate against %PF, density and Q30",
+                "form_name": "run_folder",
+                "cli_name": "run-folder",
+            },
+            {
+                "label": "Low-Q Threshold",
+                "param_type": "number",
+                "default": "20",
+                "help": "Phred score below which a called base counts as low quality",
+                "form_name": "min_qual",
+                "cli_name": "min-qual",
+            },
+            {
+                "label": "Warn Rate",
+                "param_type": "number",
+                "default": "0.01",
+                "help": "Flag WARN at this fraction of reads with an N at a cycle",
+                "form_name": "warn_rate",
+                "cli_name": "warn-rate",
+            },
+            {
+                "label": "Fail Rate",
+                "param_type": "number",
+                "default": "0.05",
+                "help": "Flag FAIL at this fraction of reads with an N at a cycle",
+                "form_name": "fail_rate",
+                "cli_name": "fail-rate",
             },
             {
                 "label": "Write PNG Charts",
@@ -676,7 +709,10 @@ def flatten_parameters(params: List[Dict], values: Dict[str, str]) -> List[str]:
         default = p.get("default", "")
         if not val and default:
             val = default
-        if val:
+        if val and p.get("multiple"):
+            cli_args.append(f"--{cli_key}")
+            cli_args += [shlex.quote(v.strip()) for v in val.split(",") if v.strip()]
+        elif val:
             cli_args.append(f"--{cli_key}")
             cli_args.append(shlex.quote(str(val)))
 

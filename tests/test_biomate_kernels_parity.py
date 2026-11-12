@@ -186,8 +186,12 @@ def _illumina_name(tile: int, x: int, y: int, index: str = "AA+CC") -> str:
     return f"M00150:2:AABCCC:1:{tile:04d}:{x:04d}:{y:04d} 1:N:0:{index}"
 
 
-def _write_fastq(path: pathlib.Path, records: list[tuple[str, str]], gz: bool = True):
-    data = "".join(f"@{name}\n{seq}\n+\n{'I' * len(seq)}\n" for name, seq in records)
+def _write_fastq(path: pathlib.Path, records: list[tuple], gz: bool = True):
+    """Records are (name, seq) or (name, seq, qual); qualities default to 'I'."""
+    data = "".join(
+        f"@{r[0]}\n{r[1]}\n+\n{r[2] if len(r) > 2 else 'I' * len(r[1])}\n"
+        for r in records
+    )
     if gz:
         with gzip.open(path, "wt") as fh:
             fh.write(data)
@@ -195,9 +199,9 @@ def _write_fastq(path: pathlib.Path, records: list[tuple[str, str]], gz: bool = 
         path.write_text(data)
 
 
-def _reference_scan(path: pathlib.Path, bin_size: int = 1000):
+def _reference_scan(path: pathlib.Path, bin_size: int = 1000, min_qual: int = 20):
     """Reference: the dnaio loop in nspector.scan.scan_file_python()."""
-    scan = scan_file_python(path, bin_size=bin_size)
+    scan = scan_file_python(path, bin_size=bin_size, min_qual=min_qual)
     return (
         scan.format_error,
         scan.max_len,
@@ -205,6 +209,7 @@ def _reference_scan(path: pathlib.Path, bin_size: int = 1000):
         scan.tile_cycle,
         scan.n_per_read,
         scan.spatial,
+        scan.n_shape,
     )
 
 
@@ -213,8 +218,12 @@ def _normalise(res):
     return (fmt_err, max_len, *[[tuple(t) for t in c] for c in counters])
 
 
-def _kernel_scan(path: pathlib.Path, threads: int = 1, bin_size: int = 1000):
-    return _normalise(biomate_kernels.scan_n_content([str(path)], threads, bin_size)[0])
+def _kernel_scan(
+    path: pathlib.Path, threads: int = 1, bin_size: int = 1000, min_qual: int = 20
+):
+    return _normalise(
+        biomate_kernels.scan_n_content([str(path)], threads, bin_size, min_qual)[0]
+    )
 
 
 class TestScanNContentParity:
@@ -269,19 +278,28 @@ class TestScanNContentParity:
         _write_fastq(p, records)
         got = _kernel_scan(p)
         assert got == _reference_scan(p)
-        fmt_err, max_len, tiles, tile_cycle, n_per_read, spatial = got
+        fmt_err, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape = got
         assert (fmt_err, max_len) == (None, 6)
-        assert tiles == [(1, 1101, 2, 1, 1), (2, 1101, 1, 0, 0), (2, 1102, 1, 1, 2)]
-        assert tile_cycle == [(1, 1101, 4, 1), (2, 1102, 1, 1), (2, 1102, 2, 1)]
+        assert tiles == [
+            (1, 1101, 2, 1, 1, 0),
+            (2, 1101, 1, 0, 0, 0),
+            (2, 1102, 1, 1, 2, 0),
+        ]
+        assert tile_cycle == [
+            (1, 1101, 4, 1, 0),
+            (2, 1102, 1, 1, 0),
+            (2, 1102, 2, 1, 0),
+        ]
         assert n_per_read == [(1, 1, 1), (2, 2, 1)]
         assert spatial == [(1, 1101, 1, 0, 1), (2, 1102, 0, 2, 1)]
+        assert n_shape == [(1, 1, 0, 0, 1), (2, 2, 0, 1, 1)]
 
     def test_no_n_records(self, tmp_path):
         p = tmp_path / "clean.fastq.gz"
         _write_fastq(p, [(_illumina_name(1, 2, 3), "ACGT")])
         got = _kernel_scan(p)
         assert got == _reference_scan(p)
-        assert got[3:] == ([], [], [])
+        assert got[3:] == ([], [], [], [])
 
     def test_multi_member_gzip(self, tmp_path):
         """BCL Convert writes concatenated gzip members; all must be read."""
@@ -315,6 +333,26 @@ class TestScanNContentParity:
         p = tmp_path / "coords.fastq.gz"
         _write_fastq(p, records)
         assert _kernel_scan(p) == _reference_scan(p)
+
+    @pytest.mark.parametrize("min_qual", [0, 2, 20, 30, 93])
+    def test_low_quality_and_n_shape(self, tmp_path, min_qual):
+        """Random sequences and qualities: low-Q and N-run counters match."""
+        rng = random.Random(min_qual)
+        records = []
+        for _ in range(2_000):
+            length = rng.choice((5, 12, 25, 151))
+            seq = "".join(rng.choice("ACGTNNN") for _ in range(length))
+            if rng.random() < 0.05:
+                seq = "N" * length
+            qual = "".join(chr(33 + rng.randint(0, 41)) for _ in range(length))
+            records.append((_illumina_name(rng.choice((1101, 2204)), 1, 1), seq, qual))
+        p = tmp_path / "q.fastq.gz"
+        _write_fastq(p, records)
+        got = _kernel_scan(p, min_qual=min_qual)
+        assert got == _reference_scan(p, min_qual=min_qual)
+        assert got[6]  # n_shape populated
+        if min_qual in (20, 30):
+            assert any(row[4] for row in got[3])  # some low-Q cycles
 
     def test_large_gzip_spans_many_chunks(self, tmp_path):
         """Exercise the decompress-ahead thread across many 1 MiB chunks."""
