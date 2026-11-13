@@ -157,17 +157,17 @@ deploy: check-uv
 	@$(UV) run mkdocs gh-deploy
 
 
-# The release runs the full pipeline (blabber, fastrewind, bcl-convert) for
+# The datasets recipe runs the full pipeline (blabber, fastrewind, bcl-convert) for
 # every flowcell and packages each flowcell directory in its post-fastrewind
 # state. BCL-convert results (temp/Demultiplexed and its logs) are excluded
 # from the archive. Every test_* deepcleans temp/ before running, so each
 # flowcell directory is staged away right after its test completes, before
 # the next test's deepclean wipes it.
-.PHONY: release
-## Create a new release: runs the full pipeline for every flowcell and
+.PHONY: datasets
+## Build the test datasets: runs the full pipeline for every flowcell and
 ## packages each flowcell directory (post-fastrewind, BCL-convert results
-## excluded) into the release archive
-release:
+## excluded) into the datasets archive
+datasets:
 	@rm -rf $(RELEASE_DIR)
 	@mkdir -p $(RELEASE_DIR)
 	@$(MAKE) test_none
