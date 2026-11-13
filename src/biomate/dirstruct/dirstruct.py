@@ -76,7 +76,8 @@ def validate_args(args) -> argparse.Namespace:
 
 def main(args: argparse.Namespace) -> None:
     """Main function."""
-    if not args.output_file:
+    # extract without --output-file prints the tree to stdout: keep logs out of it
+    if args.command == "extract" and not args.output_file:
         args.quiet = True
     setup_logging(args)
 
