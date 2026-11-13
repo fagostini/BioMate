@@ -199,9 +199,13 @@ def _write_fastq(path: pathlib.Path, records: list[tuple], gz: bool = True):
         path.write_text(data)
 
 
-def _reference_scan(path: pathlib.Path, bin_size: int = 1000, min_qual: int = 20):
+def _reference_scan(
+    path: pathlib.Path, bin_size: int = 1000, min_qual: int = 20, cycle_window: int = 10
+):
     """Reference: the dnaio loop in nspector.scan.scan_file_python()."""
-    scan = scan_file_python(path, bin_size=bin_size, min_qual=min_qual)
+    scan = scan_file_python(
+        path, bin_size=bin_size, min_qual=min_qual, cycle_window=cycle_window
+    )
     return (
         scan.format_error,
         scan.max_len,
@@ -219,10 +223,16 @@ def _normalise(res):
 
 
 def _kernel_scan(
-    path: pathlib.Path, threads: int = 1, bin_size: int = 1000, min_qual: int = 20
+    path: pathlib.Path,
+    threads: int = 1,
+    bin_size: int = 1000,
+    min_qual: int = 20,
+    cycle_window: int = 10,
 ):
     return _normalise(
-        biomate_kernels.scan_n_content([str(path)], threads, bin_size, min_qual)[0]
+        biomate_kernels.scan_n_content(
+            [str(path)], threads, bin_size, min_qual, cycle_window
+        )[0]
     )
 
 
@@ -281,9 +291,9 @@ class TestScanNContentParity:
         fmt_err, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape = got
         assert (fmt_err, max_len) == (None, 6)
         assert tiles == [
-            (1, 1101, 2, 1, 1, 0),
-            (2, 1101, 1, 0, 0, 0),
-            (2, 1102, 1, 1, 2, 0),
+            (1, 1101, 2, 1, 1, 0, 8),
+            (2, 1101, 1, 0, 0, 0, 6),
+            (2, 1102, 1, 1, 2, 0, 2),
         ]
         assert tile_cycle == [
             (1, 1101, 4, 1, 0),
@@ -291,7 +301,8 @@ class TestScanNContentParity:
             (2, 1102, 2, 1, 0),
         ]
         assert n_per_read == [(1, 1, 1), (2, 2, 1)]
-        assert spatial == [(1, 1101, 1, 0, 1), (2, 1102, 0, 2, 1)]
+        # (lane, tile, x bin, y bin, cycle window, N bases)
+        assert spatial == [(1, 1101, 1, 0, 0, 1), (2, 1102, 0, 2, 0, 2)]
         assert n_shape == [(1, 1, 0, 0, 1), (2, 2, 0, 1, 1)]
 
     def test_no_n_records(self, tmp_path):
@@ -353,6 +364,31 @@ class TestScanNContentParity:
         assert got[6]  # n_shape populated
         if min_qual in (20, 30):
             assert any(row[4] for row in got[3])  # some low-Q cycles
+
+    @pytest.mark.parametrize("cycle_window", [1, 3, 10, 500])
+    def test_spatial_cycle_windows(self, tmp_path, cycle_window):
+        """Ns spread over many windows: per-window spatial N bases match."""
+        rng = random.Random(cycle_window)
+        records = [
+            (
+                _illumina_name(rng.choice((1101, 1102)), rng.randint(0, 3000), 5),
+                "".join(rng.choice("ACGTNN") for _ in range(rng.choice((7, 40, 151)))),
+            )
+            for _ in range(1_000)
+        ]
+        p = tmp_path / "w.fastq.gz"
+        _write_fastq(p, records)
+        got = _kernel_scan(p, cycle_window=cycle_window)
+        assert got == _reference_scan(p, cycle_window=cycle_window)
+        spatial = got[5]
+        assert sum(r[5] for r in spatial) == sum(t[4] for t in got[2])
+        assert max(r[4] for r in spatial) == (151 - 1) // cycle_window
+
+    def test_bad_cycle_window_rejected(self, tmp_path):
+        p = tmp_path / "x.fastq.gz"
+        _write_fastq(p, [(_illumina_name(1, 2, 3), "ACGT")])
+        with pytest.raises(ValueError, match="cycle_window"):
+            biomate_kernels.scan_n_content([str(p)], 1, 1000, 20, 0)
 
     def test_large_gzip_spans_many_chunks(self, tmp_path):
         """Exercise the decompress-ahead thread across many 1 MiB chunks."""

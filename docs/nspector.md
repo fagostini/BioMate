@@ -13,7 +13,12 @@ Static PNG charts are still available with `--png`.
 
 ## Usage
 
-The minimal command is `biomate nspector --input <FASTQ_FILE> [<FASTQ_FILE> ...]`.
+The minimal command is `biomate nspector --input <FASTQ_FILE_OR_DIR> [...]`.
+Directories are searched recursively for `.fastq`, `.fq`, `.fastq.gz` and `.fq.gz` files, so a whole demultiplexing folder can be given at once:
+
+```bash
+biomate nspector --input Run1/Demultiplexing --output ./nspector_results
+```
 
 ```bash
 biomate nspector \
@@ -23,11 +28,12 @@ biomate nspector \
 
 ## Options
 
-- `--input`: one or more FASTQ files (`.fastq`, `.fq`, optionally gzipped). Required.
+- `--input`: one or more FASTQ files (`.fastq`, `.fq`, optionally gzipped) and/or directories to search recursively. A file found twice is scanned once. Required.
 - `--output`: output directory, created if missing (default: `./output`).
 - `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` stops with an error when `biomate_kernels` is missing. Both engines produce identical results.
 - `--threads`: Rust engine: files scanned in parallel (default `0` = one per available core). Python engine: extra decompression threads per file. The Rust engine also decompresses each gzip file on its own thread, ahead of parsing, and reads multi-member gzip (as written by BCL Convert).
 - `--spatial-bin-size`: width of the spatial bins in read-name X/Y coordinate units (default: `2000`). Raise it if the report gets large.
+- `--spatial-cycle-window`: spatial bins are counted per window of this many cycles (default: `10`), so the spatial map can follow a cycle range dragged on the N per cycle chart.
 - `--min-qual`: Phred score below which a called (non-N) base counts as low quality (default: `20`). See [Low-quality companion](#low-quality-companion).
 - `--warn-rate`, `--fail-rate`: thresholds for the [anomaly flags](#anomaly-flags) (defaults: `0.01` and `0.05`).
 - `--run-folder`: an Illumina run folder. Nspector reads per-tile cluster density, %PF and %≥Q30 from its `InterOp/` files and plots them against the N rate. Needs the optional extra: `pip install 'biomate[interop]'`.
@@ -81,16 +87,30 @@ Flags appear:
 - in a status column of the worst-tiles table;
 - in MultiQC, as an `N status` column (worst flag on the sample's lanes) and a flags table.
 
-### Sample, lane and read
+### Project, sample, lane and read
+
+- The **project** comes from the folder layout:
+  - `Undetermined_*` files form the project `Undetermined`;
+  - otherwise the folder holding the file (BCL Convert `<Sample_Project>/<file>`),
+    or the folder above a `Sample_*` folder (bcl2fastq `<Project>/Sample_<id>/<file>`).
 
 - The **lane** comes from the read header.
 - **Sample** and **read** (R1/R2/I1/...) come from the Illumina file name `<sample>_S<n>[_L<lane>]_<read>_001.fastq.gz`.
 - Files that do not follow this convention use the file stem as the sample name and `R1` as the read.
 
+## Progress
+
+A progress bar shows the scan (by input bytes, advanced as each file finishes) and the output steps (tables, report, MultiQC, PNGs). It is hidden with `--quiet` and when the output is not a terminal.
+
 ## Interactive report
 
 `nspector_report.html` embeds the Vega, Vega-Lite and vega-embed JavaScript, so it opens without a network connection (for example, copied from an HPC node).
-The **Lane**, **Read** and **Metric** controls stay pinned at the top of the page.
+The **Project**, **Lane**, **Read**, **Metric** and **Show WARN flags** controls stay pinned at the top of the page. Flag outlines show FAIL flags only until **Show WARN flags** is ticked. Heatmap and map colours are log-scaled, so one extreme tile or cycle does not flatten the rest; tooltips give exact values. When a selection has no N bases, the per-read charts and the spatial map say so instead of showing empty axes:
+
+- **Project**: `All`, one project, or `Undetermined` to look only at the reads not assigned to a sample.
+- **Lane**: `All` (default; lanes are summed, so tiles with the same number in different lanes are combined) or one lane.
+- **Read**: `All` (default when there are several reads) or one read. With `All`, line and bar charts show each read side by side (R1 in the base colour, R2 in a lighter shade); heatmaps and maps sum the reads. Click a read in a chart legend to show only that read in every chart coloured by read (shift-click adds one, double-click shows all again); the N vs low-Q legend works the same for its four series.
+- Clicking a sample narrows the per-sample views to it, so results can be read per sample, per project, per lane or globally.
 
 | View | What it shows | Interaction |
 | --- | --- | --- |
@@ -102,9 +122,9 @@ The **Lane**, **Read** and **Metric** controls stay pinned at the top of the pag
 | Longest N run, first N | Histogram of the longest N run per read, and where the first N falls. | Follows the lane, read and sample selection. |
 | Tile × cycle | Heatmap of every tile at every cycle. Cells with no N and no low-Q base are left empty. Flagged cells and dark cycles are outlined in orange. | Highlights the selected tile. |
 | N rate vs InterOp (with `--run-folder`) | One point per tile: N rate against %PF, cluster density or %≥Q30, coloured by lane. | Click a point to select that tile everywhere. |
-| Spatial N density | N-containing reads binned over the X/Y coordinates of the selected tile (or of all tiles in the lane), with marginal histograms. | Follows the tile selection. |
+| Spatial N density | N bases binned over the X/Y coordinates of the selected tile (or of all tiles in the selection), with marginal histograms. | Follows the tile selection, and the cycle range dragged on N per cycle (by windows of `--spatial-cycle-window` cycles). |
 
-The tile-level views (tile map, tile × cycle and spatial) sum over samples. Tile defects are physical, so they affect every sample on that lane.
+The tile-level views (tile map, tile × cycle and spatial) sum the samples of the selected projects. Tile defects are physical, so they affect every sample on that lane; flags are always computed on the whole flowcell.
 
 Under the charts, the page lists:
 
@@ -125,13 +145,13 @@ Each table is written as `nspector_<table>.parquet`:
 
 | Table | Grain | Columns |
 | --- | --- | --- |
-| `sample_lane` | sample, read, lane | `n`, `n_bases`, `lowq`, `total`, `n_rate`, `lowq_rate` |
-| `sample_cycle` | sample, read, lane, cycle (dense) | `n`, `lowq`, `total`, `n_rate`, `lowq_rate` |
-| `tile_summary` | sample, read, lane, tile | `surface`, `swath`, `segment`, `n`, `n_bases`, `lowq`, `total`, `n_rate`, `lowq_rate`, `mean_n_per_affected_read` |
-| `tile_cycle` | read, lane, tile, cycle (summed over samples; only cycles with an N or a low-Q base) | `n`, `lowq`, `total`, `n_rate`, `lowq_rate` |
-| `n_per_read` | sample, read, lane, number of N bases | `n_reads` |
-| `spatial` | read, lane, tile, `x_bin`, `y_bin` (summed over samples; bin = coordinate // `--spatial-bin-size`) | `n` |
-| `n_shape` | sample, read, lane, `longest_run`, `first_n`, `all_n` | `n_reads` |
+| `sample_lane` | project, sample, read, lane | `n`, `n_bases`, `lowq`, `total`, `bases`, `n_rate`, `n_base_rate`, `lowq_rate` |
+| `sample_cycle` | project, sample, read, lane, cycle (dense) | `n`, `lowq`, `total`, `n_rate`, `lowq_rate` |
+| `tile_summary` | project, sample, read, lane, tile | `surface`, `swath`, `segment`, `n`, `n_bases`, `lowq`, `total`, `bases`, `n_rate`, `n_base_rate`, `lowq_rate`, `mean_n_per_affected_read` |
+| `tile_cycle` | project, read, lane, tile, cycle (summed over the project's samples; only cycles with an N or a low-Q base) | `n`, `lowq`, `total` (the project's reads on the tile), `n_rate`, `lowq_rate` |
+| `n_per_read` | project, sample, read, lane, number of N bases | `n_reads` |
+| `spatial` | project, read, lane, tile, `cycle` (first cycle of the window), `x_bin`, `y_bin` (summed over samples; bin = coordinate // `--spatial-bin-size`) | `n_bases` |
+| `n_shape` | project, sample, read, lane, `longest_run`, `first_n`, `all_n` | `n_reads` |
 | `flags` | one row per flag | `status`, `kind`, `read`, `lane`, `tile`, `cycle`, `rate`, `z`, `detail` |
 | `tile_interop` (with `--run-folder`) | read, lane, tile (summed over samples) | `n`, `total`, `n_rate`, `density_k`, `pct_pf`, `pct_q30` |
 
@@ -139,6 +159,7 @@ In these tables:
 
 - `n` is the number of reads with at least one N.
 - `n_bases` is the number of N base calls.
+- `bases` is the number of bases sequenced (sum of read lengths), and `n_base_rate = n_bases / bases` is the N rate per nucleotide. In the cycle tables `n_rate` already is per nucleotide, since each read has one base per cycle.
 - `lowq` is the number of reads with a called base below `--min-qual`.
 - `total` is the number of reads scanned.
 

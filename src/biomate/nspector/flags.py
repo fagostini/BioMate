@@ -79,7 +79,10 @@ def dense_tile_cycle(tables: NspectorTables) -> polars.DataFrame:
     )
     return (
         grid.join(
-            tables.tile_cycle.select("read", "lane", "tile", "cycle", "n"),
+            # flags are flowcell-level: sum the projects sharing a tile
+            tables.tile_cycle.group_by("read", "lane", "tile", "cycle").agg(
+                polars.col("n").sum()
+            ),
             on=["read", "lane", "tile", "cycle"],
             how="left",
         )

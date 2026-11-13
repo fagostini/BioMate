@@ -7,13 +7,23 @@ import time
 
 import altair as alt
 import polars
+from rich.progress import (
+    BarColumn,
+    Progress,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 from biomate.nspector.flags import build_flags
 from biomate.nspector.report import write_multiqc, write_report
 from biomate.nspector.runmetrics import join_tile_interop, read_tile_metrics
 from biomate.nspector.scan import (
     FileScan,
+    discover_fastqs,
     extract_tile_coordinates,  # noqa: F401  (re-exported for callers/tests)
+    project_of,
     resolve_engine,
     scan_files,
 )
@@ -23,11 +33,16 @@ from biomate.setup import setup_logging
 
 def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     """Validate the command line arguments."""
-    for input_file in args.input:
-        if not input_file.exists():
-            raise argparse.ArgumentTypeError(f"Input file {input_file} does not exist.")
-        elif not input_file.is_file():
-            raise argparse.ArgumentTypeError(f"Input path {input_file} is not a file.")
+    for input_path in args.input:
+        if not input_path.exists():
+            raise argparse.ArgumentTypeError(f"Input path {input_path} does not exist.")
+    args.input = discover_fastqs(args.input)
+    if not args.input:
+        raise argparse.ArgumentTypeError("No FASTQ files found in the input paths.")
+    projects = {project_of(p) for p in args.input}
+    logging.info(
+        f"Found {len(args.input)} FASTQ file(s) in {len(projects)} project(s)."
+    )
 
     try:
         resolve_engine(getattr(args, "engine", "auto"))
@@ -36,6 +51,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
 
     if getattr(args, "spatial_bin_size", 1) < 1:
         raise argparse.ArgumentTypeError("--spatial-bin-size must be at least 1.")
+    if getattr(args, "spatial_cycle_window", 1) < 1:
+        raise argparse.ArgumentTypeError("--spatial-cycle-window must be at least 1.")
     if not 0 <= getattr(args, "min_qual", 20) <= 93:
         raise argparse.ArgumentTypeError("--min-qual must be between 0 and 93.")
     warn, fail = getattr(args, "warn_rate", 0.01), getattr(args, "fail_rate", 0.05)
@@ -79,7 +96,8 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         type=pathlib.Path,
         required=True,
         nargs="+",
-        help="Path to the input FASTQ file(s) to inspect.",
+        help="FASTQ files and/or directories to inspect; directories are searched "
+        "recursively for .fastq(.gz)/.fq(.gz) files.",
     )
     parser.add_argument(
         "--threads",
@@ -107,6 +125,13 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         type=int,
         default=2000,
         help="Width of the spatial bins in read-name X/Y coordinate units (default: 2000).",
+    )
+    parser.add_argument(
+        "--spatial-cycle-window",
+        type=int,
+        default=10,
+        help="Spatial bins are counted per window of this many cycles, so the "
+        "spatial map can follow a cycle selection (default: 10).",
     )
     parser.add_argument(
         "--min-qual",
@@ -193,7 +218,7 @@ def plot_n_per_cycle_and_tile(scan: FileScan, output_path: pathlib.Path) -> None
     """Plot the distribution of N-containing sequences across cycles and tiles."""
     max_cycle = scan.max_len
     tiles = _scan_frame(
-        scan, "tiles", ["lane", "tile", "total", "n", "n_bases", "lowq"]
+        scan, "tiles", ["lane", "tile", "total", "n", "n_bases", "lowq", "bases"]
     )
     grid = tiles.select(polars.col("tile").unique().sort()).join(
         polars.DataFrame({"cycles": polars.arange(1, max_cycle + 1, eager=True)}),
@@ -261,7 +286,7 @@ def _tile_chart(source: polars.DataFrame, bin_size: int) -> alt.VConcatChart:
             alt.X2("x1:Q"),
             alt.Y("y0:Q", title="Y").scale(zero=False),
             alt.Y2("y1:Q"),
-            alt.Color("n:Q", title="Reads with N").scale(scheme="viridis"),
+            alt.Color("n:Q", title="N bases").scale(scheme="viridis"),
         )
         .properties(width=500, height=500)
     )
@@ -287,7 +312,9 @@ def plot_individual_tiles(
     ``individual_tiles/{stem}_tile_{tile}.png``, in sorted tile order.
     """
     output_path.joinpath("individual_tiles").mkdir(parents=True, exist_ok=True)
-    spatial = _scan_frame(scan, "spatial", ["lane", "tile", "x_bin", "y_bin", "n"])
+    spatial = _scan_frame(
+        scan, "spatial", ["lane", "tile", "x_bin", "y_bin", "window", "n"]
+    )
     for tile in sorted(spatial.get_column("tile").unique().to_list()):
         source = (
             spatial.filter(polars.col("tile") == tile)
@@ -334,12 +361,33 @@ def usable_scans(scans: list[FileScan]) -> list[FileScan]:
     return kept
 
 
+def _progress(quiet: bool) -> Progress:
+    """Overall progress bar: one task for scanning, one for the outputs."""
+    return Progress(
+        TextColumn("{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        disable=quiet,
+    )
+
+
 def main(args: argparse.Namespace) -> None:
     """Main function."""
     setup_logging(args)
     logging.info("Running nspector module...")
+    with _progress(getattr(args, "quiet", False)) as progress:
+        _run(args, progress)
+    logging.info("Nspector module finished.")
 
+
+def _run(args: argparse.Namespace, progress: Progress) -> None:
     bin_size = args.spatial_bin_size
+    sizes = {p: p.stat().st_size for p in args.input}
+    scanning = progress.add_task(
+        f"Scanning {len(sizes)} file(s)", total=sum(sizes.values()) or 1
+    )
     started = time.perf_counter()
     scans = usable_scans(
         scan_files(
@@ -349,6 +397,8 @@ def main(args: argparse.Namespace) -> None:
             bin_size,
             raw_dir=args.output if getattr(args, "raw", False) else None,
             min_qual=getattr(args, "min_qual", 20),
+            cycle_window=getattr(args, "spatial_cycle_window", 10),
+            done=lambda path: progress.advance(scanning, sizes[path]),
         )
     )
     reads = sum(s.total_reads for s in scans)
@@ -365,8 +415,21 @@ def main(args: argparse.Namespace) -> None:
             f"{scan.path.name}: {scan.reads_with_n} of {scan.total_reads} reads have N bases."
         )
 
+    write_html = not getattr(args, "no_html", False)
+    write_mqc = not getattr(args, "no_multiqc", False)
+    png_scans = (
+        [s for s in scans if s.reads_with_n] if getattr(args, "png", False) else []
+    )
+    outputs = progress.add_task(
+        "Building outputs", total=1 + write_html + write_mqc + len(png_scans)
+    )
+
     phase = time.perf_counter()
-    tables = build_tables(scans, bin_size=bin_size)
+    tables = build_tables(
+        scans,
+        bin_size=bin_size,
+        cycle_window=getattr(args, "spatial_cycle_window", 10),
+    )
     tables.flags = build_flags(
         tables, getattr(args, "warn_rate", 0.01), getattr(args, "fail_rate", 0.05)
     )
@@ -389,21 +452,21 @@ def main(args: argparse.Namespace) -> None:
             + " (see nspector_flags.parquet)."
         )
     logging.info(f"Tables built and written in {time.perf_counter() - phase:.1f} s.")
+    progress.advance(outputs)
 
-    if not getattr(args, "no_html", False):
+    if write_html:
         phase = time.perf_counter()
         path = write_report(scans, tables, args.output)
         logging.info(
             f"Interactive report written to {path} in {time.perf_counter() - phase:.1f} s."
         )
-    if not getattr(args, "no_multiqc", False):
+        progress.advance(outputs)
+    if write_mqc:
         phase = time.perf_counter()
         write_multiqc(tables, args.output)
         logging.info(f"MultiQC files written in {time.perf_counter() - phase:.1f} s.")
-    if getattr(args, "png", False):
-        for scan in scans:
-            if scan.reads_with_n:
-                logging.debug(f"Creating PNG charts for file: {scan.path}")
-                write_pngs(scan, args.output, bin_size)
-
-    logging.info("Nspector module finished.")
+        progress.advance(outputs)
+    for scan in png_scans:
+        logging.debug(f"Creating PNG charts for file: {scan.path}")
+        write_pngs(scan, args.output, bin_size)
+        progress.advance(outputs)

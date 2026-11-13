@@ -343,6 +343,8 @@ struct TileAcc {
     n_bases: u64,
     /// reads with at least one called (non-N) base below `min_qual`
     lowq_reads: u64,
+    /// all bases (sum of read lengths), the denominator of the N base rate
+    bases: u64,
     /// reads with an N at cycle `i + 1`
     cycles: Vec<u64>,
     /// reads with a called base below `min_qual` at cycle `i + 1`
@@ -375,26 +377,27 @@ struct FileScan {
     max_len: u32,
     tiles: HashMap<(i32, i32), TileAcc>,
     n_per_read: HashMap<(i32, u32), u64>,
-    spatial: HashMap<(i32, i32, i32, i32), u64>,
+    /// (lane, tile, x bin, y bin, cycle window) -> N bases
+    spatial: HashMap<(i32, i32, i32, i32, u32), u64>,
     /// (lane, longest N run, first-N region, all-N flag) -> reads
     n_shape: HashMap<(i32, u32, u8, u8), u64>,
 }
 
 /// Python tuple returned per file by `scan_n_content`:
 /// `(format_error, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape)` with
-/// `tiles = [(lane, tile, total, reads_with_n, n_bases, lowq_reads)]`,
+/// `tiles = [(lane, tile, total, reads_with_n, n_bases, lowq_reads, bases)]`,
 /// `tile_cycle = [(lane, tile, cycle, reads_with_n, reads_with_lowq)]`
 /// (1-based, rows where either count is non-zero),
 /// `n_per_read = [(lane, n_count, reads)]`,
-/// `spatial = [(lane, tile, x // bin, y // bin, reads_with_n)]`,
+/// `spatial = [(lane, tile, x // bin, y // bin, (cycle - 1) // window, n_bases)]`,
 /// `n_shape = [(lane, longest_run, first_region, all_n, reads)]`, all sorted.
 type ScanTuple = (
     Option<usize>,
     u32,
-    Vec<(i32, i32, u64, u64, u64, u64)>,
+    Vec<(i32, i32, u64, u64, u64, u64, u64)>,
     Vec<(i32, i32, u32, u64, u64)>,
     Vec<(i32, u32, u64)>,
-    Vec<(i32, i32, i32, i32, u64)>,
+    Vec<(i32, i32, i32, i32, u32, u64)>,
     Vec<(i32, u32, u8, u8, u64)>,
 );
 
@@ -484,7 +487,12 @@ fn trim_eol(line: &[u8]) -> &[u8] {
 /// Line protocol: `@name` / sequence / `+` / qualities. A name line not
 /// starting with `@`, or a truncated final record, is a hard error (the
 /// reference raises a `dnaio` format error in the same situations).
-fn scan_fastq_file(path: &str, bin_size: i32, min_qual: u8) -> Result<FileScan, String> {
+fn scan_fastq_file(
+    path: &str,
+    bin_size: i32,
+    min_qual: u8,
+    cycle_window: u32,
+) -> Result<FileScan, String> {
     // Phred+33: a quality byte below this is a low-quality call
     let lowq_byte = min_qual.saturating_add(33);
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -550,6 +558,10 @@ fn scan_fastq_file(path: &str, bin_size: i32, min_qual: u8) -> Result<FileScan, 
         acc.total += 1;
 
         let qual = trim_eol(&line);
+        acc.bases += seq.len() as u64;
+        let (xb, yb) = (x / bin_size, y / bin_size);
+        // N bases of this read in the current cycle window (positions increase)
+        let (mut window, mut in_window) = (0u32, 0u64);
         let mut n_count = 0u32;
         let mut any_lowq = false;
         let (mut run, mut longest, mut first) = (0u32, 0u32, usize::MAX);
@@ -560,6 +572,13 @@ fn scan_fastq_file(path: &str, bin_size: i32, min_qual: u8) -> Result<FileScan, 
                 }
                 acc.cycles[i] += 1;
                 n_count += 1;
+                let w = i as u32 / cycle_window;
+                if w != window && in_window > 0 {
+                    *out.spatial.entry((lane, tile, xb, yb, window)).or_insert(0) += in_window;
+                    in_window = 0;
+                }
+                window = w;
+                in_window += 1;
                 run += 1;
                 longest = longest.max(run);
                 first = first.min(i);
@@ -586,10 +605,7 @@ fn scan_fastq_file(path: &str, bin_size: i32, min_qual: u8) -> Result<FileScan, 
                 .n_shape
                 .entry((lane, longest, first_n_region(first, seq.len()), all_n))
                 .or_insert(0) += 1;
-            *out
-                .spatial
-                .entry((lane, tile, x / bin_size, y / bin_size))
-                .or_insert(0) += 1;
+            *out.spatial.entry((lane, tile, xb, yb, window)).or_insert(0) += in_window;
         }
         record_idx += 1;
     }
@@ -607,6 +623,7 @@ fn to_tuple(s: FileScan) -> ScanTuple {
             acc.reads_with_n,
             acc.n_bases,
             acc.lowq_reads,
+            acc.bases,
         ));
         for i in 0..acc.cycles.len().max(acc.lowq_cycles.len()) {
             let n = acc.cycles.get(i).copied().unwrap_or(0);
@@ -623,7 +640,7 @@ fn to_tuple(s: FileScan) -> ScanTuple {
     let mut spatial: Vec<_> = s
         .spatial
         .into_iter()
-        .map(|((l, t, xb, yb), c)| (l, t, xb, yb, c))
+        .map(|((l, t, xb, yb, w), c)| (l, t, xb, yb, w, c))
         .collect();
     spatial.sort_unstable();
     let mut n_shape: Vec<_> = s
@@ -640,18 +657,23 @@ fn to_tuple(s: FileScan) -> ScanTuple {
 /// `paths` are processed by up to `threads` OS threads (work-stealing over
 /// the list); results come back in input order, one `ScanTuple` per file.
 /// `bin_size` is the spatial bin width in read-name coordinate units;
-/// `min_qual` is the Phred (+33) threshold for low-quality called bases.
+/// `min_qual` is the Phred (+33) threshold for low-quality called bases;
+/// `cycle_window` groups cycles for the spatial counts.
 #[pyfunction]
-#[pyo3(signature = (paths, threads, bin_size=1000, min_qual=20))]
+#[pyo3(signature = (paths, threads, bin_size=1000, min_qual=20, cycle_window=10))]
 fn scan_n_content(
     py: Python<'_>,
     paths: Vec<String>,
     threads: u32,
     bin_size: i32,
     min_qual: u8,
+    cycle_window: u32,
 ) -> PyResult<Vec<ScanTuple>> {
     if bin_size < 1 {
         return Err(PyValueError::new_err("bin_size must be >= 1"));
+    }
+    if cycle_window < 1 {
+        return Err(PyValueError::new_err("cycle_window must be >= 1"));
     }
     let n = paths.len();
     if n == 0 {
@@ -663,7 +685,7 @@ fn scan_n_content(
         if nthreads <= 1 {
             return paths
                 .iter()
-                .map(|p| scan_fastq_file(p, bin_size, min_qual))
+                .map(|p| scan_fastq_file(p, bin_size, min_qual, cycle_window))
                 .collect();
         }
         let paths = Arc::new(paths);
@@ -679,7 +701,8 @@ fn scan_n_content(
                 if i >= n {
                     break;
                 }
-                tx.send((i, scan_fastq_file(&paths[i], bin_size, min_qual))).ok();
+                tx.send((i, scan_fastq_file(&paths[i], bin_size, min_qual, cycle_window)))
+                    .ok();
             }));
         }
         drop(tx);

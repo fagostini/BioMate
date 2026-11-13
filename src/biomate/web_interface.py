@@ -403,7 +403,7 @@ MODULES: List[Dict[str, Any]] = [
                 "label": "Input File(s)",
                 "param_type": "text",
                 "default": "",
-                "help": "Input FASTQ file(s) (accepts multiple, comma-separated)",
+                "help": "FASTQ files and/or directories, comma-separated; directories are searched recursively",
                 "form_name": "input",
                 "cli_name": "input",
                 "multiple": True,
@@ -432,6 +432,14 @@ MODULES: List[Dict[str, Any]] = [
                 "help": "Width of the spatial bins in X/Y coordinate units",
                 "form_name": "spatial_bin_size",
                 "cli_name": "spatial-bin-size",
+            },
+            {
+                "label": "Spatial Cycle Window",
+                "param_type": "number",
+                "default": "10",
+                "help": "Cycles per spatial window (the spatial map follows the cycle selection by window)",
+                "form_name": "spatial_cycle_window",
+                "cli_name": "spatial-cycle-window",
             },
             {
                 "label": "Run Folder (optional)",

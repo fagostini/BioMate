@@ -9,6 +9,7 @@ import sys
 
 import polars
 import pytest
+import vl_convert
 
 from tests.conftest import illumina_header, write_fastq_gz
 from biomate.nspector import nspector
@@ -23,19 +24,23 @@ from biomate.nspector.nspector import (
 from biomate.nspector.report import (
     build_chart,
     select_spatial,
+    window_tile_cycle,
+    with_tile_anchors,
     write_multiqc,
     write_report,
 )
 from biomate.nspector.scan import (
     FileScan,
     LowQCounter,
+    discover_fastqs,
     extract_tile_coordinates,
     fastq_stem,
     parse_fastq_name,
+    project_of,
     scan_file_python,
     scan_files,
 )
-from biomate.nspector.flags import build_flags, sample_status
+from biomate.nspector.flags import build_flags, dense_tile_cycle, sample_status
 from biomate.nspector.runmetrics import (
     INTEROP_SCHEMA,
     join_tile_interop,
@@ -126,7 +131,8 @@ class TestScan:
         scan = scan_file_python(path)
         assert scan.format_error is None
         assert scan.tile_cycle == [(1, 1101, 1, 1, 0), (1, 1101, 5, 1, 0)]
-        assert scan.tiles == [(1, 1101, 3, 2, 2, 0), (1, 1102, 1, 0, 0, 0)]
+        # last field: bases sequenced (sum of read lengths)
+        assert scan.tiles == [(1, 1101, 3, 2, 2, 0, 14), (1, 1102, 1, 0, 0, 0, 6)]
         assert scan.max_len == 6
         assert scan.total_reads == 4
         assert (scan.sample, scan.read) == ("S", "R1")
@@ -145,7 +151,7 @@ class TestScan:
             ],
         )
         scan = scan_file_python(path, min_qual=20)
-        assert scan.tiles == [(1, 1101, 4, 3, 8, 1)]
+        assert scan.tiles == [(1, 1101, 4, 3, 8, 1, 46)]
         lowq = {c: q for _, _, c, _, q in scan.tile_cycle if q}
         assert lowq == {1: 1, 4: 1}
         assert scan.n_shape == [
@@ -232,7 +238,14 @@ class TestTables:
         # fixture x = 100..170, y = 500..549, bin width 25
         assert set(tables.spatial["x_bin"]) <= {4, 5, 6}
         assert set(tables.spatial["y_bin"]) <= {20, 21}
-        assert tables.spatial["n"].sum() == tables.tile_summary["n"].sum()
+        assert tables.spatial["n_bases"].sum() == tables.tile_summary["n_bases"].sum()
+        # default windows of 10 cycles: Ns at cycles 1, 7 and 8 all start at 1
+        assert set(tables.spatial["cycle"]) == {1}
+
+    def test_n_base_rate(self, tables):
+        row = tables.sample_lane.row(0, named=True)
+        assert row["bases"] == 8 * row["total"]
+        assert row["n_base_rate"] == row["n_bases"] / row["bases"]
 
     def test_select_spatial_trims_to_worst_tiles(self, tables):
         trimmed = select_spatial(tables, max_rows=1)
@@ -266,7 +279,14 @@ class TestReport:
     def test_chart_has_linked_params(self, built):
         spec = build_chart(built[1]).to_dict()
         names = {p["name"] for p in spec["params"]}
-        assert {"lane_sel", "read_sel", "metric"} <= names
+        assert {"project_sel", "lane_sel", "read_sel", "metric"} <= names
+        selects = {p["name"]: p for p in spec["params"] if "bind" in p}
+        assert selects["lane_sel"]["value"] == "All"
+        assert selects["lane_sel"]["bind"]["options"][0] == "All"
+        assert selects["project_sel"]["bind"]["options"][0] == "All"
+        assert selects["show_warn"]["value"] is False
+        text = json.dumps(spec)
+        assert '"type": "symlog"' in text and "No N bases in this selection" in text
         text = json.dumps(spec)
         for selection in ("pick_sample", "pick_tile", "cycle_brush"):
             assert selection in text
@@ -365,12 +385,21 @@ class TestValidateArgs:
         with pytest.raises(argparse.ArgumentTypeError, match="does not exist"):
             validate_args(args)
 
-    def test_input_is_directory_raises(self, tmp_path):
+    def test_directory_without_fastq_raises(self, tmp_path):
         d = tmp_path / "adir"
         d.mkdir()
+        (d / "notes.txt").write_text("x")
         args = self._make_args(tmp_path, input_files=[d])
-        with pytest.raises(argparse.ArgumentTypeError, match="not a file"):
+        with pytest.raises(argparse.ArgumentTypeError, match="No FASTQ"):
             validate_args(args)
+
+    def test_directory_is_expanded(self, tmp_path):
+        d = tmp_path / "run" / "ProjA"
+        d.mkdir(parents=True)
+        f = d / "S1_S1_L001_R1_001.fastq.gz"
+        write_fastq_gz(f, [(illumina_header(), "ACGT", "####")])
+        args = validate_args(self._make_args(tmp_path, input_files=[tmp_path / "run"]))
+        assert args.input == [f]
 
     def test_output_created_when_missing(self, tmp_path):
         new_out = tmp_path / "brand_new"
@@ -667,7 +696,10 @@ class TestRunMetrics:
         spec = build_chart(tables).to_dict()
         assert "interop_metric" in {p["name"] for p in spec["params"]}
         pick = [p for p in spec["params"] if p["name"] == "pick_tile"]
-        assert len(pick) == 1 and len(pick[0]["views"]) == 2
+        assert len(pick) == 1
+        # one click handler each: tile map, tile x cycle heatmap, InterOp scatter
+        vega = json.dumps(vl_convert.vegalite_to_vega(spec))
+        assert vega.count('"name": "pick_tile_tuple", "on"') == 3
         assert "nspector_tile_interop.parquet" in {
             p.name for p in tables.write_parquet(tmp_path)
         }
@@ -701,3 +733,82 @@ def test_lowq_counter_batches_match_single_pass():
     assert small.finish() == big.finish()
     assert small.reads == big.reads
     assert small.buffered == 0
+
+
+# ---------------------------------------------------------------------------
+# directory input and projects
+# ---------------------------------------------------------------------------
+
+
+def _demux_tree(root: pathlib.Path) -> dict[str, pathlib.Path]:
+    """BCL Convert + bcl2fastq style tree with Undetermined at the root."""
+    files = {
+        "bclconvert": root / "ProjA" / "S1_S1_L001_R1_001.fastq.gz",
+        "bcl2fastq": root / "ProjB" / "Sample_S2" / "S2_S2_L001_R1_001.fastq.gz",
+        "undetermined": root / "Undetermined_S0_L001_R1_001.fastq.gz",
+    }
+    for i, path in enumerate(files.values()):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # all on tile 1101; 4 reads each, 1 + i of them with an N at cycle 2
+        write_fastq_gz(
+            path,
+            [_rec("ANGT" if r <= i else "ACGT", x=str(r), y=str(r)) for r in range(4)],
+        )
+    (root / "ProjA" / "SampleSheet.csv").write_text("x")
+    return files
+
+
+class TestDirectoryInput:
+    """Recursive discovery, project naming and project-aware tables."""
+
+    def test_discover_and_project(self, tmp_path):
+        files = _demux_tree(tmp_path)
+        found = discover_fastqs([tmp_path, files["bclconvert"]])
+        assert sorted(found) == sorted(files.values())  # duplicate dropped
+        assert {k: project_of(p) for k, p in files.items()} == {
+            "bclconvert": "ProjA",
+            "bcl2fastq": "ProjB",
+            "undetermined": "Undetermined",
+        }
+
+    def test_tables_split_by_project(self, tmp_path):
+        _demux_tree(tmp_path)
+        scans = scan_files(discover_fastqs([tmp_path]), "python")
+        tables = build_tables(scans)
+        assert set(tables.sample_lane["project"]) == {"ProjA", "ProjB", "Undetermined"}
+        per_project = dict(
+            tables.tile_cycle.filter(polars.col("cycle") == 2)
+            .select("project", "n")
+            .iter_rows()
+        )
+        assert per_project == {"ProjA": 1, "ProjB": 2, "Undetermined": 3}
+        assert set(tables.tile_cycle["total"]) == {4}
+        # flags stay flowcell-level: 6 of 12 reads with an N at cycle 2
+        dense = dense_tile_cycle(tables).filter(polars.col("cycle") == 2)
+        assert dense.select("n", "total").row(0) == (6, 12)
+        anchored = with_tile_anchors(window_tile_cycle(tables)[0], tables)
+        assert anchored.filter(polars.col("n") == 0).height == 3
+
+    def test_rust_engine_matches_python_per_file_pool(self, tmp_path):
+        pytest.importorskip("biomate_kernels")
+        paths = discover_fastqs([_demux_tree(tmp_path)["bclconvert"].parents[1]])
+        done = []
+        rust = scan_files(paths, "rust", threads=2, done=done.append)
+        assert rust == scan_files(paths, "python")
+        assert sorted(done) == sorted(paths)
+
+
+def test_read_control_offers_all_with_two_reads(tmp_path):
+    paths = []
+    for read in ("R1", "R2"):
+        path = tmp_path / f"S_S1_L001_{read}_001.fastq.gz"
+        write_fastq_gz(path, [_rec("ANGT"), _rec("ACGT", tile="1102")])
+        paths.append(path)
+    spec = build_chart(build_tables(scan_files(paths, "python"))).to_dict()
+    read_sel = next(p for p in spec["params"] if p["name"] == "read_sel")
+    assert read_sel["value"] == "All"
+    assert read_sel["bind"]["options"] == ["All", "R1", "R2"]
+    # legends toggle reads (shared by the read charts) and N / low-Q series
+    legend = {p["name"]: p for p in spec["params"] if p.get("bind") == "legend"}
+    assert set(legend) == {"pick_read", "pick_series"}
+    assert len(legend["pick_read"]["views"]) >= 4

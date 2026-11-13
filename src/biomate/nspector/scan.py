@@ -8,6 +8,8 @@ import os
 import pathlib
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 import dnaio
 import numpy
@@ -88,6 +90,46 @@ def parse_fastq_name(path: pathlib.Path) -> tuple[str, str]:
     return match.group("sample"), match.group("read")
 
 
+UNDETERMINED = "Undetermined"
+
+
+def project_of(path: pathlib.Path) -> str:
+    """Return the project of a FASTQ from its folder layout.
+
+    ``Undetermined`` files form their own project. Otherwise the project is the
+    parent folder (BCL Convert ``<Sample_Project>/<file>``), or the folder
+    above a ``Sample_*`` folder (bcl2fastq ``<Project>/Sample_<id>/<file>``).
+    """
+    if parse_fastq_name(path)[0] == UNDETERMINED:
+        return UNDETERMINED
+    parent = path.parent
+    if parent.name.startswith("Sample_"):
+        parent = parent.parent
+    return parent.name or "."
+
+
+def discover_fastqs(inputs: list[pathlib.Path]) -> list[pathlib.Path]:
+    """Expand directories into the FASTQ files below them (recursive, sorted).
+
+    Files are kept as given; duplicates (same resolved path) are dropped,
+    keeping the first occurrence.
+    """
+    found: dict[pathlib.Path, pathlib.Path] = {}
+    for item in inputs:
+        candidates = (
+            sorted(
+                p
+                for p in item.rglob("*")
+                if p.is_file() and p.name.endswith(_FASTQ_SUFFIXES)
+            )
+            if item.is_dir()
+            else [item]
+        )
+        for path in candidates:
+            found.setdefault(path.resolve(), path)
+    return list(found.values())
+
+
 @dataclasses.dataclass
 class FileScan:
     """Aggregated N-content scan of one FASTQ file.
@@ -95,11 +137,13 @@ class FileScan:
     Counter lists are sorted and hold only non-zero entries; their size depends
     on lanes x tiles x cycles, never on the number of reads:
 
-    * ``tiles``: (lane, tile, total, reads_with_n, n_bases, lowq_reads)
+    * ``tiles``: (lane, tile, total, reads_with_n, n_bases, lowq_reads, bases),
+      ``bases`` being the sum of read lengths
     * ``tile_cycle``: (lane, tile, cycle, reads_with_n, reads_with_lowq),
       1-based cycles, rows where either count is non-zero
     * ``n_per_read``: (lane, n_count, reads)
-    * ``spatial``: (lane, tile, x // bin_size, y // bin_size, reads_with_n)
+    * ``spatial``: (lane, tile, x // bin_size, y // bin_size,
+      (cycle - 1) // cycle_window, n_bases)
     * ``n_shape``: (lane, longest_n_run, first_n_region, all_n, reads), see
       :func:`first_n_region`
 
@@ -110,16 +154,17 @@ class FileScan:
     path: pathlib.Path
     sample: str
     read: str
+    project: str = ""
     format_error: int | None = None
     max_len: int = 0
-    tiles: list[tuple[int, int, int, int, int, int]] = dataclasses.field(
+    tiles: list[tuple[int, int, int, int, int, int, int]] = dataclasses.field(
         default_factory=list
     )
     tile_cycle: list[tuple[int, int, int, int, int]] = dataclasses.field(
         default_factory=list
     )
     n_per_read: list[tuple[int, int, int]] = dataclasses.field(default_factory=list)
-    spatial: list[tuple[int, int, int, int, int]] = dataclasses.field(
+    spatial: list[tuple[int, int, int, int, int, int]] = dataclasses.field(
         default_factory=list
     )
     n_shape: list[tuple[int, int, int, int, int]] = dataclasses.field(
@@ -251,15 +296,16 @@ def scan_file_python(
     bin_size: int = 1000,
     raw: RawWriter | None = None,
     min_qual: int = 20,
+    cycle_window: int = 10,
 ) -> FileScan:
     """Scan one FASTQ with dnaio (reference implementation of the Rust kernel)."""
     sample, read = parse_fastq_name(path)
-    scan = FileScan(path=path, sample=sample, read=read)
+    scan = FileScan(path=path, sample=sample, read=read, project=project_of(path))
     tiles: dict[tuple[int, int], list[int]] = {}
     tile_cycle: Counter[tuple[int, int, int]] = Counter()
     lowq = LowQCounter(min_qual)
     n_per_read: Counter[tuple[int, int]] = Counter()
-    spatial: Counter[tuple[int, int, int, int]] = Counter()
+    spatial: Counter[tuple[int, int, int, int, int]] = Counter()
     n_shape: Counter[tuple[int, int, int, int]] = Counter()
 
     with dnaio.open(path, open_threads=threads) as reader:
@@ -272,8 +318,9 @@ def scan_file_python(
             sequence = record.sequence
             if len(sequence) > scan.max_len:
                 scan.max_len = len(sequence)
-            acc = tiles.setdefault((lane, tile), [0, 0, 0])
+            acc = tiles.setdefault((lane, tile), [0, 0, 0, 0])
             acc[0] += 1
+            acc[3] += len(sequence)
             lowq.add(lane, tile, sequence, record.qualities)
             if "N" not in sequence:
                 continue
@@ -286,7 +333,9 @@ def scan_file_python(
             all_n = int(len(cycles) == len(sequence))
             region = first_n_region(cycles[0] - 1, len(sequence))
             n_shape[(lane, longest_run(cycles), region, all_n)] += 1
-            spatial[(lane, tile, x // bin_size, y // bin_size)] += 1
+            xb, yb = x // bin_size, y // bin_size
+            for cycle in cycles:
+                spatial[(lane, tile, xb, yb, (cycle - 1) // cycle_window)] += 1
             if raw is not None:
                 raw.add(lane, tile, x, y, cycles)
 
@@ -294,7 +343,7 @@ def scan_file_python(
         raw.flush()
     lowq_cycle = lowq.finish()
     scan.tiles = sorted(
-        (lane, tile, *acc, lowq.reads[(lane, tile)])
+        (lane, tile, *acc[:3], lowq.reads[(lane, tile)], acc[3])
         for (lane, tile), acc in tiles.items()
     )
     scan.tile_cycle = sorted(
@@ -315,6 +364,7 @@ def _from_kernel(path: pathlib.Path, result: tuple) -> FileScan:
         path=path,
         sample=sample,
         read=read,
+        project=project_of(path),
         format_error=fmt_err,
         max_len=max_len,
         tiles=[tuple(t) for t in tiles],
@@ -345,32 +395,59 @@ def scan_files(
     bin_size: int = 1000,
     raw_dir: pathlib.Path | None = None,
     min_qual: int = 20,
+    cycle_window: int = 10,
+    done: Callable[[pathlib.Path], None] | None = None,
 ) -> list[FileScan]:
     """Scan every input file with the requested engine.
 
     With ``raw_dir`` set, per-read records are streamed to
     ``raw_dir/<stem>_n_sequences/`` and the Python engine is used.
+    ``done(path)`` is called as each file finishes (e.g. to advance a
+    progress bar); with the Rust engine it runs on a worker thread.
     """
     engine = resolve_engine(engine)
+
+    def finished(scan: FileScan) -> FileScan:
+        if done is not None:
+            done(scan.path)
+        return scan
+
     if raw_dir is not None:
         # shortcut: raw export only in the Python engine; add a Rust writer if --raw is used on big runs
         if engine == "rust":
             logging.info("--raw uses the Python scan engine.")
         return [
-            scan_file_python(
-                p,
-                threads,
-                bin_size,
-                RawWriter(raw_dir / f"{fastq_stem(p)}_n_sequences"),
-                min_qual,
+            finished(
+                scan_file_python(
+                    p,
+                    threads,
+                    bin_size,
+                    RawWriter(raw_dir / f"{fastq_stem(p)}_n_sequences"),
+                    min_qual,
+                    cycle_window,
+                )
             )
             for p in paths
         ]
     if engine == "rust":
         # 0 = one file per available core (sched_getaffinity respects taskset/cgroups)
         workers = threads or len(os.sched_getaffinity(0))
-        results = biomate_kernels.scan_n_content(
-            [str(p) for p in paths], workers, bin_size, min_qual
+
+        def scan_one(path: pathlib.Path) -> FileScan:
+            # one file per call so progress can be reported; the kernel
+            # releases the GIL, so the threads scan in parallel
+            result = biomate_kernels.scan_n_content(
+                [str(path)], 1, bin_size, min_qual, cycle_window
+            )
+            return finished(_from_kernel(path, result[0]))
+
+        with ThreadPoolExecutor(max_workers=min(workers, max(len(paths), 1))) as pool:
+            return list(pool.map(scan_one, paths))
+    return [
+        finished(
+            scan_file_python(
+                p, threads, bin_size, min_qual=min_qual, cycle_window=cycle_window
+            )
         )
-        return [_from_kernel(p, r) for p, r in zip(paths, results)]
-    return [scan_file_python(p, threads, bin_size, min_qual=min_qual) for p in paths]
+        for p in paths
+    ]
