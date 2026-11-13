@@ -867,3 +867,50 @@ class TestMainIntegration:
         main(make_args(tmp_path, None))
         captured = capsys.readouterr()
         assert captured.out.strip() == "Lane,Barcode,Count,Total %"
+
+
+# ---------------------------------------------------------------------------
+# Counting correctness: "@" quality lines and truncated files
+# ---------------------------------------------------------------------------
+
+
+def _write_records(path: Path, n: int, qual: str = "IIII") -> None:
+    """Write ``n`` FASTQ records with the same barcode to a gzip file."""
+    with gzip.open(path, "wt") as fh:
+        for i in range(n):
+            fh.write(f"@M:1:FC:1:1101:{i}:1 1:N:0:ACGT+TGCA\nACGT\n+\n{qual}\n")
+
+
+@pytest.mark.parametrize("counter", [waif._count_serial, waif._count_threaded])
+def test_quality_line_starting_with_at_is_not_a_header(tmp_path, counter):
+    """A quality string starting with '@' (Q31) is not counted as a read."""
+    f = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
+    _write_records(f, 3, qual="@III")
+    assert dict(counter(f)) == {"ACGT+TGCA": 3}
+
+
+def test_bounded_range_ignores_at_quality_lines(tmp_path):
+    """The member-index path counts headers only, too."""
+    f = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
+    _write_records(f, 3, qual="@III")
+    counts = waif._count_bounded_range(f, 0, f.stat().st_size)
+    assert dict(counts) == {b"ACGT+TGCA": 3}
+
+
+def test_truncated_gzip_raises_instead_of_undercounting(tmp_path):
+    """A gzip cut mid-stream raises in the threaded and member-index paths."""
+    whole = tmp_path / "whole.fastq.gz"
+    _write_records(whole, 20000)
+    cut = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
+    cut.write_bytes(whole.read_bytes()[: whole.stat().st_size // 2])
+    with pytest.raises(EOFError):
+        waif._count_threaded(cut)
+    with pytest.raises(EOFError):
+        _find_member_offsets(cut)
+
+
+def test_member_ending_mid_record_is_not_aligned(tmp_path):
+    """Members that end on a line but not on a record boundary are unsafe to split."""
+    f = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
+    f.write_bytes(gzip.compress(b"@r 1:N:0:ACGT\nACGT\n") + gzip.compress(b"+\nIIII\n"))
+    assert _find_member_offsets(f)[1] is False

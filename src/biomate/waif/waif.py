@@ -13,6 +13,7 @@ import argparse
 import gzip
 import hashlib
 import io
+import itertools
 import json
 import logging
 import os
@@ -185,9 +186,9 @@ def get_shared_lanes_from_samplesheet(
 def _count_header_lines(lines: Iterable[str]) -> Counter[str]:
     """Count the index pairs of the header lines of a FASTQ stream."""
     counts: Counter[str] = Counter()
-    for line in lines:
-        if line.startswith("@"):
-            counts[line.rsplit(":", 1)[-1].rstrip()] += 1
+    # Every 4th line is a header: a quality line may also start with "@" (Q31)
+    for line in itertools.islice(lines, 0, None, 4):
+        counts[line.rsplit(":", 1)[-1].rstrip()] += 1
     return counts
 
 
@@ -274,6 +275,8 @@ def _inflate_stream(f: pathlib.Path, q: queue.Queue, chunk: int | None = None) -
                     d = zlib.decompressobj(47)
                     continue
                 comp = fh.read(size)
+            if not d.eof and fh.tell():
+                raise EOFError(f"Compressed file '{f}' ended before the end of stream")
     except BaseException as e:  # noqa: BLE001 - re-raised by the caller
         q.put(e)
     finally:
@@ -333,9 +336,9 @@ def _find_member_offsets(f: pathlib.Path) -> tuple[list[int], bool]:
 
     ``offsets[k]`` is where member ``k`` begins and ``offsets[-1]`` is the end
     of the file, so member ``k`` spans ``offsets[k]:offsets[k + 1]``. The
-    boolean is True only when every member boundary falls on a FASTQ line
-    boundary (each non-final member's decompressed content is empty or ends on
-    a newline); only then can a byte range be split at member boundaries and
+    boolean is True only when every member boundary falls on a FASTQ record
+    boundary (the decompressed content up to each non-final member's end is
+    empty or a whole number of 4-line records); only then can a byte range be split at member boundaries and
     counted line by line. One sequential decompress pass; nothing is retained.
     A misaligned boundary aborts early, so a bad file is rejected in seconds.
     """
@@ -345,6 +348,7 @@ def _find_member_offsets(f: pathlib.Path) -> tuple[list[int], bool]:
     pending = b""
     comp_read = 0
     last_byte: int | None = None  # last decompressed byte of the current member
+    newlines = 0  # decompressed line count so far
     with open(f, "rb") as fh:
         while True:
             if not pending:
@@ -356,18 +360,22 @@ def _find_member_offsets(f: pathlib.Path) -> tuple[list[int], bool]:
             out = d.decompress(pending)
             if out:
                 last_byte = out[-1]
+                newlines += out.count(b"\n")
             leftover = d.unused_data
             if d.eof:
                 tail = d.flush()
                 if tail:
                     last_byte = tail[-1]
+                    newlines += tail.count(b"\n")
                 end = comp_read - len(leftover)
                 offsets.append(end)
-                if end < size and last_byte not in (None, 10):
+                if end < size and (last_byte not in (None, 10) or newlines % 4):
                     return offsets, False
                 d = zlib.decompressobj(47)
                 last_byte = None
             pending = leftover
+    if offsets[-1] != size:
+        raise EOFError(f"Compressed file '{f}' ended before the end of stream")
     return offsets, True
 
 
@@ -459,9 +467,9 @@ def _count_bounded_range(path: pathlib.Path, start: int, end: int) -> Counter[by
     """
     counts: Counter[bytes] = Counter()
     with gzip.GzipFile(fileobj=BoundedReader(path, start, end), mode="rb") as fh:
-        for line in fh:
-            if line.startswith(b"@"):
-                counts[line.rsplit(b":", 1)[-1].rstrip()] += 1
+        # The range starts on a record boundary, so every 4th line is a header
+        for line in itertools.islice(fh, 0, None, 4):
+            counts[line.rsplit(b":", 1)[-1].rstrip()] += 1
     return counts
 
 
