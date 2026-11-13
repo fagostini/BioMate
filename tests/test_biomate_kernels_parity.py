@@ -2,7 +2,7 @@
 
 IndexPattern must be byte-identical to the `regex`-module path on (match?,
 span, fuzzy_counts, groups[1:]); scan_n_content must equal the per-record
-dnaio loop in `biomate.nspector.nspector`. These tests are the definition of
+dnaio loop in `biomate.nspector.scan`. These tests are the definition of
 done for the kernels (see docs/todo/index.md and nspector.md); they skip when
 the optional biomate_kernels package is not installed.
 """
@@ -11,13 +11,12 @@ import gzip
 import pathlib
 import random
 
-import dnaio
 import pytest
 
 biomate_kernels = pytest.importorskip("biomate_kernels")
 
 from biomate.index.index import compile_index_regex  # noqa: E402
-from biomate.nspector.nspector import extract_tile_coordinates  # noqa: E402
+from biomate.nspector.scan import scan_file_python  # noqa: E402
 
 M = "ATCGATCGAT"
 G8 = "GGGGGGGG"
@@ -187,8 +186,12 @@ def _illumina_name(tile: int, x: int, y: int, index: str = "AA+CC") -> str:
     return f"M00150:2:AABCCC:1:{tile:04d}:{x:04d}:{y:04d} 1:N:0:{index}"
 
 
-def _write_fastq(path: pathlib.Path, records: list[tuple[str, str]], gz: bool = True):
-    data = "".join(f"@{name}\n{seq}\n+\n{'I' * len(seq)}\n" for name, seq in records)
+def _write_fastq(path: pathlib.Path, records: list[tuple], gz: bool = True):
+    """Records are (name, seq) or (name, seq, qual); qualities default to 'I'."""
+    data = "".join(
+        f"@{r[0]}\n{r[1]}\n+\n{r[2] if len(r) > 2 else 'I' * len(r[1])}\n"
+        for r in records
+    )
     if gz:
         with gzip.open(path, "wt") as fh:
             fh.write(data)
@@ -196,65 +199,132 @@ def _write_fastq(path: pathlib.Path, records: list[tuple[str, str]], gz: bool = 
         path.write_text(data)
 
 
-def _reference_scan(path: pathlib.Path):
-    """Reference: the per-record loop from nspector.main()."""
-    tiles, xs, ys, cycles = [], [], [], []
-    fmt_err = None
-    with dnaio.open(path) as reader:
-        for i, rec in enumerate(reader):
-            npos = [j for j, c in enumerate(rec.sequence) if c == "N"]
-            if npos:
-                coords = extract_tile_coordinates(rec.name)
-                if coords is None:
-                    fmt_err = i
-                    break
-                t, x, y = coords
-                tiles.append(t)
-                xs.append(x)
-                ys.append(y)
-                cycles.append(npos)
-    return fmt_err, tiles, xs, ys, cycles
+def _reference_scan(
+    path: pathlib.Path, bin_size: int = 1000, min_qual: int = 20, cycle_window: int = 10
+):
+    """Reference: the dnaio loop in nspector.scan.scan_file_python()."""
+    scan = scan_file_python(
+        path, bin_size=bin_size, min_qual=min_qual, cycle_window=cycle_window
+    )
+    return (
+        scan.format_error,
+        scan.max_len,
+        scan.tiles,
+        scan.tile_cycle,
+        scan.n_per_read,
+        scan.spatial,
+        scan.n_shape,
+    )
 
 
-def _kernel_scan(path: pathlib.Path, threads: int = 1):
-    res = biomate_kernels.scan_n_content([str(path)], threads)[0]
-    fmt_err, tiles, xs, ys, cycles = res
-    return fmt_err, list(tiles), list(xs), list(ys), [list(c) for c in cycles]
+def _normalise(res):
+    fmt_err, max_len, *counters = res
+    return (fmt_err, max_len, *[[tuple(t) for t in c] for c in counters])
+
+
+def _kernel_scan(
+    path: pathlib.Path,
+    threads: int = 1,
+    bin_size: int = 1000,
+    min_qual: int = 20,
+    cycle_window: int = 10,
+):
+    return _normalise(
+        biomate_kernels.scan_n_content(
+            [str(path)], threads, bin_size, min_qual, cycle_window
+        )[0]
+    )
 
 
 class TestScanNContentParity:
-    """scan_n_content must equal the dnaio/extract_tile_coordinates loop."""
+    """scan_n_content must equal the dnaio reference scan, counter for counter."""
 
     def test_mixed_records(self, tmp_path):
         records = [
-            (_illumina_name(101, 100, 100), "ACGTNACGTNAC"),  # Ns @4,9
+            (_illumina_name(101, 100, 100), "ACGTNACGTNAC"),  # Ns @5,10
             (_illumina_name(102, 101, 101), "ACGTACGT"),  # no Ns
             (_illumina_name(103, 102, 102), "NNNN"),  # all Ns
-            ("short:bad:name", "ACGTN"),  # bad name, no Ns -> ignored
-            (_illumina_name(104, 103, 103), "ACGnTN"),  # lowercase n ignored
-            (_illumina_name(105, 104, 104), "ACGTACGTNN"),  # Ns @8,9
+            (_illumina_name(104, 1103, 2103), "ACGnTN"),  # lowercase n ignored
+            (_illumina_name(105, 104, 104), "ACGTACGTNN"),  # Ns @9,10
         ]
         p = tmp_path / "mixed.fastq.gz"
         _write_fastq(p, records)
         assert _kernel_scan(p) == _reference_scan(p)
+        assert _kernel_scan(p, bin_size=7) == _reference_scan(p, bin_size=7)
 
     def test_format_error_stops_file(self, tmp_path):
         records = [
             (_illumina_name(101, 1, 1), "ACGTNACGT"),  # ok (record 0)
-            ("only:six:fields:1:2:3", "ACGTN"),  # 5 fields, has N -> error (record 1)
+            ("only:six:fields:1:2:3", "ACGTN"),  # error (record 1)
             (_illumina_name(102, 2, 2), "ACGTN"),  # never read
         ]
         p = tmp_path / "bad.fastq.gz"
         _write_fastq(p, records)
         got = _kernel_scan(p)
-        ref = _reference_scan(p)
-        assert got == ref
+        assert got == _reference_scan(p)
         assert got[0] == 1  # 0-based index of the offending record
+
+    def test_format_error_without_n(self, tmp_path):
+        """Every header is parsed (for totals), so a bad name without Ns also stops."""
+        records = [
+            (_illumina_name(101, 1, 1), "ACGTNACGT"),
+            ("short:bad:name", "ACGT"),
+            (_illumina_name(102, 2, 2), "ACGTN"),
+        ]
+        p = tmp_path / "bad_no_n.fastq.gz"
+        _write_fastq(p, records)
+        got = _kernel_scan(p)
+        assert got == _reference_scan(p)
+        assert got[0] == 1
+
+    def test_counters(self, tmp_path):
+        records = [
+            ("M1:1:FC:1:1101:10:10 1:N:0:AA", "ACGT"),
+            ("M1:1:FC:1:1101:1500:11 1:N:0:AA", "ACGN"),
+            ("M1:1:FC:2:1101:12:12 1:N:0:AA", "ACGTAC"),
+            ("M1:1:FC:2:1102:13:2013 1:N:0:AA", "NN"),
+        ]
+        p = tmp_path / "lanes.fastq.gz"
+        _write_fastq(p, records)
+        got = _kernel_scan(p)
+        assert got == _reference_scan(p)
+        fmt_err, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape = got
+        assert (fmt_err, max_len) == (None, 6)
+        assert tiles == [
+            (1, 1101, 2, 1, 1, 0, 8),
+            (2, 1101, 1, 0, 0, 0, 6),
+            (2, 1102, 1, 1, 2, 0, 2),
+        ]
+        assert tile_cycle == [
+            (1, 1101, 4, 1, 0),
+            (2, 1102, 1, 1, 0),
+            (2, 1102, 2, 1, 0),
+        ]
+        assert n_per_read == [(1, 1, 1), (2, 2, 1)]
+        # (lane, tile, x bin, y bin, cycle window, N bases)
+        assert spatial == [(1, 1101, 1, 0, 0, 1), (2, 1102, 0, 2, 0, 2)]
+        assert n_shape == [(1, 1, 0, 0, 1), (2, 2, 0, 1, 1)]
 
     def test_no_n_records(self, tmp_path):
         p = tmp_path / "clean.fastq.gz"
         _write_fastq(p, [(_illumina_name(1, 2, 3), "ACGT")])
-        assert _kernel_scan(p) == _reference_scan(p) == (None, [], [], [], [])
+        got = _kernel_scan(p)
+        assert got == _reference_scan(p)
+        assert got[3:] == ([], [], [], [])
+
+    def test_multi_member_gzip(self, tmp_path):
+        """BCL Convert writes concatenated gzip members; all must be read."""
+        p = tmp_path / "multi.fastq.gz"
+        with open(p, "wb") as fh:
+            for i in range(3):
+                fh.write(
+                    gzip.compress(
+                        f"@{_illumina_name(1101 + i, i, i)}\nACGN\n+\nIIII\n".encode()
+                    )
+                )
+        got = _kernel_scan(p)
+        assert got == _reference_scan(p)
+        assert sum(t[2] for t in got[2]) == 3
 
     def test_plain_fastq(self, tmp_path):
         records = [
@@ -275,6 +345,67 @@ class TestScanNContentParity:
         _write_fastq(p, records)
         assert _kernel_scan(p) == _reference_scan(p)
 
+    @pytest.mark.parametrize("min_qual", [0, 2, 20, 30, 93])
+    def test_low_quality_and_n_shape(self, tmp_path, min_qual):
+        """Random sequences and qualities: low-Q and N-run counters match."""
+        rng = random.Random(min_qual)
+        records = []
+        for _ in range(2_000):
+            length = rng.choice((5, 12, 25, 151))
+            seq = "".join(rng.choice("ACGTNNN") for _ in range(length))
+            if rng.random() < 0.05:
+                seq = "N" * length
+            qual = "".join(chr(33 + rng.randint(0, 41)) for _ in range(length))
+            records.append((_illumina_name(rng.choice((1101, 2204)), 1, 1), seq, qual))
+        p = tmp_path / "q.fastq.gz"
+        _write_fastq(p, records)
+        got = _kernel_scan(p, min_qual=min_qual)
+        assert got == _reference_scan(p, min_qual=min_qual)
+        assert got[6]  # n_shape populated
+        if min_qual in (20, 30):
+            assert any(row[4] for row in got[3])  # some low-Q cycles
+
+    @pytest.mark.parametrize("cycle_window", [1, 3, 10, 500])
+    def test_spatial_cycle_windows(self, tmp_path, cycle_window):
+        """Ns spread over many windows: per-window spatial N bases match."""
+        rng = random.Random(cycle_window)
+        records = [
+            (
+                _illumina_name(rng.choice((1101, 1102)), rng.randint(0, 3000), 5),
+                "".join(rng.choice("ACGTNN") for _ in range(rng.choice((7, 40, 151)))),
+            )
+            for _ in range(1_000)
+        ]
+        p = tmp_path / "w.fastq.gz"
+        _write_fastq(p, records)
+        got = _kernel_scan(p, cycle_window=cycle_window)
+        assert got == _reference_scan(p, cycle_window=cycle_window)
+        spatial = got[5]
+        assert sum(r[5] for r in spatial) == sum(t[4] for t in got[2])
+        assert max(r[4] for r in spatial) == (151 - 1) // cycle_window
+
+    def test_bad_cycle_window_rejected(self, tmp_path):
+        p = tmp_path / "x.fastq.gz"
+        _write_fastq(p, [(_illumina_name(1, 2, 3), "ACGT")])
+        with pytest.raises(ValueError, match="cycle_window"):
+            biomate_kernels.scan_n_content([str(p)], 1, 1000, 20, 0)
+
+    def test_large_gzip_spans_many_chunks(self, tmp_path):
+        """Exercise the decompress-ahead thread across many 1 MiB chunks."""
+        rng = random.Random(3)
+        records = [
+            (
+                _illumina_name(
+                    rng.choice((1101, 1102)), rng.randint(0, 9999), rng.randint(0, 9999)
+                ),
+                "".join(rng.choice("ACGTN") for _ in range(100)),
+            )
+            for _ in range(30_000)
+        ]
+        p = tmp_path / "large.fastq.gz"
+        _write_fastq(p, records)
+        assert _kernel_scan(p) == _reference_scan(p)
+
     def test_multi_file_threads(self, tmp_path):
         paths = []
         for f in range(3):
@@ -288,8 +419,10 @@ class TestScanNContentParity:
             )
             paths.append(p)
         got = biomate_kernels.scan_n_content([str(p) for p in paths], 3)
-        ref = [_reference_scan(p) for p in paths]
-        assert [
-            (g[0], list(g[1]), list(g[2]), list(g[3]), [list(c) for c in g[4]])
-            for g in got
-        ] == ref
+        assert [_normalise(g) for g in got] == [_reference_scan(p) for p in paths]
+
+    def test_bad_bin_size_rejected(self, tmp_path):
+        p = tmp_path / "x.fastq.gz"
+        _write_fastq(p, [(_illumina_name(1, 2, 3), "ACGT")])
+        with pytest.raises(ValueError, match="bin_size"):
+            biomate_kernels.scan_n_content([str(p)], 1, 0)

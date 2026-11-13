@@ -27,7 +27,7 @@
 //!    before the gap shrinks.
 //! 8. `fuzzy_counts` tuple order is (subs, ins, dels).
 
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::collections::{BTreeSet, HashMap};
@@ -335,141 +335,359 @@ impl IndexPattern {
     }
 }
 
-/// Per-file N-content scan result (nspector).
-///
-/// `format_error` is the 0-based index of the first N-containing record whose
-/// name fails coordinate parsing; when set, the reference implementation stops
-/// reading the file and skips it entirely (parity: data after the error is
-/// neither produced nor needed).
-///
-/// `tiles`/`xs`/`ys`/`n_positions` are parallel: entry `i` describes the
-/// i-th N-containing record (records without Ns are omitted).
-struct FileScan {
-    format_error: Option<usize>,
-    tiles: Vec<i32>,
-    xs: Vec<i32>,
-    ys: Vec<i32>,
-    n_positions: Vec<Vec<u16>>,
+/// Per-tile accumulator for one FASTQ file (nspector).
+#[derive(Default)]
+struct TileAcc {
+    total: u64,
+    reads_with_n: u64,
+    n_bases: u64,
+    /// reads with at least one called (non-N) base below `min_qual`
+    lowq_reads: u64,
+    /// all bases (sum of read lengths), the denominator of the N base rate
+    bases: u64,
+    /// reads with an N at cycle `i + 1`
+    cycles: Vec<u64>,
+    /// reads with a called base below `min_qual` at cycle `i + 1`
+    lowq_cycles: Vec<u64>,
 }
 
-/// Port of `biomate.nspector.nspector.extract_tile_coordinates`.
+/// Cycles at each end of the read used to classify where the first N falls.
+const EDGE_CYCLES: usize = 10;
+
+/// Region of the first N: 0 = first `EDGE_CYCLES` cycles, 2 = last
+/// `EDGE_CYCLES` cycles, 1 = middle (start wins on short reads).
+fn first_n_region(first: usize, len: usize) -> u8 {
+    if first < EDGE_CYCLES {
+        0
+    } else if first + EDGE_CYCLES >= len {
+        2
+    } else {
+        1
+    }
+}
+
+/// Per-file N-content scan result (nspector), aggregated while streaming.
+///
+/// Memory depends on lanes × tiles × cycles (plus occupied spatial bins),
+/// never on the number of reads. `format_error` is the 0-based index of the
+/// first record whose name fails coordinate parsing; the file is then
+/// abandoned, exactly like the Python reference.
+struct FileScan {
+    format_error: Option<usize>,
+    max_len: u32,
+    tiles: HashMap<(i32, i32), TileAcc>,
+    n_per_read: HashMap<(i32, u32), u64>,
+    /// (lane, tile, x bin, y bin, cycle window) -> N bases
+    spatial: HashMap<(i32, i32, i32, i32, u32), u64>,
+    /// (lane, longest N run, first-N region, all-N flag) -> reads
+    n_shape: HashMap<(i32, u32, u8, u8), u64>,
+}
+
+/// Python tuple returned per file by `scan_n_content`:
+/// `(format_error, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape)` with
+/// `tiles = [(lane, tile, total, reads_with_n, n_bases, lowq_reads, bases)]`,
+/// `tile_cycle = [(lane, tile, cycle, reads_with_n, reads_with_lowq)]`
+/// (1-based, rows where either count is non-zero),
+/// `n_per_read = [(lane, n_count, reads)]`,
+/// `spatial = [(lane, tile, x // bin, y // bin, (cycle - 1) // window, n_bases)]`,
+/// `n_shape = [(lane, longest_run, first_region, all_n, reads)]`, all sorted.
+type ScanTuple = (
+    Option<usize>,
+    u32,
+    Vec<(i32, i32, u64, u64, u64, u64, u64)>,
+    Vec<(i32, i32, u32, u64, u64)>,
+    Vec<(i32, u32, u64)>,
+    Vec<(i32, i32, i32, i32, u32, u64)>,
+    Vec<(i32, u32, u8, u8, u64)>,
+);
+
+/// Port of `biomate.nspector.scan.extract_tile_coordinates`.
 ///
 /// Python `int()` trims ASCII whitespace and allows a leading sign; `parse`
 /// after `trim()` matches that for the realistic (digit-only) coordinate
-/// fields. Returns None for <7 colon-fields or non-numeric fields, exactly
-/// like the reference.
-fn parse_tile_coordinates(name: &str) -> Option<(i32, i32, i32)> {
+/// fields. Returns `(lane, tile, x, y)`, or None for <7 colon-fields or
+/// non-numeric fields, exactly like the reference.
+fn parse_tile_coordinates(name: &str) -> Option<(i32, i32, i32, i32)> {
     let base = name.split(' ').next()?;
     let parts = base.split(':').collect::<Vec<_>>();
     if parts.len() < 7 {
         return None;
     }
+    let lane = parts[3].trim().parse::<i32>().ok()?;
     let tile = parts[4].trim().parse::<i32>().ok()?;
     let x = parts[5].trim().parse::<i32>().ok()?;
     let y = parts[6].trim().parse::<i32>().ok()?;
-    Some((tile, x, y))
+    Some((lane, tile, x, y))
 }
 
-/// Scan one FASTQ (`.gz` suffix => gzip) for N-containing records.
+/// `Read` adapter fed by a background thread that decompresses ahead, so
+/// gzip inflation and FASTQ parsing run on two cores for a single file.
+struct ChannelReader {
+    rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl ChannelReader {
+    fn spawn<R: std::io::Read + Send + 'static>(mut inner: R) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        std::thread::spawn(move || loop {
+            let mut chunk = vec![0u8; 1 << 20];
+            let mut filled = 0;
+            while filled < chunk.len() {
+                match inner.read(&mut chunk[filled..]) {
+                    Ok(0) => break,
+                    Ok(n) => filled += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                }
+            }
+            chunk.truncate(filled);
+            let done = filled == 0;
+            if tx.send(Ok(chunk)).is_err() || done {
+                return; // receiver gone (early stop) or EOF sent
+            }
+        });
+        ChannelReader { rx, buf: Vec::new(), pos: 0 }
+    }
+}
+
+impl std::io::Read for ChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos == self.buf.len() {
+            match self.rx.recv() {
+                Ok(Ok(chunk)) => {
+                    self.buf = chunk;
+                    self.pos = 0;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = out.len().min(self.buf.len() - self.pos);
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+fn trim_eol(line: &[u8]) -> &[u8] {
+    let mut end = line.len();
+    while end > 0 && (line[end - 1] == b'\n' || line[end - 1] == b'\r') {
+        end -= 1;
+    }
+    &line[..end]
+}
+
+/// Scan one FASTQ (`.gz` suffix => gzip) and aggregate N counters.
 ///
 /// Line protocol: `@name` / sequence / `+` / qualities. A name line not
 /// starting with `@`, or a truncated final record, is a hard error (the
 /// reference raises a `dnaio` format error in the same situations).
-fn scan_fastq_file(path: &str) -> Result<FileScan, String> {
+fn scan_fastq_file(
+    path: &str,
+    bin_size: i32,
+    min_qual: u8,
+    cycle_window: u32,
+) -> Result<FileScan, String> {
+    // Phred+33: a quality byte below this is a low-quality call
+    let lowq_byte = min_qual.saturating_add(33);
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut reader: Box<dyn BufRead> = if path.ends_with(".gz") {
-        Box::new(std::io::BufReader::new(GzDecoder::new(file)))
+        Box::new(std::io::BufReader::with_capacity(
+            1 << 20,
+            ChannelReader::spawn(MultiGzDecoder::new(std::io::BufReader::new(file))),
+        ))
     } else {
-        Box::new(std::io::BufReader::new(file))
+        Box::new(std::io::BufReader::with_capacity(1 << 20, file))
     };
 
     let mut out = FileScan {
         format_error: None,
-        tiles: Vec::new(),
-        xs: Vec::new(),
-        ys: Vec::new(),
-        n_positions: Vec::new(),
+        max_len: 0,
+        tiles: HashMap::new(),
+        n_per_read: HashMap::new(),
+        spatial: HashMap::new(),
+        n_shape: HashMap::new(),
     };
-    let mut name_line = String::new();
-    let mut line = String::new();
+    let mut name_line: Vec<u8> = Vec::new();
+    let mut seq_line: Vec<u8> = Vec::new();
+    let mut line: Vec<u8> = Vec::new();
     let mut record_idx = 0usize;
 
     loop {
         name_line.clear();
         let n = reader
-            .read_line(&mut name_line)
+            .read_until(b'\n', &mut name_line)
             .map_err(|e| e.to_string())?;
         if n == 0 {
             break; // clean EOF
         }
-        if !name_line.starts_with('@') {
+        if !name_line.starts_with(b"@") {
             return Err(format!(
                 "malformed FASTQ at record {record_idx}: name line missing '@'"
             ));
         }
-        // sequence: scan for N positions immediately (line is reused below)
-        line.clear();
-        reader.read_line(&mut line).map_err(|e| e.to_string())?;
-        let positions: Vec<u16> = line
-            .trim_end_matches(['\n', '\r'])
-            .bytes()
-            .enumerate()
-            .filter(|(_, b)| *b == b'N')
-            .map(|(i, _)| i as u16)
-            .collect();
+        seq_line.clear();
+        reader
+            .read_until(b'\n', &mut seq_line)
+            .map_err(|e| e.to_string())?;
         // '+' separator
         line.clear();
-        reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        reader.read_until(b'\n', &mut line).map_err(|e| e.to_string())?;
         // qualities
         line.clear();
-        let nq = reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        let nq = reader.read_until(b'\n', &mut line).map_err(|e| e.to_string())?;
         if nq == 0 {
             return Err(format!("truncated FASTQ at record {record_idx}"));
         }
 
         // dnaio strips the leading '@' from record.name
-        let rec_name = &name_line.trim_end_matches(['\n', '\r'])[1..];
+        let rec_name = std::str::from_utf8(&trim_eol(&name_line)[1..]).unwrap_or("");
+        let Some((lane, tile, x, y)) = parse_tile_coordinates(rec_name) else {
+            out.format_error = Some(record_idx);
+            break; // reference stops reading this file
+        };
 
-        if !positions.is_empty() {
-            match parse_tile_coordinates(rec_name) {
-                Some((tile, x, y)) => {
-                    out.tiles.push(tile);
-                    out.xs.push(x);
-                    out.ys.push(y);
-                    out.n_positions.push(positions);
+        let seq = trim_eol(&seq_line);
+        out.max_len = out.max_len.max(seq.len() as u32);
+        let acc = out.tiles.entry((lane, tile)).or_default();
+        acc.total += 1;
+
+        let qual = trim_eol(&line);
+        acc.bases += seq.len() as u64;
+        let (xb, yb) = (x / bin_size, y / bin_size);
+        // N bases of this read in the current cycle window (positions increase)
+        let (mut window, mut in_window) = (0u32, 0u64);
+        let mut n_count = 0u32;
+        let mut any_lowq = false;
+        let (mut run, mut longest, mut first) = (0u32, 0u32, usize::MAX);
+        for (i, b) in seq.iter().enumerate() {
+            if *b == b'N' {
+                if acc.cycles.len() <= i {
+                    acc.cycles.resize(i + 1, 0);
                 }
-                None => {
-                    out.format_error = Some(record_idx);
-                    break; // reference stops reading this file
+                acc.cycles[i] += 1;
+                n_count += 1;
+                let w = i as u32 / cycle_window;
+                if w != window && in_window > 0 {
+                    *out.spatial.entry((lane, tile, xb, yb, window)).or_insert(0) += in_window;
+                    in_window = 0;
+                }
+                window = w;
+                in_window += 1;
+                run += 1;
+                longest = longest.max(run);
+                first = first.min(i);
+            } else {
+                run = 0;
+                if qual.get(i).is_some_and(|q| *q < lowq_byte) {
+                    if acc.lowq_cycles.len() <= i {
+                        acc.lowq_cycles.resize(i + 1, 0);
+                    }
+                    acc.lowq_cycles[i] += 1;
+                    any_lowq = true;
                 }
             }
+        }
+        if any_lowq {
+            acc.lowq_reads += 1;
+        }
+        if n_count > 0 {
+            acc.reads_with_n += 1;
+            acc.n_bases += n_count as u64;
+            *out.n_per_read.entry((lane, n_count)).or_insert(0) += 1;
+            let all_n = (n_count as usize == seq.len()) as u8;
+            *out
+                .n_shape
+                .entry((lane, longest, first_n_region(first, seq.len()), all_n))
+                .or_insert(0) += 1;
+            *out.spatial.entry((lane, tile, xb, yb, window)).or_insert(0) += in_window;
         }
         record_idx += 1;
     }
     Ok(out)
 }
 
+fn to_tuple(s: FileScan) -> ScanTuple {
+    let mut tiles = Vec::with_capacity(s.tiles.len());
+    let mut tile_cycle = Vec::new();
+    for ((lane, tile), acc) in s.tiles {
+        tiles.push((
+            lane,
+            tile,
+            acc.total,
+            acc.reads_with_n,
+            acc.n_bases,
+            acc.lowq_reads,
+            acc.bases,
+        ));
+        for i in 0..acc.cycles.len().max(acc.lowq_cycles.len()) {
+            let n = acc.cycles.get(i).copied().unwrap_or(0);
+            let lowq = acc.lowq_cycles.get(i).copied().unwrap_or(0);
+            if n > 0 || lowq > 0 {
+                tile_cycle.push((lane, tile, (i + 1) as u32, n, lowq));
+            }
+        }
+    }
+    tiles.sort_unstable();
+    tile_cycle.sort_unstable();
+    let mut n_per_read: Vec<_> = s.n_per_read.into_iter().map(|((l, n), c)| (l, n, c)).collect();
+    n_per_read.sort_unstable();
+    let mut spatial: Vec<_> = s
+        .spatial
+        .into_iter()
+        .map(|((l, t, xb, yb, w), c)| (l, t, xb, yb, w, c))
+        .collect();
+    spatial.sort_unstable();
+    let mut n_shape: Vec<_> = s
+        .n_shape
+        .into_iter()
+        .map(|((l, run, region, all_n), c)| (l, run, region, all_n, c))
+        .collect();
+    n_shape.sort_unstable();
+    (s.format_error, s.max_len, tiles, tile_cycle, n_per_read, spatial, n_shape)
+}
+
 /// Scan N content of one or more FASTQ files.
 ///
 /// `paths` are processed by up to `threads` OS threads (work-stealing over
-/// the list); results come back in input order. Returns, per file:
-/// `(format_error, tiles, xs, ys, n_positions)` where `format_error` is the
-/// index of the first bad record or None, and the four arrays are parallel
-/// over the N-containing records (see `FileScan`).
+/// the list); results come back in input order, one `ScanTuple` per file.
+/// `bin_size` is the spatial bin width in read-name coordinate units;
+/// `min_qual` is the Phred (+33) threshold for low-quality called bases;
+/// `cycle_window` groups cycles for the spatial counts.
 #[pyfunction]
+#[pyo3(signature = (paths, threads, bin_size=1000, min_qual=20, cycle_window=10))]
 fn scan_n_content(
+    py: Python<'_>,
     paths: Vec<String>,
     threads: u32,
-) -> PyResult<Vec<(Option<usize>, Vec<i32>, Vec<i32>, Vec<i32>, Vec<Vec<u16>>)>> {
+    bin_size: i32,
+    min_qual: u8,
+    cycle_window: u32,
+) -> PyResult<Vec<ScanTuple>> {
+    if bin_size < 1 {
+        return Err(PyValueError::new_err("bin_size must be >= 1"));
+    }
+    if cycle_window < 1 {
+        return Err(PyValueError::new_err("cycle_window must be >= 1"));
+    }
     let n = paths.len();
     if n == 0 {
         return Ok(Vec::new());
     }
     let nthreads = (threads.max(1) as usize).min(n);
 
-    let scanned: Vec<Result<FileScan, String>> = if nthreads <= 1 {
-        paths.iter().map(|p| scan_fastq_file(p)).collect()
-    } else {
+    let scanned: Vec<Result<FileScan, String>> = py.detach(|| {
+        if nthreads <= 1 {
+            return paths
+                .iter()
+                .map(|p| scan_fastq_file(p, bin_size, min_qual, cycle_window))
+                .collect();
+        }
         let paths = Arc::new(paths);
         let next = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = std::sync::mpsc::channel();
@@ -483,7 +701,8 @@ fn scan_n_content(
                 if i >= n {
                     break;
                 }
-                tx.send((i, scan_fastq_file(&paths[i]))).ok();
+                tx.send((i, scan_fastq_file(&paths[i], bin_size, min_qual, cycle_window)))
+                    .ok();
             }));
         }
         drop(tx);
@@ -495,14 +714,11 @@ fn scan_n_content(
             out[i] = Some(r);
         }
         out.into_iter().map(|o| o.expect("result for every index")).collect()
-    };
+    });
 
     scanned
         .into_iter()
-        .map(|r| match r {
-            Ok(s) => Ok((s.format_error, s.tiles, s.xs, s.ys, s.n_positions)),
-            Err(e) => Err(PyValueError::new_err(e)),
-        })
+        .map(|r| r.map(to_tuple).map_err(PyValueError::new_err))
         .collect()
 }
 
@@ -527,6 +743,17 @@ mod tests {
         let m = p.search("XXXATCGATCGAT").unwrap();
         assert_eq!(m.0, 1); // leftmost wins over the 0-error start at 3
         assert_eq!(m.2, (0, 2, 0));
+    }
+
+    #[test]
+    fn first_n_region_edges() {
+        assert_eq!(first_n_region(0, 150), 0);
+        assert_eq!(first_n_region(9, 150), 0);
+        assert_eq!(first_n_region(10, 150), 1);
+        assert_eq!(first_n_region(139, 150), 1);
+        assert_eq!(first_n_region(140, 150), 2);
+        assert_eq!(first_n_region(5, 12), 0); // start wins on short reads
+        assert_eq!(first_n_region(10, 12), 2);
     }
 }
 

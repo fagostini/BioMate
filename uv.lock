@@ -264,11 +264,16 @@ dependencies = [
     { name = "tornado" },
 ]
 
+[package.optional-dependencies]
+interop = [
+    { name = "interop" },
+]
+
 [package.dev-dependencies]
 dev = [
+    { name = "biomate", extra = ["interop"] },
     { name = "biopython" },
     { name = "commitizen" },
-    { name = "interop" },
     { name = "interrogate" },
     { name = "ipykernel" },
     { name = "ipython" },
@@ -288,6 +293,7 @@ requires-dist = [
     { name = "altair", extras = ["all"], specifier = ">=6.2.0,<7.0.0" },
     { name = "dnaio", specifier = ">=1.2.3" },
     { name = "fastavro", specifier = ">=1.12.0" },
+    { name = "interop", marker = "extra == 'interop'", specifier = ">=1.9.0" },
     { name = "jellyfish", specifier = ">=1.2.1" },
     { name = "numpy", specifier = ">=2.3.0" },
     { name = "polars", specifier = ">=1.30.0" },
@@ -295,12 +301,13 @@ requires-dist = [
     { name = "rich", specifier = ">=14.0.0" },
     { name = "tornado", specifier = ">=6.5.5" },
 ]
+provides-extras = ["interop"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "biomate", extras = ["interop"] },
     { name = "biopython", specifier = ">=1.85" },
     { name = "commitizen", specifier = ">=4.13.9" },
-    { name = "interop", specifier = ">=1.9.0" },
     { name = "interrogate", specifier = "==1.7.0" },
     { name = "ipykernel", specifier = ">=6.30.1" },
     { name = "ipython", specifier = ">=9.4.0" },

@@ -19,6 +19,12 @@ dependencies = [
     "tornado>=6.5.5",
 ]
 
+[project.optional-dependencies]
+# nspector --run-folder: per-tile density, %PF and Q30 from Illumina InterOp
+interop = [
+    "interop>=1.9.0",
+]
+
 [project.scripts]
 biomate = "biomate:main"
 
@@ -39,7 +45,7 @@ dev = [
     "ruff>=0.11.11",
     "commitizen>=4.13.9",
     "vega>=4.1.0",
-    "interop>=1.9.0",
+    "biomate[interop]",
 ]
 docs = [
     "mkdocs>=1.6.1",

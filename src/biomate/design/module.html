@@ -37,6 +37,7 @@
             </div>
             {% elif param['param_type'] == 'number' %}
             <input type="number"
+                    step="any"
                     class="form-control"
                     id="{{ param['form_name'] }}"
                     name="{{ param['form_name'] }}"
@@ -84,6 +85,9 @@
         {% if result['success'] %}Success{% else %}Error{% end %}
       </h4>
       <p>Return code: {{ result['returncode'] }}</p>
+      {% if report_url %}
+      <p><a class="btn btn-success" href="{{ report_url }}" target="_blank" rel="noopener">Open interactive report</a></p>
+      {% end %}
       <hr>
       {% if result.get('stdout', '') %}
       <h5>Output:</h5>

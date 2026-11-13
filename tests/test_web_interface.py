@@ -274,6 +274,13 @@ class TestFlattenedParameters:
         assert "--error-type" in args
         assert "s" in args
 
+    def test_flatten_multiple_splits_commas(self):
+        """A multi-value field passes each comma-separated item as its own arg."""
+        params = [{"form_name": "input", "cli_name": "input", "multiple": True}]
+        values = {"input": "a_R1.fastq.gz, b_R2.fastq.gz,"}
+        args = flatten_parameters(params, values)
+        assert args == ["--input", "a_R1.fastq.gz", "b_R2.fastq.gz"]
+
     def test_flatten_with_default_value(self):
         """Test that default values are used when provided."""
         params = [
@@ -363,3 +370,67 @@ class TestWebInterfaceModule:
         """Test that debug mode is disabled in application (security)."""
         app = make_app(host="localhost", port=8080)
         assert app.settings.get("debug") is False
+
+
+class TestReportRoute:
+    """Reports are only served for runs registered by this server."""
+
+    @pytest.fixture()
+    def report_dir(self, tmp_path):
+        (tmp_path / "nspector_report.html").write_text("<html>report</html>")
+        return tmp_path
+
+    def test_register_report_returns_token_url(self, report_dir):
+        from biomate.web_interface import _REPORTS, register_report
+
+        url = register_report("nspector", {"output": str(report_dir)})
+        assert url is not None and url.startswith("/report/")
+        assert _REPORTS[url.rsplit("/", 1)[1]] == report_dir / "nspector_report.html"
+
+    def test_register_report_ignores_other_modules(self, report_dir):
+        from biomate.web_interface import register_report
+
+        assert register_report("blabber", {"output": str(report_dir)}) is None
+
+    def test_register_report_missing_file(self, tmp_path):
+        from biomate.web_interface import register_report
+
+        assert register_report("nspector", {"output": str(tmp_path)}) is None
+
+    def test_report_route_registered(self):
+        from biomate.web_interface import ReportHandler
+
+        app = make_app()
+        rules = [r.target for r in app.wildcard_router.rules]
+        assert ReportHandler in rules
+
+    def test_unknown_token_is_404(self, report_dir):
+        import asyncio
+
+        from tornado.httpclient import AsyncHTTPClient
+        from tornado.testing import bind_unused_port
+
+        from biomate.web_interface import register_report
+
+        url = register_report("nspector", {"output": str(report_dir)})
+
+        async def fetch(path):
+            sock, port = bind_unused_port()
+            server = tornado.httpserver.HTTPServer(make_app())
+            server.add_sockets([sock])
+            try:
+                return await AsyncHTTPClient().fetch(
+                    f"http://127.0.0.1:{port}{path}", raise_error=False
+                )
+            finally:
+                server.stop()
+
+        import tornado.httpserver
+
+        ok = asyncio.run(fetch(url))
+        assert ok.code == 200 and b"report" in ok.body
+        assert "unsafe-eval" in ok.headers["Content-Security-Policy"]
+        missing = asyncio.run(fetch("/report/not-a-token"))
+        assert missing.code == 404
+        traversal = asyncio.run(fetch("/report/..%2F..%2Fetc%2Fpasswd"))
+        assert traversal.code == 404

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import shlex
 import ssl
 import subprocess
@@ -387,31 +388,98 @@ MODULES: List[Dict[str, Any]] = [
         "title": "N-Base Inspector",
         "short_description": (
             "Inspects FASTQ sequencing data for N (unknown/ambiguous) bases "
-            "and generates visualizations of their distribution."
+            "across lanes, samples, flowcell tiles and cycles."
         ),
         "description": (
-            "Nspector analyzes FASTQ files for N base content across "
-            "sequencing cycles and flowcell tiles. Produces two visualizations "
-            "per file: (1) a bar chart of N-count distribution per sequence, "
-            "and (2) a line chart of N-containing sequences per cycle coloured "
-            "by tile. Requires altair for rendering."
+            "Nspector analyzes FASTQ files for N base content across lanes, "
+            "samples, sequencing cycles and flowcell tiles. It writes one "
+            "interactive HTML report covering all inputs (linked overview, "
+            "cycle, tile-map, tile-by-cycle and spatial views, with N rates "
+            "normalised by the reads scanned), tidy Parquet tables and MultiQC "
+            "custom-content files. Static PNG charts are optional."
         ),
         "parameters": [
             {
                 "label": "Input File(s)",
                 "param_type": "text",
                 "default": "",
-                "help": "Input FASTQ file(s) (accepts multiple, comma-separated)",
+                "help": "FASTQ files and/or directories, comma-separated; directories are searched recursively",
                 "form_name": "input",
                 "cli_name": "input",
+                "multiple": True,
             },
             {
                 "label": "Output Directory",
                 "param_type": "text",
                 "default": "./output",
-                "help": "Output directory for visualisations",
+                "help": "Output directory for the report and tables",
                 "form_name": "output",
                 "cli_name": "output",
+            },
+            {
+                "label": "Scan Engine",
+                "param_type": "select",
+                "default": "auto",
+                "options": ["auto", "python", "rust"],
+                "help": "auto uses the native biomate_kernels Rust scan when installed",
+                "form_name": "engine",
+                "cli_name": "engine",
+            },
+            {
+                "label": "Spatial Bin Size",
+                "param_type": "number",
+                "default": "2000",
+                "help": "Width of the spatial bins in X/Y coordinate units",
+                "form_name": "spatial_bin_size",
+                "cli_name": "spatial-bin-size",
+            },
+            {
+                "label": "Spatial Cycle Window",
+                "param_type": "number",
+                "default": "10",
+                "help": "Cycles per spatial window (the spatial map follows the cycle selection by window)",
+                "form_name": "spatial_cycle_window",
+                "cli_name": "spatial-cycle-window",
+            },
+            {
+                "label": "Run Folder (optional)",
+                "param_type": "text",
+                "default": "",
+                "help": "Illumina run folder with InterOp, to plot N rate against %PF, density and Q30",
+                "form_name": "run_folder",
+                "cli_name": "run-folder",
+            },
+            {
+                "label": "Low-Q Threshold",
+                "param_type": "number",
+                "default": "20",
+                "help": "Phred score below which a called base counts as low quality",
+                "form_name": "min_qual",
+                "cli_name": "min-qual",
+            },
+            {
+                "label": "Warn Rate",
+                "param_type": "number",
+                "default": "0.01",
+                "help": "Flag WARN at this fraction of reads with an N at a cycle",
+                "form_name": "warn_rate",
+                "cli_name": "warn-rate",
+            },
+            {
+                "label": "Fail Rate",
+                "param_type": "number",
+                "default": "0.05",
+                "help": "Flag FAIL at this fraction of reads with an N at a cycle",
+                "form_name": "fail_rate",
+                "cli_name": "fail-rate",
+            },
+            {
+                "label": "Write PNG Charts",
+                "param_type": "boolean",
+                "default": False,
+                "help": "Also write static PNG charts per input file (slow for many tiles)",
+                "form_name": "png",
+                "cli_name": "png",
             },
         ],
     },
@@ -649,7 +717,10 @@ def flatten_parameters(params: List[Dict], values: Dict[str, str]) -> List[str]:
         default = p.get("default", "")
         if not val and default:
             val = default
-        if val:
+        if val and p.get("multiple"):
+            cli_args.append(f"--{cli_key}")
+            cli_args += [shlex.quote(v.strip()) for v in val.split(",") if v.strip()]
+        elif val:
             cli_args.append(f"--{cli_key}")
             cli_args.append(shlex.quote(str(val)))
 
@@ -715,6 +786,35 @@ def get_loader() -> tornado.template.Loader:
 # ---------------------------------------------------------------------------
 
 
+# Reports produced by runs from this server, keyed by an unguessable token.
+# Only these files can be served by ReportHandler, so no client-supplied path
+# ever reaches the filesystem.
+_REPORTS: Dict[str, Path] = {}
+
+# Vega compiles its expressions with the Function constructor, so the report
+# page needs 'unsafe-eval'; everything else stays locked down.
+REPORT_CSP = (
+    "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; "
+    "style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'"
+)
+
+
+def register_report(module_name: str, values: Dict[str, str]) -> str | None:
+    """Register the HTML report of a finished run and return its URL.
+
+    Returns None when the module produces no report or the file is missing.
+    """
+    if module_name != "nspector":
+        return None
+    output = Path(values.get("output") or "./output").expanduser().resolve()
+    report = output / "nspector_report.html"
+    if not report.is_file():
+        return None
+    token = secrets.token_urlsafe(16)
+    _REPORTS[token] = report
+    return f"/report/{token}"
+
+
 class SecurityHeadersMixin(tornado.web.RequestHandler):
     """Mixin to add security headers to all responses."""
 
@@ -776,6 +876,7 @@ class ModuleHandler(SecurityHeadersMixin):
                 module=mod,
                 param_meta=json.dumps(param_meta).encode("utf-8"),
                 result=None,
+                report_url=None,
                 gs_version="0.3.0",
                 modules=all_modules,
                 param_overrides={},
@@ -806,6 +907,7 @@ class ModuleHandler(SecurityHeadersMixin):
 
         # Run the tool
         result = run_biomate(module_name, cli_args)
+        report_url = register_report(module_name, values) if result["success"] else None
 
         loader = get_loader()
         t = loader.load("module.html")
@@ -837,6 +939,7 @@ class ModuleHandler(SecurityHeadersMixin):
                 module=mod,
                 param_meta=json.dumps(param_meta).encode("utf-8"),
                 result=result,
+                report_url=report_url,
                 gs_version="0.3.0",
                 modules=all_modules,
                 param_overrides=param_overrides,
@@ -851,6 +954,21 @@ class ModuleHandler(SecurityHeadersMixin):
         return None
 
 
+class ReportHandler(SecurityHeadersMixin):
+    """Serve an HTML report registered by a run from this server."""
+
+    def get(self, token: str):
+        """Serve the report for ``token``, or 404 if it is unknown."""
+        report = _REPORTS.get(token)
+        if report is None or not report.is_file():
+            self.set_status(404)
+            self.write("Report not found.")
+            return
+        self.set_header("Content-Type", "text/html; charset=UTF-8")
+        self.set_header("Content-Security-Policy", REPORT_CSP)
+        self.write(report.read_bytes())
+
+
 # ---------------------------------------------------------------------------
 # Application factory
 # ---------------------------------------------------------------------------
@@ -862,6 +980,7 @@ def make_app(host: str = "localhost", port: int = 8080) -> tornado.web.Applicati
         [
             (r"/", MainHandler),
             (r"/module/([a-zA-Z0-9_-]+)", ModuleHandler),
+            (r"/report/([A-Za-z0-9_-]+)", ReportHandler),
         ],
         template_path=str(_DESIGN_DIR),
         static_path=str(_STATIC_DIR),
