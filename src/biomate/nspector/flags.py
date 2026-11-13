@@ -56,7 +56,9 @@ def _robust_z(group: list[str]) -> polars.Expr:
     """(rate - median) / (1.4826 * MAD) within ``group``; inf when MAD is 0."""
     median = polars.col("rate").median().over(group)
     mad = (polars.col("rate") - median).abs().median().over(group)
-    return (polars.col("rate") - median) / (MAD_SCALE * mad)
+    # 0/0 (rate at the median of a zero-spread group) is NaN, which polars
+    # orders above every number: a tile at the median is not an outlier
+    return ((polars.col("rate") - median) / (MAD_SCALE * mad)).fill_nan(0.0)
 
 
 def dense_tile_cycle(tables: NspectorTables) -> polars.DataFrame:
