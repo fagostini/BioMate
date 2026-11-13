@@ -229,3 +229,53 @@ class TestWriteResults:
         new_dir = tmp_path / "subdir"
         write_results(self._make_results(), total_records=50, output_path=new_dir)
         assert new_dir.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# main — output without --output, engine choice
+# ---------------------------------------------------------------------------
+
+
+def _main_args(input_path, pattern, engine="regex"):
+    """Build a Namespace for index main without an output directory."""
+    return argparse.Namespace(
+        input=input_path,
+        index_regex=pattern,
+        index_file=None,
+        output=None,
+        distance=1,
+        error_type="s",
+        engine=engine,
+        verbose=False,
+        quiet=False,
+    )
+
+
+def _write_fastq(path, sequences):
+    """Write sequences as a plain FASTQ file."""
+    path.write_text(
+        "".join(f"@r{i}\n{s}\n+\n{'I' * len(s)}\n" for i, s in enumerate(sequences))
+    )
+
+
+def test_main_prints_results_without_output(tmp_path, capsys):
+    """Without --output the matches go to stdout."""
+    from biomate.index.index import main
+
+    f = tmp_path / "r.fastq"
+    _write_fastq(f, ["AAACGTACGTAA"])
+    main(_main_args(f, "ACGTACGT"))
+    assert "0 ACGTACGT 1 100.00%" in capsys.readouterr().out
+
+
+def test_rust_engine_is_skipped_for_regex_syntax(tmp_path, capsys):
+    """A pattern with regex syntax gives the regex-engine result on both engines."""
+    pytest.importorskip("biomate_kernels")
+    from biomate.index.index import main
+
+    f = tmp_path / "r.fastq"
+    _write_fastq(f, ["AAACGTACGTAA"])
+    main(_main_args(f, "ACG[TA]ACGT", engine="regex"))
+    expected = capsys.readouterr().out
+    main(_main_args(f, "ACG[TA]ACGT", engine="rust"))
+    assert expected and capsys.readouterr().out == expected

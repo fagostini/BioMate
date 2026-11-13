@@ -283,6 +283,12 @@ def main(args: argparse.Namespace) -> None:
                 logging.warning(
                     "biomate_kernels is not installed; falling back to the regex engine"
                 )
+            elif not re.fullmatch(r"[A-Za-z+]+", pattern):
+                # The kernel matches letters literally: "ACG[TA]" or "ACG.A"
+                # would give different results from the regex engine
+                logging.warning(
+                    f"Pattern '{pattern}' uses regex syntax; using the regex engine"
+                )
             else:
                 rust_kernel = biomate_kernels.IndexPattern(
                     pattern, args.distance, args.error_type
@@ -328,6 +334,7 @@ def main(args: argparse.Namespace) -> None:
         else:
             for key, value in results.items():
                 for seq, cnt in _sorted_by_count(value):
-                    logging.info(
+                    # print, not logging: without --output the log is quiet
+                    print(
                         f"{key} {' '.join(list(seq))} {cnt} {cnt / total_records:.2%}"
                     )
