@@ -158,12 +158,19 @@ def extract_indexes_from_sample_sheet(
             idx1_idx = cast(int, column_indices["index"])
             idx2_idx = column_indices.get("index2")
 
+            # Rows without an index (no-index lanes, trailing ",,,," rows) would
+            # match every undetermined barcode
+            if len(fields) <= idx1_idx or not fields[idx1_idx].strip():
+                continue
+
             data_rows.append(
                 {
                     "Lane": fields[lane_idx],
                     "Sample_Project": fields[proj_idx],
                     "index1": fields[idx1_idx],
-                    "index2": fields[idx2_idx] if idx2_idx is not None else None,
+                    "index2": (fields[idx2_idx] or None)
+                    if idx2_idx is not None
+                    else None,
                 }
             )
 
@@ -195,11 +202,9 @@ def extract_indexes_from_undetermined_file(
             f"Invalid lane format in file name: {undetermined_file_path.name}. Expected format: *_*_LXXX_*"
         )
 
-    total_records = 0
     indexes = Counter()
     with dnaio.open(undetermined_file_path) as reader:
         for record in reader:
-            total_records += 1
             # Expected format: name parts separated by space, index in second part after last colon
             name_parts = record.name.split(" ")
             if len(name_parts) < 2:
@@ -219,7 +224,6 @@ def extract_indexes_from_undetermined_file(
             "Lane": lane,
             "Undetermined_Index": idx,
             "Count": count,
-            "Fraction": count / total_records,
         }
         for idx, count in indexes.most_common(1000)
     ]
@@ -314,6 +318,7 @@ def clean_results(
         right_on=["Lane", "index1", "index2"],
         how="left",
         suffix="_expected",
+        nulls_equal=True,  # single-index sheets have a null index2
     )
 
     # Keep only rows where the expected columns are null (i.e., unexpected indexes)
