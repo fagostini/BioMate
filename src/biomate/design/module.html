@@ -9,6 +9,7 @@
     <p>{{ module['description'] }}</p>
 
     <form method="POST" action="/module/{{ module['name'] }}" class="mt-4" id="module-form">
+      {% raw xsrf_form_html() %}
       <table class="table table-striped">
         {% for param in module['parameters'] %}
         {% set sw = param.get('show_when', {}) %}
@@ -27,7 +28,7 @@
             {% if param['param_type'] == 'select' %}
             <select class="form-select" id="{{ param['form_name'] }}" name="{{ param['form_name'] }}">
               {% for opt in param.get('options', []) %}
-              <option value="{{ opt }}"{% if (opt == param_overrides.get(param['form_name'], '')) %} selected{% end %}>{{ opt }}</option>
+              <option value="{{ opt }}"{% if (opt == param_overrides.get(param['form_name'], param.get('default', ''))) %} selected{% end %}>{{ opt }}</option>
               {% end %}
             </select>
             {% elif param['param_type'] == 'boolean' %}
@@ -151,6 +152,10 @@ $(document).ready(function() {
       var meta = paramMeta[formName];
       var val = values[formName];
       var defaultVal = meta.default;
+
+      // Form-only fields and hidden rows are not part of the command
+      if (!meta.cli_name) continue;
+      if (meta.show_when && values[meta.show_when.parameter] !== meta.show_when.value) continue;
 
       // Subcommands: emit the value directly (no --prefix)
       if (meta.cli_name === '_subcommand' && val && !val.startsWith('-')) {

@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import os
 import secrets
-import shlex
 import ssl
 import subprocess
 from pathlib import Path
@@ -344,7 +343,7 @@ MODULES: List[Dict[str, Any]] = [
                 "options": ["index_regex", "index_file"],
                 "help": "How to specify index patterns",
                 "form_name": "match_type",
-                "cli_name": "match-type",
+                "cli_name": None,  # form-only: picks which index field is shown
             },
             {
                 "label": "Index Regex Pattern",
@@ -619,26 +618,11 @@ def validate_module_name(module_name: str) -> bool:
     return module_name in allowed_modules
 
 
-def validate_command_args(args: List[str]) -> bool:
-    """Validate command arguments to prevent injection attacks.
-
-    Ensures arguments don't contain shell metacharacters that would bypass
-    subprocess.run's protection.
-    """
-    # Dangerous patterns that could indicate shell injection attempts
-    dangerous_patterns = [";", "|", "&", "$", "`", "\n", "\r", "&&", "||"]
-
-    for arg in args:
-        for pattern in dangerous_patterns:
-            if pattern in arg:
-                return False
-    return True
-
-
 def run_biomate(module_name: str, args: List[str]) -> Dict[str, Any]:
     """Run a biomate subcommand and return stdout / stderr / returncode.
 
-    Validates module name and arguments to prevent injection attacks.
+    The command runs as an argument list, without a shell, so argument values
+    need no quoting or filtering; only the module name is validated.
     """
     # Validate module name
     if not validate_module_name(module_name):
@@ -647,15 +631,6 @@ def run_biomate(module_name: str, args: List[str]) -> Dict[str, Any]:
             "returncode": -1,
             "stdout": "",
             "stderr": f"Invalid module name: {module_name}",
-        }
-
-    # Validate arguments
-    if not validate_command_args(args):
-        return {
-            "success": False,
-            "returncode": -1,
-            "stdout": "",
-            "stderr": "Invalid arguments detected. Command injection prevented.",
         }
 
     cmd = ["biomate", module_name] + args
@@ -695,7 +670,12 @@ def flatten_parameters(params: List[Dict], values: Dict[str, str]) -> List[str]:
         form_key = p.get("form_name", p.get("name", ""))
         cli_key = p.get("cli_name", form_key)
         val = values.get(form_key)
-        if val is None:
+        if val is None or cli_key is None:  # cli_name None: form-only field
+            continue
+
+        # Hidden rows are still submitted by the browser: skip them
+        show_when = p.get("show_when")
+        if show_when and values.get(show_when["parameter"]) != show_when["value"]:
             continue
 
         if cli_key == "_subcommand" and not val.startswith("-"):
@@ -709,20 +689,23 @@ def flatten_parameters(params: List[Dict], values: Dict[str, str]) -> List[str]:
 
         if p.get("param_type") == "select":
             if val:
-                cli_args.append(f"--{cli_key}")
-                cli_args.append(str(val))
+                cli_args.append(f"--{cli_key}={val}")
             continue
 
         # text / number / unspecified
         default = p.get("default", "")
         if not val and default:
             val = default
+        # "--key=value" keeps a value starting with "-" from being read as a flag
         if val and p.get("multiple"):
             cli_args.append(f"--{cli_key}")
-            cli_args += [shlex.quote(v.strip()) for v in val.split(",") if v.strip()]
+            cli_args += [
+                v.strip()
+                for v in val.split(",")
+                if v.strip() and not v.strip().startswith("-")
+            ]
         elif val:
-            cli_args.append(f"--{cli_key}")
-            cli_args.append(shlex.quote(str(val)))
+            cli_args.append(f"--{cli_key}={val}")
 
     return cli_args
 
@@ -760,7 +743,7 @@ def _module_list() -> list:
         for p in m["parameters"]:
             if "is_path" not in p:
                 text = " ".join(
-                    p.get(k, "") for k in ("label", "cli_name", "form_name", "help")
+                    p.get(k) or "" for k in ("label", "cli_name", "form_name", "help")
                 ).lower()
                 params.append(
                     ParamDict(
@@ -818,6 +801,12 @@ def register_report(module_name: str, values: Dict[str, str]) -> str | None:
 class SecurityHeadersMixin(tornado.web.RequestHandler):
     """Mixin to add security headers to all responses."""
 
+    def prepare(self):
+        """Reject requests whose Host is not the local server (DNS rebinding)."""
+        allowed = self.settings.get("allowed_hosts")
+        if allowed and self.request.host_name not in allowed:
+            raise tornado.web.HTTPError(403, "Host not allowed")
+
     def set_default_headers(self):
         """Set security-related HTTP headers."""
         # Prevent MIME type sniffing
@@ -870,6 +859,7 @@ class ModuleHandler(SecurityHeadersMixin):
                 "param_type": p.get("param_type", "text"),
                 "default": p.get("default", ""),
                 "is_boolean": p.get("param_type") == "boolean",
+                "show_when": p.get("show_when"),
             }
         self.write(
             t.generate(
@@ -880,6 +870,7 @@ class ModuleHandler(SecurityHeadersMixin):
                 gs_version="0.3.0",
                 modules=all_modules,
                 param_overrides={},
+                xsrf_form_html=self.xsrf_form_html,
             )
         )
 
@@ -932,6 +923,7 @@ class ModuleHandler(SecurityHeadersMixin):
                 "param_type": p.get("param_type", "text"),
                 "default": p.get("default", ""),
                 "is_boolean": p.get("param_type") == "boolean",
+                "show_when": p.get("show_when"),
             }
 
         self.write(
@@ -943,6 +935,7 @@ class ModuleHandler(SecurityHeadersMixin):
                 gs_version="0.3.0",
                 modules=all_modules,
                 param_overrides=param_overrides,
+                xsrf_form_html=self.xsrf_form_html,
             )
         )
 
@@ -974,8 +967,15 @@ class ReportHandler(SecurityHeadersMixin):
 # ---------------------------------------------------------------------------
 
 
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
 def make_app(host: str = "localhost", port: int = 8080) -> tornado.web.Application:
     """Create and return the Tornado application with security settings."""
+    # Bound to loopback: accept only loopback Host headers, so that a web page
+    # rebinding its DNS name to 127.0.0.1 cannot drive the tools. A server bound
+    # elsewhere is reached under names we cannot know, so it is not checked.
+    allowed_hosts = _LOOPBACK_HOSTS if host in _LOOPBACK_HOSTS else None
     return tornado.web.Application(
         [
             (r"/", MainHandler),
@@ -986,6 +986,7 @@ def make_app(host: str = "localhost", port: int = 8080) -> tornado.web.Applicati
         static_path=str(_STATIC_DIR),
         debug=False,  # Disable debug mode for security
         xsrf_cookies=True,  # Enable XSRF protection
+        allowed_hosts=allowed_hosts,
         max_body_size=200 * 1024 * 1024,
     )
 
@@ -1036,7 +1037,7 @@ def main(args: argparse.Namespace) -> None:
     """Start the web server."""
 
     # Warn if binding to public interfaces
-    if args.host not in ("localhost", "127.0.0.1", "::1"):
+    if args.host not in _LOOPBACK_HOSTS:
         print("\n" + "=" * 70)
         print("⚠️  SECURITY WARNING")
         print("=" * 70)

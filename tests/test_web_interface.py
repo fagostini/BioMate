@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 import pytest
+import tornado.testing
 import tornado.web
 
 from biomate.web_interface import (
@@ -13,7 +14,6 @@ from biomate.web_interface import (
     flatten_parameters,
     init_parser,
     make_app,
-    validate_command_args,
     validate_module_name,
 )
 
@@ -72,78 +72,6 @@ class TestValidateModuleName:
     def test_invalid_module_name_case_sensitive(self):
         """Test that module names are case-sensitive."""
         assert validate_module_name("BLABBER") is False
-
-
-class TestValidateCommandArgs:
-    """Test command argument validation for injection attack prevention."""
-
-    def test_valid_args_simple(self):
-        """Test that simple valid arguments pass."""
-        assert validate_command_args(["--seq-length", "100"]) is True
-
-    def test_valid_args_multiple(self):
-        """Test that multiple valid arguments pass."""
-        assert (
-            validate_command_args(
-                [
-                    "--seq-number",
-                    "1000",
-                    "--seq-length",
-                    "50",
-                    "--output",
-                    "/tmp/test.fastq",
-                ]
-            )
-            is True
-        )
-
-    def test_valid_args_numeric(self):
-        """Test that numeric arguments pass."""
-        assert validate_command_args(["--threads", "4"]) is True
-
-    def test_valid_args_paths(self):
-        """Test that path arguments pass."""
-        assert validate_command_args(["--output", "/home/user/output.txt"]) is True
-
-    def test_invalid_args_semicolon(self):
-        """Test that semicolon injection is blocked."""
-        assert validate_command_args(["--output", "test.txt; rm -rf /"]) is False
-
-    def test_invalid_args_pipe(self):
-        """Test that pipe injection is blocked."""
-        assert validate_command_args(["--sample-sheet", "sheet.csv | cat"]) is False
-
-    def test_invalid_args_ampersand(self):
-        """Test that ampersand injection is blocked."""
-        assert validate_command_args(["--output", "test.txt & whoami"]) is False
-
-    def test_invalid_args_dollar_substitution(self):
-        """Test that command substitution with $ is blocked."""
-        assert validate_command_args(["--input", "$(whoami)"]) is False
-
-    def test_invalid_args_backtick(self):
-        """Test that backtick substitution is blocked."""
-        assert validate_command_args(["--input", "`cat /etc/passwd`"]) is False
-
-    def test_invalid_args_newline(self):
-        """Test that newline injection is blocked."""
-        assert validate_command_args(["--input", "test\nrm -rf /"]) is False
-
-    def test_invalid_args_carriage_return(self):
-        """Test that carriage return injection is blocked."""
-        assert validate_command_args(["--input", "test\rrm -rf /"]) is False
-
-    def test_invalid_args_double_ampersand(self):
-        """Test that && command chaining is blocked."""
-        assert validate_command_args(["--output", "test.txt && whoami"]) is False
-
-    def test_invalid_args_double_pipe(self):
-        """Test that || command chaining is blocked."""
-        assert validate_command_args(["--output", "test.txt || whoami"]) is False
-
-    def test_valid_args_empty_list(self):
-        """Test that empty argument list is valid."""
-        assert validate_command_args([]) is True
 
 
 class TestSecurityHeadersMixin:
@@ -236,8 +164,7 @@ class TestFlattenedParameters:
         params = [{"form_name": "seq_length", "cli_name": "seq-length"}]
         values = {"seq_length": "100"}
         args = flatten_parameters(params, values)
-        assert "--seq-length" in args
-        assert "100" in args
+        assert args == ["--seq-length=100"]
 
     def test_flatten_missing_parameter(self):
         """Test that missing parameters are skipped."""
@@ -271,8 +198,7 @@ class TestFlattenedParameters:
         ]
         values = {"error_type": "s"}
         args = flatten_parameters(params, values)
-        assert "--error-type" in args
-        assert "s" in args
+        assert args == ["--error-type=s"]
 
     def test_flatten_multiple_splits_commas(self):
         """A multi-value field passes each comma-separated item as its own arg."""
@@ -293,7 +219,7 @@ class TestFlattenedParameters:
         ]
         values = {}
         args = flatten_parameters(params, values)
-        assert "1" in args or len(args) == 0
+        assert args == []
 
     def test_flatten_with_provided_value_overrides_default(self):
         """Test that provided values override defaults."""
@@ -307,35 +233,7 @@ class TestFlattenedParameters:
         ]
         values = {"threads": "4"}
         args = flatten_parameters(params, values)
-        assert "--threads" in args
-        assert "4" in args
-
-
-class TestInjectionAttackScenarios:
-    """Test realistic injection attack scenarios."""
-
-    def test_path_traversal_attempt(self):
-        """Path traversal is allowed at CLI level — OS will reject actual access."""
-        assert validate_command_args(["--output", "../../etc/passwd"]) is True
-
-    def test_command_substitution_complex(self):
-        """Test complex command substitution attempts."""
-        dangerous_inputs = [
-            "$(echo test)",
-            "`echo test`",
-            "${USER}",
-            "test ; echo hacked",
-            "test | base64",
-            "test & sleep 5",
-        ]
-        for dangerous in dangerous_inputs:
-            result = validate_command_args(["--output", dangerous])
-            assert result is False, f"Failed to block dangerous input: {dangerous}"
-
-    def test_multiline_command_injection(self):
-        """Test that multiline command injection is blocked."""
-        multiline = "test\necho hacked\nrm -rf /"
-        assert validate_command_args(["--input", multiline]) is False
+        assert args == ["--threads=4"]
 
 
 class TestWebInterfaceModule:
@@ -434,3 +332,114 @@ class TestReportRoute:
         assert missing.code == 404
         traversal = asyncio.run(fetch("/report/..%2F..%2Fetc%2Fpasswd"))
         assert traversal.code == 404
+
+
+class TestModuleForms(tornado.testing.AsyncHTTPTestCase):
+    """Round trip of every tool form through the real handler and CLI parser."""
+
+    def get_app(self):
+        """Application under test."""
+        return make_app()
+
+    def _post_default_form(self, name, calls):
+        """GET the form, then POST its default values back with the XSRF token."""
+        import re
+        from unittest import mock
+        from urllib.parse import urlencode
+
+        from biomate import web_interface
+
+        page = self.fetch(f"/module/{name}", headers={"Host": "localhost"})
+        assert page.code == 200
+        token = re.search(rb'name="_xsrf" value="([^"]+)"', page.body).group(1).decode()
+        cookie = page.headers["Set-Cookie"].split(";")[0]
+        module = next(m for m in web_interface.MODULES if m["name"] == name)
+        form = {"_xsrf": token}
+        for p in module["parameters"]:
+            # Like a browser: unchecked checkboxes are not sent, everything else is
+            if p.get("param_type") != "boolean":
+                form[p["form_name"]] = str(p.get("default", ""))
+        fake = {"success": True, "returncode": 0, "stdout": "", "stderr": ""}
+        with mock.patch.object(
+            web_interface,
+            "run_biomate",
+            side_effect=lambda m, a: calls.append(a) or fake,
+        ):
+            return self.fetch(
+                f"/module/{name}",
+                method="POST",
+                body=urlencode(form),
+                headers={"Host": "localhost", "Cookie": cookie},
+            )
+
+    def test_default_form_of_every_module_builds_known_arguments(self):
+        """No module's default form produces an option its CLI does not have."""
+        import biomate
+        from biomate import web_interface
+
+        parser = biomate.CustomParser()
+        subparsers = parser.add_subparsers()
+        for mod in (
+            biomate.blabber.blabber,
+            biomate.dirstruct.dirstruct,
+            biomate.index.index,
+            biomate.fastrewind.fastrewind,
+            biomate.nspector.nspector,
+            biomate.strainer.strainer,
+            biomate.waif.waif,
+        ):
+            mod.init_parser(subparsers)
+        for module in web_interface.MODULES:
+            calls = []
+            response = self._post_default_form(module["name"], calls)
+            assert response.code == 200, module["name"]
+            # Unknown options would be left over; missing required ones are
+            # the user's to fill in, so only the leftovers are checked
+            _, unknown = _parse_known(parser, [module["name"], *calls[0]])
+            assert unknown == [], (module["name"], unknown)
+
+    def test_post_without_xsrf_token_is_rejected(self):
+        """A POST without the form token is refused."""
+        response = self.fetch("/module/blabber", method="POST", body="seq_number=1")
+        assert response.code == 403
+
+    def test_foreign_host_header_is_rejected(self):
+        """A request for another host name (DNS rebinding) is refused."""
+        response = self.fetch("/", headers={"Host": "evil.example.com"})
+        assert response.code == 403
+
+    def test_select_shows_its_default(self):
+        """A select field preselects its default option on a fresh page."""
+        page = self.fetch("/module/blabber", headers={"Host": "localhost"})
+        assert b'<option value="text" selected>' in page.body
+
+
+def _parse_known(parser, argv):
+    """parse_known_args that tolerates missing required options."""
+    import contextlib
+    import io
+
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            return parser.parse_known_args(argv)
+        except SystemExit:
+            # Required options missing: re-check only for unknown options
+            unknown = [a for a in argv[1:] if a.startswith("--")]
+            known = {
+                s
+                for sub in parser._subparsers._group_actions[0].choices.values()
+                for a in _all_actions(sub)
+                for s in a.option_strings
+            }
+            return None, [a for a in unknown if a.split("=")[0] not in known]
+
+
+def _all_actions(parser):
+    """Actions of a parser and of its nested subparsers."""
+    for action in parser._actions:
+        yield action
+        for sub in getattr(action, "choices", None) or {}:
+            if hasattr(action.choices, "values") and hasattr(
+                action.choices[sub], "_actions"
+            ):
+                yield from _all_actions(action.choices[sub])
