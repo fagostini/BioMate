@@ -70,14 +70,15 @@ def _caption(chart: alt.TopLevelMixin, text: str, width: int) -> alt.VConcatChar
     """Put ``text`` under ``chart`` as a small grey caption, wrapped to ``width`` px."""
     return alt.vconcat(chart).properties(
         title=alt.TitleParams(
-            # ~5 px per character at 11 px; Vega titles do not wrap by themselves
-            textwrap.wrap(text, max(40, width // 5)),
+            # ~6.5 px per character at 13 px; Vega titles do not wrap by themselves
+            textwrap.wrap(text, max(40, int(width / 6.5))),
             orient="bottom",
             anchor="start",
-            fontSize=11,
+            fontSize=13,
             fontWeight="normal",
-            color="#5b6474",
-            offset=10,
+            lineHeight=18,
+            # no fixed colour: the page's light/dark config sets title colours
+            offset=12,
         )
     )
 
@@ -151,14 +152,26 @@ CAPTIONS = {
 }
 
 
-# log-like colours (symlog keeps 0 at the bottom): one extreme tile or cycle no
-# longer flattens the rest of the map into one colour; tooltips keep exact values.
-# The tiny constant makes rates of 0.1% and 1% clearly different shades.
-# unionWith keeps the domain from collapsing to [0, 0] when a selection has no
-# N at all; otherwise Vega paints those zeros in the middle colour
-ROBUST_SCALE = alt.Scale(
-    type="symlog", constant=1e-4, scheme=SCHEME, domain={"unionWith": [0, 1e-6]}
-)
+def robust_scale(values: polars.Series) -> alt.Scale:
+    """Log-like colour scale tuned to the typical (median non-zero) value.
+
+    symlog is linear below ``constant`` and logarithmic above it, and keeps 0 at
+    the bottom colour. With ``constant`` a twentieth of the typical value,
+    normal tiles and cycles spread over the colour range and one extreme value
+    no longer flattens the rest of the map; tooltips keep the exact values.
+    ``unionWith`` stops the domain collapsing to [0, 0] when a selection has no
+    N at all (Vega would paint those zeros in the middle colour).
+    """
+    positive = values.filter(values > 0)
+    typical = float(positive.median()) if positive.len() else 1e-3
+    return alt.Scale(
+        type="symlog",
+        constant=typical / 20,
+        scheme=SCHEME,
+        domain={"unionWith": [0, 1e-6]},
+    )
+
+
 # rate metrics as percentages, counts with thousands separators
 METRIC_LABELS = (
     "metric == 'count' ? format(datum.value, ',.0f') : format(datum.value, '.2%')"
@@ -192,8 +205,23 @@ def _log_ticks(maximum: int) -> list[int]:
     return ticks
 
 
+def _section(title: str, *charts: alt.TopLevelMixin) -> alt.VConcatChart:
+    """Group ``charts`` under a large section title."""
+    return (
+        alt.vconcat(*charts, spacing=36)
+        # nested concats share colour scales unless told otherwise
+        .resolve_scale(color="independent")
+        .properties(
+            title=alt.TitleParams(
+                title, fontSize=20, anchor="start", offset=16, color=FLAG_COLOR
+            )
+        )
+    )
+
+
 def _value_title() -> str:
-    return "N rate / count / low-Q rate"
+    # the Metric control names the metric; titles cannot follow it
+    return "Selected metric"
 
 
 def select_spatial(tables: NspectorTables, max_rows: int = MAX_SPATIAL_ROWS):
@@ -358,7 +386,9 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         """Opacity ``opacity`` for selected legend entries, 0 (hidden) otherwise."""
         return alt.when(selection).then(alt.value(opacity)).otherwise(alt.value(0))
 
-    color = alt.Color("value:Q", title=_value_title(), scale=ROBUST_SCALE)
+    def color(values: polars.Series, title: str = _value_title()) -> alt.Color:
+        return alt.Color("value:Q", title=title, scale=robust_scale(values))
+
     rate_tooltip = [
         alt.Tooltip("n:Q", title="Reads with N", format=","),
         alt.Tooltip("total:Q", title="Reads scanned", format=","),
@@ -370,15 +400,37 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
     # -- A: sample × lane overview ------------------------------------------
     n_samples = tables.sample_lane.select("project", "sample").unique().height
     label = {"label": "datum.project + ' / ' + datum.sample"}
+    # beyond this many samples the sample names are unreadable: tooltips only
+    many_labels = n_samples > 60
+    overview_data = alt.Chart(
+        tables.sample_lane.select(
+            "project", "sample", "read", "lane", "n", "lowq", "total"
+        )
+    ).transform_filter(
+        f"{READ_FILTER} && (project_sel == 'All' || datum.project == project_sel)"
+    )
+    sample_x = alt.X(
+        "label:N",
+        title="Project / sample" + (" (hover for names)" if many_labels else ""),
+        sort="ascending",
+        axis=alt.Axis(labelAngle=-45, labelLimit=200, labels=not many_labels),
+    )
+    # coloured band above the overview: which project each sample belongs to
+    project_strip = (
+        overview_data.transform_aggregate(groupby=["project", "sample"])
+        .transform_calculate(**label)
+        .mark_rect()
+        .encode(
+            x=sample_x.axis(None),
+            # no legend: it would make this 10 px strip's row as tall as the legend;
+            # labels and tooltips already name the project
+            color=alt.Color("project:N", legend=None).scale(scheme="tableau10"),
+            tooltip=["project:N", "sample:N"],
+        )
+        .properties(width=FULL_WIDTH, height=10)
+    )
     overview = (
-        alt.Chart(
-            tables.sample_lane.select(
-                "project", "sample", "read", "lane", "n", "lowq", "total"
-            )
-        )
-        .transform_filter(
-            f"{READ_FILTER} && (project_sel == 'All' || datum.project == project_sel)"
-        )
+        overview_data
         # Read = All: sum the reads of each sample and lane
         .transform_aggregate(
             n="sum(n)",
@@ -390,14 +442,9 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         .mark_rect()
         .encode(
             # at most 8 lanes, so lanes go on Y and samples get the full width
-            x=alt.X(
-                "label:N",
-                title="Project / sample",
-                sort="ascending",
-                axis=alt.Axis(labelAngle=-45, labelLimit=200),
-            ),
+            x=sample_x,
             y=alt.Y("lane:O", title="Lane"),
-            color=color,
+            color=color(tables.sample_lane["n_rate"]),
             opacity=alt.when(pick_sample).then(alt.value(1)).otherwise(alt.value(0.3)),
             stroke=alt.when("datum.lane == lane_sel")
             .then(alt.value(FLAG_COLOR))
@@ -407,10 +454,14 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         )
         .add_params(pick_sample)
         .properties(
-            title="Samples × lanes (click a sample; outlined = selected lane)",
             width=FULL_WIDTH,
             height=alt.Step(24),
         )
+    )
+    overview = (
+        alt.vconcat(project_strip, overview, spacing=2)
+        .resolve_scale(x="shared", color="independent")
+        .properties(title="Samples × lanes (click a sample; outlined = selected lane)")
     )
 
     # -- B: per-sample N rate along the read, with cycle brush --------------
@@ -552,7 +603,11 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         .encode(
             x=alt.X("segment:O", title="Tile segment"),
             y=alt.Y("row:N", title=None),
-            color=color.title("N per read in selected cycles"),
+            # tile map value: N bases per read, summed over the cycles
+            color=color(
+                tables.tile_summary["n_bases"] / tables.tile_summary["total"],
+                "N per read",
+            ),
             opacity=alt.when(pick_tile).then(alt.value(1)).otherwise(alt.value(0.3)),
             tooltip=[
                 "tile:O",
@@ -637,7 +692,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         .encode(
             x=cycle_x,
             y=tile_y,
-            color=color,
+            color=color(tables.tile_cycle["n_rate"]),
             opacity=alt.when(pick_tile).then(alt.value(1)).otherwise(alt.value(0.25)),
             tooltip=["tile:O", "cycle:O", *rate_tooltip],
         )
@@ -655,8 +710,21 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         40,
         "No N bases and no low-Q bases in this selection",
     )
+    # white line above the first tile of each surface/swath
+    all_tiles = sorted(tables.tile_cycle["tile"].unique().to_list())
+    swath_starts = [
+        t for prev, t in zip(all_tiles, all_tiles[1:]) if prev // 100 != t // 100
+    ]
+    swath_lines = (
+        alt.Chart(
+            polars.DataFrame({"tile": swath_starts}, schema={"tile": polars.UInt32})
+        )
+        .mark_rule(color="white", strokeWidth=2)
+        .encode(y=alt.Y("tile:O", bandPosition=0))
+    )
     tile_cycle = alt.layer(
         tile_cycle.add_params(pick_tile).properties(name="tile_cycle_cells"),
+        swath_lines,
         flagged_cells,
         dark_cycles,
         no_events,
@@ -697,7 +765,9 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             x2="x1:Q",
             y=alt.Y("y0:Q", title="Y", scale=y_scale),
             y2="y1:Q",
-            color=alt.Color("n:Q", title="N bases", scale=ROBUST_SCALE),
+            color=alt.Color(
+                "n:Q", title="N bases", scale=robust_scale(tables.spatial["n_bases"])
+            ),
             tooltip=[
                 alt.Tooltip("x0:Q", title="X from", format=".0f"),
                 alt.Tooltip("y0:Q", title="Y from", format=".0f"),
@@ -952,37 +1022,79 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         first_n, _empty_note(sample_n, "n", FULL_WIDTH / 2, 70)
     ).properties(title="Where the first N falls", width=FULL_WIDTH, height=140)
 
+    # pick_tile / pick_read are shared on purpose by several views; Altair warns
+    # each time it merges them while nesting the sections
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="Automatically deduplicated selection parameter"
+        )
+        return _assemble(
+            overview,
+            sample_cycle,
+            n_per_read,
+            n_vs_lowq,
+            run_length,
+            first_n,
+            tile_map,
+            tile_step * n_segments,
+            spatial_view,
+            tile_cycle,
+            cell * len(range(1, max_cycle + 1, window)),
+            interop_view,
+            (project_sel, lane_sel, read_sel, metric, show_warn),
+        )
+
+
+def _assemble(
+    overview,
+    sample_cycle,
+    n_per_read,
+    n_vs_lowq,
+    run_length,
+    first_n,
+    tile_map,
+    tile_map_width,
+    spatial_view,
+    tile_cycle,
+    tile_cycle_width,
+    interop_view,
+    controls,
+) -> alt.VConcatChart:
+    """Lay the charts out in captioned sections, with the page-level controls."""
     return (
         alt.vconcat(
-            _caption(overview, CAPTIONS["overview"], FULL_WIDTH),
-            _caption(sample_cycle, CAPTIONS["sample_cycle"], FULL_WIDTH),
-            _caption(n_per_read, CAPTIONS["n_per_read"], FULL_WIDTH),
-            _caption(n_vs_lowq, CAPTIONS["n_vs_lowq"], FULL_WIDTH),
-            _caption(run_length, CAPTIONS["run_length"], FULL_WIDTH),
-            _caption(first_n, CAPTIONS["first_n"], FULL_WIDTH),
-            # nested concats share colour scales unless told otherwise
-            alt.hconcat(
-                _caption(
-                    tile_map, CAPTIONS["tile_map"], max(tile_step * n_segments, 360)
+            _section(
+                "Samples and cycles",
+                _caption(overview, CAPTIONS["overview"], FULL_WIDTH),
+                _caption(sample_cycle, CAPTIONS["sample_cycle"], FULL_WIDTH),
+            ),
+            _section(
+                "N within reads",
+                _caption(n_per_read, CAPTIONS["n_per_read"], FULL_WIDTH),
+                _caption(n_vs_lowq, CAPTIONS["n_vs_lowq"], FULL_WIDTH),
+                _caption(run_length, CAPTIONS["run_length"], FULL_WIDTH),
+                _caption(first_n, CAPTIONS["first_n"], FULL_WIDTH),
+            ),
+            _section(
+                "Flowcell",
+                alt.hconcat(
+                    _caption(tile_map, CAPTIONS["tile_map"], max(tile_map_width, 360)),
+                    _caption(spatial_view, CAPTIONS["spatial"], 540),
+                    spacing=48,
+                ).resolve_scale(color="independent"),
+                _caption(tile_cycle, CAPTIONS["tile_cycle"], tile_cycle_width),
+                *(
+                    [_caption(interop_view, CAPTIONS["interop"], 420)]
+                    if interop_view is not None
+                    else []
                 ),
-                _caption(spatial_view, CAPTIONS["spatial"], 540),
-                spacing=48,
-            ).resolve_scale(color="independent"),
-            _caption(
-                tile_cycle,
-                CAPTIONS["tile_cycle"],
-                cell * len(range(1, max_cycle + 1, window)),
             ),
-            *(
-                [_caption(interop_view, CAPTIONS["interop"], 420)]
-                if interop_view is not None
-                else []
-            ),
-            spacing=36,
+            spacing=56,
         )
-        .add_params(project_sel, lane_sel, read_sel, metric, show_warn)
+        .add_params(*controls)
         .resolve_scale(color="independent")
-        .configure_view(fill="#f3f3f3", stroke=None)
+        # view fill and dark-mode colours come from the page (vegaEmbed config)
+        .configure_view(stroke=None)
         .configure_axis(labelFontSize=11, titleFontSize=12)
     )
 
@@ -997,7 +1109,9 @@ def _table(frame: polars.DataFrame, formats: dict[str, str] | None = None) -> st
         for col, value in row.items():
             fmt = formats.get(col)
             text = format(value, fmt) if fmt and value is not None else str(value)
-            cells.append(f"<td>{html.escape(text)}</td>")
+            badge = col == "status" and text in ("PASS", "WARN", "FAIL")
+            cls = f' class="badge {text.lower()}"' if badge else ""
+            cells.append(f"<td><span{cls}>{html.escape(text)}</span></td>")
         rows.append(f"<tr>{''.join(cells)}</tr>")
     return (
         f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
@@ -1064,6 +1178,56 @@ def summary_tables(scans: list[FileScan], tables: NspectorTables, top: int = 10)
     return inputs, worst_tiles, worst_cycles
 
 
+def project_summary(tables: NspectorTables) -> polars.DataFrame:
+    """One row per project: samples, reads, N rates and the worst flag status.
+
+    A project's status is the worst flag on the read/lanes it was sequenced on
+    (flags are flowcell-level, so they apply to every project on that lane).
+    """
+    rank = {"PASS": 0, "WARN": 1, "FAIL": 2}
+    worst = (
+        _flags(tables)
+        .group_by("read", "lane")
+        .agg(polars.col("status").replace_strict(rank, return_dtype=polars.Int8).max())
+    )
+    return (
+        tables.sample_lane.join(worst, on=["read", "lane"], how="left")
+        .group_by("project")
+        .agg(
+            polars.col("sample").n_unique().alias("samples"),
+            polars.col("lane")
+            .unique()
+            .sort()
+            .cast(polars.Utf8)
+            .str.join(", ")
+            .alias("lanes"),
+            polars.col("total").sum().alias("reads scanned"),
+            polars.col("n").sum().alias("reads with N"),
+            polars.col("n_bases").sum().alias("N bases"),
+            polars.col("bases").sum(),
+            polars.col("status").fill_null(0).max(),
+        )
+        .with_columns(
+            (polars.col("reads with N") / polars.col("reads scanned")).alias("N rate"),
+            (polars.col("N bases") / polars.col("bases")).alias("N per base"),
+            polars.col("status").replace_strict(
+                {v: k for k, v in rank.items()}, return_dtype=polars.Utf8
+            ),
+        )
+        .select(
+            "project",
+            "samples",
+            "lanes",
+            "reads scanned",
+            "reads with N",
+            "N rate",
+            "N per base",
+            "status",
+        )
+        .sort("project")
+    )
+
+
 # number formats of the HTML summary tables
 TABLE_FORMATS = {
     "N rate": ".3%",
@@ -1105,21 +1269,52 @@ _PAGE = """<!DOCTYPE html>
   #controls .vega-bindings {{ display: flex; flex-wrap: wrap; gap: 4px 24px; padding: 8px 0; }}
   #controls label {{ cursor: pointer; }}
   #controls .vega-bind-name {{ font-weight: 600; }}
+  .badge {{ display: inline-block; padding: 0 8px; border-radius: 10px; font-weight: 600; font-size: 12px; }}
+  .badge.pass {{ background: #d3f9d8; color: #2b8a3e; }}
+  .badge.warn {{ background: #fff3bf; color: #a35c00; }}
+  .badge.fail {{ background: #ffe3e3; color: #c92a2a; }}
+  .stat .badge {{ font-size: 14px; margin-right: 4px; }}
+  .toolbar {{ float: right; }}
+  .toolbar button {{ font: inherit; padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); cursor: pointer; }}
+  .toolbar button + button {{ margin-left: 6px; }}
+  :root[data-theme="dark"] {{ --fg: #e6e8ec; --muted: #a2a9b6; --line: #343a46; --bg: #14161a; --panel: #1e2128; --accent: #748ffc; }}
+  :root[data-theme="dark"] .badge.pass {{ background: #1f3b26; color: #8ce99a; }}
+  :root[data-theme="dark"] .badge.warn {{ background: #3d3416; color: #ffd43b; }}
+  :root[data-theme="dark"] .badge.fail {{ background: #431f22; color: #ffa8a8; }}
+  @media print {{
+    @page {{ size: A3 landscape; margin: 10mm; }}
+    #controls, .help, .toolbar {{ display: none; }}
+    #vis {{ overflow: visible; }}
+    #vis canvas {{ max-width: 100%; height: auto !important; }}
+    section, .stat {{ break-inside: avoid; }}
+  }}
 </style>
+<script type="text/javascript">
+  (function () {{
+    let saved = null;
+    try {{ saved = localStorage.getItem('nspector-theme'); }} catch (e) {{}}
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.dataset.theme = saved || (prefersDark ? 'dark' : 'light');
+  }})();
+</script>
 <script type="text/javascript">
 {vegaembed}
 </script>
 </head>
 <body>
 <header>
+  <div class="toolbar"><button type="button" id="theme-toggle" onclick="toggleTheme()">Dark mode</button><button type="button" onclick="window.print()">Print / save as PDF</button></div>
   <h1>nspector report</h1>
   <p class="meta">Generated {generated} · {n_files} input file(s) · read length up to {max_len} cycles</p>
   <div class="stats">
     <div class="stat"><b>{total_reads}</b><span>reads scanned</span></div>
     <div class="stat"><b>{n_reads}</b><span>reads with at least one N</span></div>
-    <div class="stat"><b>{n_rate}</b><span>overall N rate</span></div>
+    <div class="stat"><b>{n_rate}</b><span>overall N rate (reads with N)</span></div>
+    <div class="stat"><b>{n_per_base}</b><span>N per sequenced base</span></div>
     <div class="stat"><b>{n_tiles}</b><span>tiles across {n_lanes} lane(s)</span></div>
+    <div class="stat"><b>{flag_badges}</b><span>anomaly flags</span></div>
   </div>
+  <section><h2>Projects</h2><div class="scroll">{projects}</div></section>
 </header>
 <main>
   <section><h2>Anomaly flags</h2>{flags}</section>
@@ -1144,13 +1339,39 @@ _PAGE = """<!DOCTYPE html>
 </main>
 <script type="text/javascript">
   const spec = {spec};
-  vegaEmbed('#vis', spec, {{"mode": "vega-lite", "renderer": "canvas", "actions": {{"export": true, "source": false, "compiled": false, "editor": false}}}})
-    .then((result) => {{
-      window.nspectorView = result.view;
-      const bindings = document.querySelector('#vis .vega-bindings');
-      if (bindings) document.getElementById('controls').appendChild(bindings);
-    }})
-    .catch(console.error);
+  const themes = {{
+    "dark": {{"background": "#14161a", "view": {{"fill": "#1e2128"}}, "axis": {{"domainColor": "#6b7280", "gridColor": "#2c313a", "tickColor": "#6b7280", "labelColor": "#c9ced6", "titleColor": "#e6e8ec"}}, "legend": {{"labelColor": "#c9ced6", "titleColor": "#e6e8ec"}}, "title": {{"color": "#e6e8ec"}}}},
+    "light": {{"background": "#ffffff", "view": {{"fill": "#f3f3f3"}}, "title": {{"color": "#1d2330"}}}}
+  }};
+  // controls whose values survive a theme switch (the charts are re-drawn)
+  const controls = ["project_sel", "lane_sel", "read_sel", "metric", "show_warn"];
+
+  function render(theme, keep) {{
+    if (window.nspectorView) window.nspectorView.finalize();
+    document.getElementById('controls').replaceChildren();
+    document.getElementById('theme-toggle').textContent = theme === 'dark' ? 'Light mode' : 'Dark mode';
+    // restore the controls as initial parameter values: setting signals on the
+    // freshly embedded view does not reliably re-run the chart filters
+    const params = (spec.params || []).map((p) => keep && p.name in keep ? {{...p, "value": keep[p.name]}} : p);
+    return vegaEmbed('#vis', {{...spec, "params": params}}, {{"mode": "vega-lite", "renderer": "canvas", "config": themes[theme], "actions": {{"export": true, "source": false, "compiled": false, "editor": false}}}})
+      .then((result) => {{
+        window.nspectorView = result.view;
+        const bindings = document.querySelector('#vis .vega-bindings');
+        if (bindings) document.getElementById('controls').appendChild(bindings);
+      }})
+      .catch(console.error);
+  }}
+
+  function toggleTheme() {{
+    const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = theme;
+    try {{ localStorage.setItem('nspector-theme', theme); }} catch (e) {{}}
+    const view = window.nspectorView;
+    const keep = view ? Object.fromEntries(controls.map((name) => [name, view.signal(name)])) : null;
+    render(theme, keep);
+  }}
+
+  render(document.documentElement.dataset.theme);
 </script>
 </body>
 </html>
@@ -1205,6 +1426,17 @@ def write_report(
         flags_html = "<p class='meta'>No tile, cell or dark-cycle flags.</p>"
     total_reads = int(tables.sample_lane["total"].sum())
     n_reads = int(tables.sample_lane["n"].sum())
+    bases = int(tables.sample_lane["bases"].sum())
+    n_bases = int(tables.sample_lane["n_bases"].sum())
+    counts = dict(flags["status"].value_counts().iter_rows()) if flags.height else {}
+    flag_badges = (
+        " ".join(
+            f'<span class="badge {s.lower()}">{counts[s]} {s}</span>'
+            for s in ("FAIL", "WARN")
+            if counts.get(s)
+        )
+        or '<span class="badge pass">PASS</span>'
+    )
     page = _PAGE.format(
         vegaembed=_vegaembed_bundle(),
         flags=flags_html,
@@ -1215,6 +1447,9 @@ def write_report(
         total_reads=f"{total_reads:,}",
         n_reads=f"{n_reads:,}",
         n_rate=f"{n_reads / total_reads:.3%}" if total_reads else "n/a",
+        n_per_base=f"{n_bases / bases:.4%}" if bases else "n/a",
+        flag_badges=flag_badges,
+        projects=_table(project_summary(tables), TABLE_FORMATS),
         n_tiles=tables.tile_summary.select("lane", "tile").unique().height,
         n_lanes=tables.sample_lane["lane"].n_unique(),
         worst_tiles=_table(worst_tiles, TABLE_FORMATS),

@@ -98,6 +98,13 @@ Flags appear:
 - **Sample** and **read** (R1/R2/I1/...) come from the Illumina file name `<sample>_S<n>[_L<lane>]_<read>_001.fastq.gz`.
 - Files that do not follow this convention use the file stem as the sample name and `R1` as the read.
 
+## Report layout
+
+- The header shows reads scanned, the N rate per read and per sequenced base, the tile count and the flag counts, then a **Projects** table (samples, lanes, reads, N rates and worst flag status per project).
+- Charts are grouped in three sections: *Samples and cycles*, *N within reads* and *Flowcell*. A coloured band above the samples × lanes overview shows each sample's project; with more than 60 samples the names move to tooltips.
+- White lines in the tile × cycle heatmap separate surfaces and swaths.
+- The page opens in the browser's light or dark mode; the **Dark mode / Light mode** button switches it and the choice is remembered in that browser. The charts are redrawn on a switch, keeping the Project, Lane, Read, Metric and WARN settings (clicked samples, tiles and cycle ranges are cleared). **Print / save as PDF** prints the page (A3 landscape) without the controls.
+
 ## Progress
 
 A progress bar shows the scan (by input bytes, advanced as each file finishes) and the output steps (tables, report, MultiQC, PNGs). It is hidden with `--quiet` and when the output is not a terminal.

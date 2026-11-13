@@ -23,6 +23,7 @@ from biomate.nspector.nspector import (
 )
 from biomate.nspector.report import (
     build_chart,
+    project_summary,
     select_spatial,
     window_tile_cycle,
     with_tile_anchors,
@@ -812,3 +813,29 @@ def test_read_control_offers_all_with_two_reads(tmp_path):
     legend = {p["name"]: p for p in spec["params"] if p.get("bind") == "legend"}
     assert set(legend) == {"pick_read", "pick_series"}
     assert len(legend["pick_read"]["views"]) >= 4
+
+
+def test_project_summary_and_header(tmp_path):
+    root = tmp_path / "run"
+    _demux_tree(root)
+    scans = scan_files(discover_fastqs([root]), "python")
+    tables = build_tables(scans)
+    tables.flags = build_flags(tables)
+    summary = project_summary(tables)
+    assert summary["project"].to_list() == ["ProjA", "ProjB", "Undetermined"]
+    assert summary["reads with N"].to_list() == [1, 2, 3]
+    assert set(summary["status"]) <= {"PASS", "WARN", "FAIL"}
+    page = write_report(scans, tables, tmp_path).read_text()
+    for text in (
+        "<h2>Projects</h2>",
+        "N per sequenced base",
+        'class="badge',
+        "window.print()",
+        "prefers-color-scheme: dark",
+        'id="theme-toggle"',
+        "localStorage.setItem('nspector-theme'",
+    ):
+        assert text in page
+    spec = json.dumps(build_chart(tables).to_dict())
+    for section in ("Samples and cycles", "N within reads", "Flowcell"):
+        assert section in spec
