@@ -914,3 +914,17 @@ def test_member_ending_mid_record_is_not_aligned(tmp_path):
     f = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
     f.write_bytes(gzip.compress(b"@r 1:N:0:ACGT\nACGT\n") + gzip.compress(b"+\nIIII\n"))
     assert _find_member_offsets(f)[1] is False
+
+
+def test_threaded_count_with_capped_inflate(tmp_path, monkeypatch):
+    """Tiny inflate cap and read size: same counts as the serial pass."""
+    f = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
+    with open(f, "wb") as fh:  # two members
+        for start in (0, 500):
+            body = "".join(
+                f"@M:1:FC:1:1101:{i}:1 1:N:0:ACGT+TGCA\nACGT\n+\nIIII\n"
+                for i in range(start, start + 500)
+            )
+            fh.write(gzip.compress(body.encode()))
+    monkeypatch.setattr(waif, "_INFLATE_CHUNK", 64)
+    assert waif._count_threaded(f) == waif._count_serial(f) == {"ACGT+TGCA": 1000}

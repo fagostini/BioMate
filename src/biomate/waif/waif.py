@@ -258,15 +258,24 @@ def _inflate_stream(f: pathlib.Path, q: queue.Queue, chunk: int | None = None) -
         with open(f, "rb") as fh:
             comp = fh.read(size)
             while comp:
-                out = d.decompress(comp)
+                # Cap every inflate call: a highly compressible chunk would
+                # otherwise expand to gigabytes in one bytes object
+                out = d.decompress(comp, _INFLATE_CHUNK)
                 if out:
                     q.put(out)
+                while not d.eof and (d.unconsumed_tail or len(out) == _INFLATE_CHUNK):
+                    out = d.decompress(d.unconsumed_tail, _INFLATE_CHUNK)
+                    if out:
+                        q.put(out)
                 if d.eof:
+                    # Read before flush(): with a capped inflate the leftover is
+                    # also in unconsumed_tail, and flush() appends it again
+                    unused = d.unused_data
                     tail = d.flush()
                     if tail:
                         q.put(tail)
-                    if d.unused_data:
-                        comp = d.unused_data
+                    if unused:
+                        comp = unused
                         d = zlib.decompressobj(47)
                         continue
                     comp = fh.read(size)
@@ -285,7 +294,8 @@ def _inflate_stream(f: pathlib.Path, q: queue.Queue, chunk: int | None = None) -
 
 def _count_threaded(f: pathlib.Path) -> Counter[str]:
     """Count with zlib inflate (producer thread) overlapped with counting."""
-    q: queue.Queue = queue.Queue()
+    # Bounded: the producer waits instead of piling up decompressed data
+    q: queue.Queue = queue.Queue(maxsize=4)
     reader = _QueueReader(q)
     th = threading.Thread(target=_inflate_stream, args=(f, q), daemon=True)
     th.start()
