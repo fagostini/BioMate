@@ -9,6 +9,7 @@ import re
 import struct
 import xml.etree.ElementTree as ET
 
+import dnaio
 import pytest
 import biomate.fastrewind.fastrewind as fastrewind_module
 
@@ -165,6 +166,7 @@ class TestValidateArgs:
             threads=0,
             force=force,
             interop_dir=None,
+            instrument="NovaSeqXPlus",
         )
 
     def test_valid_args_returned(self, tmp_path):
@@ -211,6 +213,7 @@ class TestValidateArgs:
             sample_sheet=None,
             threads=0,
             force=False,
+            instrument="NovaSeqXPlus",
             interop_dir=None,
         )
         with pytest.raises(argparse.ArgumentTypeError, match="[Ss]ample[Ss]heet"):
@@ -234,15 +237,38 @@ class TestValidateArgs:
         assert not (args.output_path / "InterOp").exists()
 
     def test_force_cleans_custom_interop_dir(self, tmp_path):
-        """With --force, a custom --interop-dir location is cleaned."""
+        """With --force, only fastrewind's own file leaves a custom --interop-dir."""
         args = self._make_args(tmp_path, force=True)
         (args.output_path / "Data").mkdir(parents=True)
         custom = tmp_path / "custom_interop"
         custom.mkdir()
         (custom / "IndexMetricsOut.bin").write_bytes(b"\x02")
+        (custom / "other.bin").write_bytes(b"\x02")
         args.interop_dir = custom
         validate_args(args)
-        assert not custom.exists()
+        assert not (custom / "IndexMetricsOut.bin").exists()
+        assert (custom / "other.bin").exists()
+
+    def test_force_does_not_follow_symlinks(self, tmp_path):
+        """A symlink inside Data is removed, its target is left alone."""
+        args = self._make_args(tmp_path, force=True)
+        (args.output_path / "Data").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("x")
+        (args.output_path / "Data" / "link").symlink_to(outside)
+        validate_args(args)
+        assert not (args.output_path / "Data").exists()
+        assert (outside / "keep.txt").exists()
+
+    def test_unsupported_instrument_rejected_before_cleanup(self, tmp_path):
+        """An unsupported instrument fails before --force deletes anything."""
+        args = self._make_args(tmp_path, force=True)
+        args.instrument = "MiSeq"
+        (args.output_path / "Data").mkdir(parents=True)
+        with pytest.raises(argparse.ArgumentTypeError):
+            validate_args(args)
+        assert (args.output_path / "Data").exists()
 
     def test_no_force_keeps_existing_interop_dir(self, tmp_path):
         """Without --force an existing InterOp directory is left untouched."""
@@ -1507,9 +1533,7 @@ def test_parse_fastq_groups_undetermined_falls_back_for_unknown_index(
     assert "carries index 'GATC+TGCA'" in caplog.text
 
 
-def test_parse_fastq_groups_undetermined_single_end(
-    tmp_path, monkeypatch, caplog
-):
+def test_parse_fastq_groups_undetermined_single_end(tmp_path, monkeypatch, caplog):
     """Undetermined single-end reads get the N-padded I1 of their original
     sample appended to the read, like regular single-end reads."""
     caplog.set_level(logging.WARNING)
@@ -1740,3 +1764,32 @@ def test_blabber_taint_count_round_trip_through_fastrewind(tmp_path, caplog):
     )
     assert records
     assert all(record[5] != "Undetermined" for record in records)
+
+
+# ---------------------------------------------------------------------------
+# fit_read_to_recipe / encode_cluster_bits
+# ---------------------------------------------------------------------------
+
+
+def test_fit_read_pads_short_and_rejects_long():
+    """A short read is N-padded to the recipe length; a long one raises."""
+    from biomate.fastrewind.fastrewind import fit_read_to_recipe
+
+    read = dnaio.SequenceRecord("r", "ACGT", "IIII")
+    fit_read_to_recipe(read, 6, "R1")
+    assert (read.sequence, read.qualities) == ("ACGTNN", "IIII##")
+    fit_read_to_recipe(read, 0, "R1")  # unknown recipe length: untouched
+    assert read.sequence == "ACGTNN"
+    with pytest.raises(ValueError, match="allows 5 cycles"):
+        fit_read_to_recipe(read, 5, "R1")
+
+
+def test_encode_cluster_bits_bins_quality_and_zeroes_no_calls():
+    """Off-bin qualities take the nearest lower bin; N is an all-zero nibble."""
+    from biomate.fastrewind.fastrewind import encode_cluster_bits
+
+    qmap = {0: "00", 9: "01", 24: "10", 40: "11"}
+    assert encode_cluster_bits(dnaio.SequenceRecord("r", "C", "F"), qmap) == "1001"
+    assert encode_cluster_bits(dnaio.SequenceRecord("r", "C", "-"), qmap) == "0101"
+    assert encode_cluster_bits(dnaio.SequenceRecord("r", "C", "#"), qmap) == "0001"
+    assert encode_cluster_bits(dnaio.SequenceRecord("r", "N", "I"), qmap) == "0000"
