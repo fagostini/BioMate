@@ -126,9 +126,6 @@ class TestValidateArgs:
             alphabet="ACGT",
             seq_length=50,
             seq_number=100,
-            seq_mask=None,
-            index1=None,
-            index2=None,
             format="text",
             sample_sheet=None,
             output=None,
@@ -164,25 +161,6 @@ class TestValidateArgs:
         """--seq-number 0 raises ArgumentTypeError."""
         args = self._base_args(seq_number=0)
         with pytest.raises(argparse.ArgumentTypeError, match="[Nn]umber"):
-            validate_args(args)
-
-    def test_invalid_index1_non_alpha_raises(self):
-        """A non-alphabetic character in --index1 raises ArgumentTypeError."""
-        args = self._base_args(index1="ACGT1")
-        with pytest.raises(argparse.ArgumentTypeError, match="Index 1"):
-            validate_args(args)
-
-    def test_invalid_index2_non_alpha_raises(self):
-        """A non-alphabetic character in --index2 raises ArgumentTypeError."""
-        args = self._base_args(index2="123")
-        with pytest.raises(argparse.ArgumentTypeError, match="Index 2"):
-            validate_args(args)
-
-    def test_invalid_seq_mask_raises(self):
-        """An invalid --seq-mask raises ValueError."""
-        # 5 sections is invalid
-        args = self._base_args(seq_mask="Y151;I10;I10;Y151;Y50")
-        with pytest.raises(ValueError, match="OverrideCycles"):
             validate_args(args)
 
     def test_fastq_format_with_sample_sheet_requires_output(self, tmp_path):
@@ -480,9 +458,6 @@ def _blabber_args(
         flowcell_id=flowcell_id,
         seq_number=seq_number,
         seq_length=151,
-        seq_mask=None,
-        index1=None,
-        index2=None,
         taint=taint,
         taint_count=taint_count,
     )
@@ -762,11 +737,7 @@ class TestFlowcellIdPinning:
         """A four-part run folder name pins instrument, run number and flowcell in the read names and is used verbatim as the output folder."""
         sheet = tmp_path / "SampleSheet.csv"
         sheet.write_text(SINGLE_END_SAMPLE_SHEET)
-        main(
-            _blabber_args(
-                tmp_path, sheet, seq_number=10, flowcell_id=self.RUNFOLDER
-            )
-        )
+        main(_blabber_args(tmp_path, sheet, seq_number=10, flowcell_id=self.RUNFOLDER))
 
         demux_path = tmp_path / self.RUNFOLDER / "Demultiplexing"
         assert demux_path.is_dir()
@@ -808,9 +779,6 @@ class TestSimpleFastqGeneration:
             flowcell_id=None,
             seq_number=seq_number,
             seq_length=seq_length,
-            seq_mask=None,
-            index1=None,
-            index2=None,
             taint=False,
         )
         main(args)
@@ -853,3 +821,56 @@ class TestSimpleFastqGeneration:
         seqs_b = b.generate_sequences_set(set("ACGT"), 150, 2000)
         assert seqs_a == seqs_b
         assert len(seqs_a) == 2000
+
+
+# ---------------------------------------------------------------------------
+# Sample in several lanes, sequence limit, text output
+# ---------------------------------------------------------------------------
+
+SAME_SAMPLE_TWO_LANES_SHEET = """\
+[Header]
+FileFormatVersion,2
+[Reads]
+Read1Cycles,151
+[BCLConvert_Data]
+Lane,Sample_ID,Sample_Name,index,index2,Sample_Project,OverrideCycles
+1,S1,Sample1,,,ProjA,Y151
+2,S1,Sample1,,,ProjA,Y151
+"""
+
+
+def test_sample_in_two_lanes_gets_files_for_both(tmp_path):
+    """A sample listed on two lanes is generated for each lane."""
+    from biomate.blabber.blabber import main
+
+    sheet = tmp_path / "SampleSheet.csv"
+    sheet.write_text(SAME_SAMPLE_TWO_LANES_SHEET)
+    main(_blabber_args(tmp_path, sheet, seq_number=4))
+    lanes = sorted(
+        re.search(r"_(L00\d)_", f.name).group(1)
+        for f in tmp_path.rglob("*_R1_001.fastq.gz")
+    )
+    assert lanes == ["L001", "L002"]
+
+
+def test_seq_number_above_tile_capacity_is_rejected(tmp_path):
+    """More reads than a tile can place fail in validate_args, not mid-run."""
+    from biomate.blabber.blabber import validate_args
+
+    sheet = tmp_path / "SampleSheet.csv"
+    sheet.write_text(SAME_SAMPLE_TWO_LANES_SHEET)
+    args = _blabber_args(tmp_path, sheet, seq_number=400_000)
+    with pytest.raises(argparse.ArgumentTypeError, match="at most 361201"):
+        validate_args(args)
+
+
+def test_text_output_is_overwritten_not_appended(tmp_path):
+    """Running twice leaves one run's sequences in the text output."""
+    from biomate.blabber.blabber import main
+
+    args = _blabber_args(tmp_path / "seqs.txt", None, seq_number=5)
+    args.format = "text"
+    args.seq_length = 10
+    main(args)
+    main(args)
+    assert len((tmp_path / "seqs.txt").read_text().splitlines()) == 5

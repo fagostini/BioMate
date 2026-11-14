@@ -134,7 +134,6 @@ def _create_args(source_file, output_path, verbose=False, quiet=False):
         command="create",
         source_file=source_file,
         output_path=output_path,
-        output_file=None,  # required by main() before branching on command
         verbose=verbose,
         quiet=quiet,
     )

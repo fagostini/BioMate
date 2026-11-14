@@ -1,17 +1,16 @@
 """Strainer main script."""
 
 import argparse
-import csv
 import logging
 import pathlib
 from collections import Counter
 from multiprocessing import Pool
-from typing import cast
 
 import dnaio
 import polars
 import regex
 
+from biomate.samplesheet import read_section
 from biomate.setup import setup_logging
 
 # Module-level constants
@@ -27,25 +26,6 @@ RESULTS_SCHEMA = {
     "index2": polars.String,
 }
 REQUIRED_COLUMNS = ["Lane", "Sample_Project", "index"]
-DATA_SECTION_MARKERS = ["[Data]", "[BCLConvert_Data]"]
-
-
-def _find_column_indices(
-    header: list[str], required_columns: list[str]
-) -> dict[str, int | None]:
-    """Find column indices for specified columns in a header row.
-
-    Args:
-        header: List of column names
-        required_columns: List of column names to find
-
-    Returns:
-        Dictionary mapping column names to their indices (None if not found)
-    """
-    return {
-        col: next((i for i, x in enumerate(header) if x == col), None)
-        for col in required_columns
-    }
 
 
 def validate_args(args: argparse.Namespace) -> argparse.Namespace:
@@ -122,62 +102,24 @@ def extract_indexes_from_sample_sheet(
     Expects a CSV file with [Data] or [BCLConvert_Data] section containing
     Lane, Sample_Project, index, and optional index2 columns.
     """
-    data_rows = []
-    in_data_section = False
-    column_indices = {}
+    data = read_section(sample_sheet_path, infer_schema=False)
+    missing = [col for col in REQUIRED_COLUMNS if col not in data.columns]
+    if missing:
+        raise ValueError(f"Sample Sheet missing required columns: {', '.join(missing)}")
+    if "index2" not in data.columns:
+        data = data.with_columns(polars.lit(None, dtype=polars.String).alias("index2"))
 
-    with open(sample_sheet_path, "r") as infile:
-        for fields in csv.reader(infile):
-            # Check for section markers
-            if fields and fields[0].strip() in DATA_SECTION_MARKERS:
-                in_data_section = True
-                continue
+    # Rows without an index (no-index lanes) would match every undetermined barcode
+    data = data.select(
+        polars.col("Lane").str.zfill(3).str.pad_start(4, "L"),
+        "Sample_Project",
+        polars.col("index").alias("index1"),
+        "index2",
+    ).filter(polars.col("index1").str.strip_chars().str.len_chars() > 0)
 
-            if not in_data_section or not fields:
-                continue
-
-            # Parse header row to find column indices
-            if not column_indices:
-                column_indices = _find_column_indices(
-                    fields, REQUIRED_COLUMNS + ["index2"]
-                )
-                if any(column_indices.get(col) is None for col in REQUIRED_COLUMNS):
-                    missing = [
-                        col
-                        for col in REQUIRED_COLUMNS
-                        if column_indices.get(col) is None
-                    ]
-                    raise ValueError(
-                        f"Sample Sheet missing required columns: {', '.join(missing)}"
-                    )
-                continue
-
-            # Parse data rows (column_indices is guaranteed to have all required columns at this point)
-            lane_idx = cast(int, column_indices["Lane"])
-            proj_idx = cast(int, column_indices["Sample_Project"])
-            idx1_idx = cast(int, column_indices["index"])
-            idx2_idx = column_indices.get("index2")
-
-            data_rows.append(
-                {
-                    "Lane": fields[lane_idx],
-                    "Sample_Project": fields[proj_idx],
-                    "index1": fields[idx1_idx],
-                    "index2": fields[idx2_idx] if idx2_idx is not None else None,
-                }
-            )
-
-    if not in_data_section:
-        raise ValueError(
-            f"Could not find data section ({' or '.join(DATA_SECTION_MARKERS)}) in Sample Sheet."
-        )
-
-    if not data_rows:
+    if data.height == 0:
         raise ValueError("No data rows found in Sample Sheet data section.")
-
-    return polars.from_dicts(data_rows).with_columns(
-        polars.col("Lane").str.zfill(3).str.pad_start(4, "L")
-    )
+    return data
 
 
 def extract_indexes_from_undetermined_file(
@@ -195,11 +137,9 @@ def extract_indexes_from_undetermined_file(
             f"Invalid lane format in file name: {undetermined_file_path.name}. Expected format: *_*_LXXX_*"
         )
 
-    total_records = 0
     indexes = Counter()
     with dnaio.open(undetermined_file_path) as reader:
         for record in reader:
-            total_records += 1
             # Expected format: name parts separated by space, index in second part after last colon
             name_parts = record.name.split(" ")
             if len(name_parts) < 2:
@@ -219,7 +159,6 @@ def extract_indexes_from_undetermined_file(
             "Lane": lane,
             "Undetermined_Index": idx,
             "Count": count,
-            "Fraction": count / total_records,
         }
         for idx, count in indexes.most_common(1000)
     ]
@@ -314,6 +253,7 @@ def clean_results(
         right_on=["Lane", "index1", "index2"],
         how="left",
         suffix="_expected",
+        nulls_equal=True,  # single-index sheets have a null index2
     )
 
     # Keep only rows where the expected columns are null (i.e., unexpected indexes)

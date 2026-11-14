@@ -839,3 +839,13 @@ def test_project_summary_and_header(tmp_path):
     spec = json.dumps(build_chart(tables).to_dict())
     for section in ("Samples and cycles", "N within reads", "Flowcell"):
         assert section in spec
+
+
+def test_robust_z_is_zero_at_the_median_of_a_zero_spread_group():
+    """A tile at the median of a zero-MAD group scores 0, not NaN (>= any z)."""
+    from biomate.nspector.flags import _robust_z
+
+    df = polars.DataFrame({"g": ["a"] * 3, "rate": [0.02, 0.02, 0.0]})
+    z = df.select(_robust_z(["g"]).alias("z")).get_column("z").to_list()
+    assert z[:2] == [0.0, 0.0]
+    assert z[2] == float("-inf")

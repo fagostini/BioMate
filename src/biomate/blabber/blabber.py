@@ -7,7 +7,6 @@ import pathlib
 import re
 import shutil
 import string
-import tempfile
 from collections import defaultdict
 from datetime import datetime
 from itertools import product, batched
@@ -15,6 +14,7 @@ import dnaio
 import polars
 import numpy as np
 
+from biomate.samplesheet import read_section
 from biomate.setup import setup_logging
 
 TILE_WIDTH = 320  # 5120
@@ -73,25 +73,7 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         "--seq-length",
         type=int,
         default=100,
-        help="Length of each sequence (default: 50)",
-    )
-    group.add_argument(
-        "--seq-mask",
-        type=str,
-        default=None,
-        help="Structure mask (format: R1;I1;I2;R2)",
-    )
-    parser.add_argument(
-        "--index1",
-        type=str,
-        default=None,
-        help="Index 1 sequence",
-    )
-    parser.add_argument(
-        "--index2",
-        type=str,
-        default=None,
-        help="Index 2 sequence",
+        help="Length of each sequence (default: 100)",
     )
     parser.add_argument(
         "--alphabet",
@@ -241,8 +223,6 @@ def validate_args(args) -> argparse.Namespace:
         raise argparse.ArgumentTypeError("Letters must be alphabetic characters.")
     if args.seq_length <= 0:
         raise argparse.ArgumentTypeError("Length must be a positive integer.")
-    if args.seq_mask:
-        _ = parse_sequence_mask(args.seq_mask.upper())
     if args.seq_number <= 0:
         raise argparse.ArgumentTypeError(
             "Number of sequences must be a positive integer."
@@ -251,19 +231,18 @@ def validate_args(args) -> argparse.Namespace:
         raise argparse.ArgumentTypeError(
             "The number of tainted sequences must be a positive integer."
         )
-    if args.index1 and not args.index1.isalpha():
-        raise argparse.ArgumentTypeError(
-            "Index 1 must contain only alphabetic characters."
-        )
-    if args.index2 and not args.index2.isalpha():
-        raise argparse.ArgumentTypeError(
-            "Index 2 must contain only alphabetic characters."
-        )
     if args.format == "fastq":
         if args.sample_sheet:
             if not args.sample_sheet.is_file():
                 raise argparse.ArgumentTypeError(
                     f"Sample sheet file {args.sample_sheet} does not exist."
+                )
+            # Each sample draws sqrt(seq_number) distinct y positions on a tile
+            max_seq_number = (TILE_HEIGHT * 10 + 1 - 1000) ** 2
+            if args.seq_number > max_seq_number:
+                raise argparse.ArgumentTypeError(
+                    f"With a sample sheet, at most {max_seq_number} sequences "
+                    "per sample can be placed on the simulated tiles."
                 )
             if not args.output:
                 raise argparse.ArgumentTypeError(
@@ -305,31 +284,8 @@ def parse_sample_sheet(sample_sheet: pathlib.Path) -> tuple[str, dict]:
     Returns:
         dict: Dictionary of sample names and their corresponding lanes.
     """
-    # Read the sample sheet file and stores all lines in a list
-    with open(sample_sheet) as input_file:
-        lines = input_file.readlines()
-
-    # Find the line where the 'BCLConvert_Data' or 'Data' section starts
-    skip_lines = [
-        i
-        for i, line in enumerate(lines)
-        if line.startswith("[BCLConvert_Data]") or line.startswith("[Data]")
-    ]
-    if not skip_lines:
-        logging.error("No valid SampleSheet found! Data section not found in the file.")
-        exit(1)
-    else:
-        skip_lines = skip_lines[0] + 1
-
-    # Write the lines to a temporary file, skipping the header lines
-    tmp = tempfile.NamedTemporaryFile()
-    with open(tmp.name, "w") as f:
-        for line in lines[skip_lines:]:
-            _ = f.write(line)
-
-    # Read the temporary file using polars and process the data
     data = (
-        polars.read_csv(tmp.name)
+        read_section(sample_sheet)
         .with_columns(
             polars.col("Lane").cast(polars.String).str.zfill(3).alias("Lane_name")
         )
@@ -341,7 +297,7 @@ def parse_sample_sheet(sample_sheet: pathlib.Path) -> tuple[str, dict]:
         raise RuntimeError("OverrideCycles or Recipe column not found in Data section!")
 
     # SampleSheet version 2
-    if any([line.startswith("[BCLConvert_Data]") for line in lines]):
+    if "OverrideCycles" in data.columns:
         # Create a dictionary to store the sample sheet data
         sample_sheet_dict = defaultdict(dict)
         counter = 1
@@ -361,8 +317,9 @@ def parse_sample_sheet(sample_sheet: pathlib.Path) -> tuple[str, dict]:
                 )
                 .iter_rows()
             ):
+                # Keyed by (id, lane): a sample may sit in several lanes
                 sample_sheet_dict[proj].setdefault(
-                    id,
+                    (id, lane),
                     tuple(
                         (
                             f"S{counter}_{name}",
@@ -384,13 +341,14 @@ def parse_sample_sheet(sample_sheet: pathlib.Path) -> tuple[str, dict]:
                 .select("Lane", "Lane_name", "Sample_ID", "Recipe")
                 .iter_rows()
             ):
+                # Keyed by (id, lane): a sample may sit in several lanes
                 sample_sheet_dict[proj].setdefault(
-                    id,
+                    (id, lane),
                     tuple(
                         (
                             f"S{counter}_{name}",
                             lane,
-                            parse_sequence_mask("Y" + recipe.replace("-", "Y")),
+                            parse_sequence_mask("Y" + recipe.replace("-", ";Y")),
                         )
                     ),
                 )
@@ -863,9 +821,7 @@ def main(args: argparse.Namespace) -> None:
             # Lanes record the (tile, x, y) positions of all their reads so
             # that taint copies (with --taint-count) can be assigned unique
             # cluster coordinates
-            used_positions = (
-                defaultdict(set) if taint_count is not None else None
-            )
+            used_positions = defaultdict(set) if taint_count is not None else None
             available_tiles = [
                 "".join(x)
                 for x in product(
@@ -910,7 +866,8 @@ def main(args: argparse.Namespace) -> None:
             )
 
             for proj, samples in sample_sheet.items():
-                for sample, (index, lane, recipe) in samples.items():
+                for sample_key, (index, lane, recipe) in samples.items():
+                    sample = sample_key[0]
                     proj_prefix = prefix + f":{lane}"  # Lane number
                     lane_key = re.sub(r"S\d+_", "S0_", index)
                     # unique_lanes.setdefault(lane_key, set()).add(recipe)
@@ -949,7 +906,7 @@ def main(args: argparse.Namespace) -> None:
                         recipe,
                         proj_prefix,
                         extension,
-                        sample_tiles[(proj, sample)],
+                        sample_tiles[(proj, sample_key)],
                         collect_taint,
                         taint_count=taint_count if collect_taint else None,
                         used_positions=(
@@ -1006,7 +963,7 @@ def main(args: argparse.Namespace) -> None:
                 if args.output.is_dir()
                 else args.output
             )
-            with open(output_file, "a") as writer:
+            with open(output_file, "w") as writer:
                 writer.write("".join(f"{seq}\n" for seq in sequences))
         else:
             for seq in sequences:

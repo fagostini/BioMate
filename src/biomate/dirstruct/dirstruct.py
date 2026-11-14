@@ -10,9 +10,9 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     """Initialise module subparser."""
     parser = subparsers.add_parser(
         __name__.split(".")[-1],
-        description="Indexing tool for FASTA/FASTQ files",
+        description="Extract or re-create a directory structure",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        help="Indexing tool for FASTA/FASTQ files",
+        help="Extract or re-create a directory structure",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
     parser_extract = subcommands.add_parser(
@@ -76,7 +76,8 @@ def validate_args(args) -> argparse.Namespace:
 
 def main(args: argparse.Namespace) -> None:
     """Main function."""
-    if not args.output_file:
+    # extract without --output-file prints the tree to stdout: keep logs out of it
+    if args.command == "extract" and not args.output_file:
         args.quiet = True
     setup_logging(args)
 

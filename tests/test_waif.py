@@ -16,8 +16,9 @@ from biomate.waif.waif import (
     BoundedReader,
     _build_member_index,
     _count_for_file,
+    _count_serial,
+    _count_threaded,
     _count_from_index,
-    _count_undetermined,
     _find_member_offsets,
     _load_member_index,
     _member_index_for,
@@ -505,7 +506,7 @@ class TestCounters:
     def test_counter_matches_line_by_line_reference(self, tmp_path: Path) -> None:
         """The serial counter must equal the line-by-line reference."""
         for name, (f, expected) in fastq_fixtures(tmp_path).items():
-            got = dict(_count_undetermined(f))
+            got = dict(_count_serial(f))
             assert got == expected, f"{name}"
 
     def test_threaded_counter_matches_line_by_line_reference(
@@ -514,7 +515,7 @@ class TestCounters:
         """The threaded inflate+count pipeline must equal the same
         reference."""
         for name, (f, expected) in fastq_fixtures(tmp_path).items():
-            got = dict(_count_undetermined(f, force_threaded=True))
+            got = dict(_count_threaded(f))
             assert got == expected, f"{name}"
 
     def test_threaded_multi_member_mid_chunk(self, tmp_path: Path) -> None:
@@ -526,7 +527,7 @@ class TestCounters:
             gzip.compress(_fastq_text(64, 0).encode())
             + gzip.compress(_fastq_text(64, 100).encode())
         )
-        got = dict(_count_undetermined(f, force_threaded=True))
+        got = dict(_count_threaded(f))
         assert got == _reference_counts(text)
 
     def test_threaded_multi_member_three(self, tmp_path: Path) -> None:
@@ -534,7 +535,7 @@ class TestCounters:
         parts = [_fastq_text(40, 10 * k) for k in range(3)]
         f = tmp_path / "three.fastq.gz"
         f.write_bytes(b"".join(gzip.compress(p.encode()) for p in parts))
-        got = dict(_count_undetermined(f, force_threaded=True))
+        got = dict(_count_threaded(f))
         assert got == _reference_counts("".join(parts))
 
     def test_threaded_multi_member_aligned_boundary(
@@ -548,7 +549,7 @@ class TestCounters:
         f = tmp_path / "aligned.fastq.gz"
         f.write_bytes(m1 + m2)
         monkeypatch.setattr(waif, "_INFLATE_CHUNK", len(m1))
-        got = dict(_count_undetermined(f, force_threaded=True))
+        got = dict(_count_threaded(f))
         assert got == _reference_counts(_fastq_text(50, 0) + _fastq_text(50, 100))
 
     def test_threaded_member_spans_multiple_chunks(
@@ -562,7 +563,7 @@ class TestCounters:
         f = tmp_path / "bigmember.fastq.gz"
         f.write_bytes(gzip.compress(p1.encode()) + gzip.compress(p2.encode()))
         monkeypatch.setattr(waif, "_INFLATE_CHUNK", 64)
-        got = dict(_count_undetermined(f, force_threaded=True))
+        got = dict(_count_threaded(f))
         assert got == _reference_counts(p1 + p2)
 
 
@@ -867,3 +868,64 @@ class TestMainIntegration:
         main(make_args(tmp_path, None))
         captured = capsys.readouterr()
         assert captured.out.strip() == "Lane,Barcode,Count,Total %"
+
+
+# ---------------------------------------------------------------------------
+# Counting correctness: "@" quality lines and truncated files
+# ---------------------------------------------------------------------------
+
+
+def _write_records(path: Path, n: int, qual: str = "IIII") -> None:
+    """Write ``n`` FASTQ records with the same barcode to a gzip file."""
+    with gzip.open(path, "wt") as fh:
+        for i in range(n):
+            fh.write(f"@M:1:FC:1:1101:{i}:1 1:N:0:ACGT+TGCA\nACGT\n+\n{qual}\n")
+
+
+@pytest.mark.parametrize("counter", [waif._count_serial, waif._count_threaded])
+def test_quality_line_starting_with_at_is_not_a_header(tmp_path, counter):
+    """A quality string starting with '@' (Q31) is not counted as a read."""
+    f = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
+    _write_records(f, 3, qual="@III")
+    assert dict(counter(f)) == {"ACGT+TGCA": 3}
+
+
+def test_bounded_range_ignores_at_quality_lines(tmp_path):
+    """The member-index path counts headers only, too."""
+    f = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
+    _write_records(f, 3, qual="@III")
+    counts = waif._count_bounded_range(f, 0, f.stat().st_size)
+    assert dict(counts) == {b"ACGT+TGCA": 3}
+
+
+def test_truncated_gzip_raises_instead_of_undercounting(tmp_path):
+    """A gzip cut mid-stream raises in the threaded and member-index paths."""
+    whole = tmp_path / "whole.fastq.gz"
+    _write_records(whole, 20000)
+    cut = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
+    cut.write_bytes(whole.read_bytes()[: whole.stat().st_size // 2])
+    with pytest.raises(EOFError):
+        waif._count_threaded(cut)
+    with pytest.raises(EOFError):
+        _find_member_offsets(cut)
+
+
+def test_member_ending_mid_record_is_not_aligned(tmp_path):
+    """Members that end on a line but not on a record boundary are unsafe to split."""
+    f = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
+    f.write_bytes(gzip.compress(b"@r 1:N:0:ACGT\nACGT\n") + gzip.compress(b"+\nIIII\n"))
+    assert _find_member_offsets(f)[1] is False
+
+
+def test_threaded_count_with_capped_inflate(tmp_path, monkeypatch):
+    """Tiny inflate cap and read size: same counts as the serial pass."""
+    f = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
+    with open(f, "wb") as fh:  # two members
+        for start in (0, 500):
+            body = "".join(
+                f"@M:1:FC:1:1101:{i}:1 1:N:0:ACGT+TGCA\nACGT\n+\nIIII\n"
+                for i in range(start, start + 500)
+            )
+            fh.write(gzip.compress(body.encode()))
+    monkeypatch.setattr(waif, "_INFLATE_CHUNK", 64)
+    assert waif._count_threaded(f) == waif._count_serial(f) == {"ACGT+TGCA": 1000}

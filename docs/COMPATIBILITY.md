@@ -30,7 +30,6 @@ This document tracks tested versions and known compatibility constraints for Bio
 | tornado | 6.5.7 | ✅ Tested | Web interface server |
 | regex | 2026.5.9 | ✅ Tested | Pattern matching for index evaluation |
 | dnaio | 1.2.4 | ✅ Tested | FASTQ/FASTA file I/O |
-| jellyfish | 1.2.1 | ✅ Tested | String distance calculations |
 
 ## Known Compatibility Issues
 
@@ -101,7 +100,6 @@ The following dependencies can be safely updated:
 - **polars**: Major versions tested; minor/patch updates recommended
 - **regex**: Stable upstream; updates recommended for new features/fixes
 - **dnaio**: Well-maintained; updates recommended
-- **jellyfish**: Stable; updates recommended
 - **tornado**: Monitor for security updates; apply promptly
 
 ### Version-Pinned Dependencies
@@ -185,7 +183,7 @@ If you encounter compatibility problems:
 1. Document your environment:
    ```bash
    python --version
-   pip list | grep -E "numpy|polars|altair|tornado|regex|dnaio|jellyfish"
+   pip list | grep -E "numpy|polars|altair|tornado|regex|dnaio"
    uv lock --frozen  # Show exact versions
    ```
 

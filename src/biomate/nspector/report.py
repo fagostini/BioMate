@@ -577,6 +577,8 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         .transform_aggregate(
             n="sum(n)", lowq="sum(lowq)", total="sum(total)", groupby=["tile"]
         )
+        # windowed rows hold the mean per cycle: back to the sum over cycles
+        .transform_calculate(n=f"datum.n * {window}", lowq=f"datum.lowq * {window}")
         .transform_calculate(value=VALUE_EXPR, **rates)
     )
     flags = _flags(tables)
