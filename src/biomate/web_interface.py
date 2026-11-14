@@ -635,24 +635,14 @@ def run_biomate(module_name: str, args: List[str]) -> Dict[str, Any]:
 
     cmd = ["biomate", module_name] + args
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
+        # No timeout: a full flowcell legitimately runs for longer than any
+        # fixed limit, and killing it leaves partial outputs behind
+        proc = subprocess.run(cmd, capture_output=True, text=True)
         return {
             "success": proc.returncode == 0,
             "returncode": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "returncode": -1,
-            "stdout": "",
-            "stderr": "Command timed out after 10 minutes.",
         }
     except Exception as e:
         return {
@@ -874,7 +864,7 @@ class ModuleHandler(SecurityHeadersMixin):
             )
         )
 
-    def post(self, module_name: str):
+    async def post(self, module_name: str):
         """Run the requested tool with the submitted form and show the result."""
         module = self._find_module(module_name)
         if not module:
@@ -897,7 +887,10 @@ class ModuleHandler(SecurityHeadersMixin):
         cli_args = flatten_parameters(module["parameters"], values)
 
         # Run the tool
-        result = run_biomate(module_name, cli_args)
+        # In a worker thread, so the server keeps answering during a long run
+        result = await tornado.ioloop.IOLoop.current().run_in_executor(
+            None, run_biomate, module_name, cli_args
+        )
         report_url = register_report(module_name, values) if result["success"] else None
 
         loader = get_loader()
@@ -1028,7 +1021,7 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         default=None,
         help="Path to SSL private key file (required for HTTPS)",
     )
-    parser.set_defaults(parse=main, run=main)
+    parser.set_defaults(parse=lambda args: args, run=main)
 
     return parser
 
@@ -1077,7 +1070,3 @@ def main(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         print("\nShutting down...")
         http_server.stop()
-
-
-if __name__ == "__main__":
-    main()
