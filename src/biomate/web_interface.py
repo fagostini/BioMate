@@ -12,7 +12,6 @@ SECURITY NOTES:
   - XSRF protection via tokens
   - Security headers (X-Content-Type-Options, X-Frame-Options, etc.)
   - Input validation and command injection prevention
-  - Rate limiting support
 - For public network deployment, requires:
   - HTTPS/TLS configuration
   - Reverse proxy with authentication (nginx, Apache, etc.)
@@ -63,9 +62,8 @@ MODULES: List[Dict[str, Any]] = [
         ),
         "description": (
             "The blabber tool generates random DNA sequences with configurable "
-            "length, number, alphabet, and output format. It supports sequence "
-            "masks defining the structure of reads and indexes (e.g. R1;I1;I2;R2), "
-            "and can mimic real Illumina output by using a SampleSheet.csv file. "
+            "length, number, alphabet, and output format. It "
+            "can mimic real Illumina output by using a SampleSheet.csv file. "
             "Optionally taints output with ~10% cross-project sequences to simulate "
             "index hopping."
         ),
@@ -85,32 +83,6 @@ MODULES: List[Dict[str, Any]] = [
                 "help": "Length of each generated sequence",
                 "form_name": "seq_length",
                 "cli_name": "seq-length",
-            },
-            {
-                "label": "Sequence Mask",
-                "param_type": "text",
-                "default": "",
-                "is_path": False,
-                "help": "Structure mask (format: R1;I1;I2;R2). Leave empty to auto-detect from sample sheet.",
-                "form_name": "seq_mask",
-                "cli_name": "seq-mask",
-            },
-            {
-                "label": "Index 1 Sequence",
-                "param_type": "text",
-                "default": "",
-                "is_path": False,
-                "help": "Custom Index 1 sequence (overrides any value in sample sheet)",
-                "form_name": "index1",
-                "cli_name": "index1",
-            },
-            {
-                "label": "Index 2 Sequence",
-                "param_type": "text",
-                "default": "",
-                "help": "Custom Index 2 sequence",
-                "form_name": "index2",
-                "cli_name": "index2",
             },
             {
                 "label": "Nucleotide Alphabet",
@@ -805,10 +777,6 @@ class SecurityHeadersMixin(tornado.web.RequestHandler):
         self.set_header("X-Frame-Options", "DENY")
         # Enable XSS protection in older browsers
         self.set_header("X-XSS-Protection", "1; mode=block")
-        # Strict Transport Security (if using HTTPS)
-        self.set_header(
-            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
-        )
         # Content Security Policy - strict by default
         self.set_header(
             "Content-Security-Policy",
@@ -963,7 +931,7 @@ class ReportHandler(SecurityHeadersMixin):
 _LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 
-def make_app(host: str = "localhost", port: int = 8080) -> tornado.web.Application:
+def make_app(host: str = "localhost") -> tornado.web.Application:
     """Create and return the Tornado application with security settings."""
     # Bound to loopback: accept only loopback Host headers, so that a web page
     # rebinding its DNS name to 127.0.0.1 cannot drive the tools. A server bound
@@ -1040,12 +1008,12 @@ def main(args: argparse.Namespace) -> None:
         print("\nRequired security measures for public access:")
         print("  1. HTTPS/TLS (use --ssl-cert and --ssl-key)")
         print("  2. Authentication (API keys or JWT tokens)")
-        print("  3. Input validation and rate limiting (already partially implemented)")
+        print("  3. Rate limiting (not implemented)")
         print("  4. Place behind a reverse proxy (nginx with auth)")
         print("\nFor local-only access, use: biomate web-interface --host 127.0.0.1")
         print("=" * 70 + "\n")
 
-    app = make_app(host=args.host, port=args.port)
+    app = make_app(host=args.host)
 
     certfile = args.ssl_cert or os.environ.get("SSL_CERT")
     keyfile = args.ssl_key or os.environ.get("SSL_KEY")

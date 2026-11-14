@@ -248,12 +248,12 @@ class TestWebInterfaceModule:
 
     def test_make_app_creates_tornado_application(self):
         """Test that make_app creates a Tornado application."""
-        app = make_app(host="localhost", port=8080)
+        app = make_app(host="localhost")
         assert isinstance(app, tornado.web.Application)
 
     def test_make_app_has_handlers(self):
         """Test that created app has request handlers configured."""
-        app = make_app(host="localhost", port=8080)
+        app = make_app(host="localhost")
         assert app is not None
         assert isinstance(app, tornado.web.Application)
         assert hasattr(app, "settings")
@@ -261,12 +261,12 @@ class TestWebInterfaceModule:
 
     def test_xsrf_cookies_enabled_in_app(self):
         """Test that XSRF protection is enabled in application."""
-        app = make_app(host="localhost", port=8080)
+        app = make_app(host="localhost")
         assert app.settings.get("xsrf_cookies") is True
 
     def test_debug_mode_disabled_in_app(self):
         """Test that debug mode is disabled in application (security)."""
-        app = make_app(host="localhost", port=8080)
+        app = make_app(host="localhost")
         assert app.settings.get("debug") is False
 
 

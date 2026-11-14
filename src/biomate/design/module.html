@@ -107,14 +107,14 @@
 {% block js %}
 <script id="param-raw-data" type="application/json">{{ param_meta }}</script>
 <script>
-$(document).ready(function() {
+document.addEventListener('DOMContentLoaded', function() {
   function decodeHtmlEntities(str) {
     var textarea = document.createElement('textarea');
     textarea.innerHTML = str;
     return textarea.value;
   }
   try {
-    var paramMeta = JSON.parse(decodeHtmlEntities($('#param-raw-data').text()));
+    var paramMeta = JSON.parse(decodeHtmlEntities(document.getElementById('param-raw-data').textContent));
   } catch(e) {
     console.error('Failed to parse param meta:', e);
     var paramMeta = {};
@@ -136,11 +136,11 @@ $(document).ready(function() {
 
   function updateVisibility() {
     values = getValues();
-    $('[data-show-when-param]').each(function() {
-      var param = $(this).attr('data-show-when-param');
-      var value = $(this).attr('data-show-when-value');
-      if (value && values[param] === value && param) $(this).show();
-      else if (param && value) $(this).hide();
+    document.querySelectorAll('[data-show-when-param]').forEach(function(row) {
+      var param = row.getAttribute('data-show-when-param');
+      var value = row.getAttribute('data-show-when-value');
+      if (value && values[param] === value && param) row.style.display = '';
+      else if (param && value) row.style.display = 'none';
     });
   }
 
@@ -188,8 +188,8 @@ $(document).ready(function() {
     }
 
     var cmd = parts.filter(function(p) { return p !== ''; }).join(' ');
-    $('#command-text').text(cmd);
-    $('#command-preview').show();
+    document.getElementById('command-text').textContent = cmd;
+    document.getElementById('command-preview').style.display = '';
   }
 
   function shlexQuote(s) {
@@ -200,65 +200,63 @@ $(document).ready(function() {
 
   updateVisibility();
   updatePreview();
-  $(document).on('change input', 'select, input[type="text"], input[type="number"], input[type="checkbox"]', function() {
+  function refresh(event) {
+    if (!event.target.matches('select, input[type="text"], input[type="number"], input[type="checkbox"]')) return;
+    updateVisibility();
+    updatePreview();
+  }
+  document.addEventListener('change', refresh);
+  document.addEventListener('input', refresh);
+
+  // Reset button - revert all fields to their default values
+  document.getElementById('reset-params').addEventListener('click', function() {
+    for (var formName in paramMeta) {
+      var meta = paramMeta[formName];
+      var field = document.getElementById(formName);
+      if (!field) continue;
+      if (meta.is_boolean) {
+        field.checked = meta.default === 'true';
+        field.closest('.form-check').querySelector('label').textContent = field.checked ? 'Yes' : 'No';
+      } else {
+        field.value = meta.default;
+      }
+    }
     updateVisibility();
     updatePreview();
   });
 
-  // Reset button - revert all fields to their default values
-  $('#reset-params').on('click', function() {
-    for (var formName in paramMeta) {
-      var meta = paramMeta[formName];
-      var defaultVal = meta.default;
-      if (meta.is_boolean) {
-        var $chk = $('#' + formName);
-        $chk.prop('checked', defaultVal === 'true');
-        $chk.closest('.form-check').find('label').text(defaultVal === 'true' ? 'Yes' : 'No');
-      } else if (formName === '_subcommand') {
-        // select: set dropdown to default
-        $('#' + formName).val(defaultVal);
-      } else {
-        $('#' + formName).val(defaultVal);
-      }
-    }
-  });
-
   // Folder picker - uses Web File System Access API when available
   // (Chrome/Edge) with manual path entry as fallback.
-  $(document).on('click', '.pick-folder', async function() {
-    var $btn = $(this);
-    var paramName = $btn.data('param');
-    var $field = $('#' + paramName);
+  document.addEventListener('click', async function(event) {
+    var btn = event.target.closest('.pick-folder');
+    if (!btn) return;
+    var field = document.getElementById(btn.dataset.param);
 
     // Try the Web File System Access API (Chrome/Edge)
     if ('showDirectoryPicker' in window) {
       try {
-        var dirHandle = await window.showDirectoryPicker();
-        var dirName = dirHandle.name;
-        // Try to get the full path - we only get the directory name
-        // The user may need to type the full path manually
-        $field.val(dirName);
+        // Only the directory name is available, not the full path:
+        // the user may need to type the full path manually
+        field.value = (await window.showDirectoryPicker()).name;
       } catch (e) {
         // User cancelled or API failed - do nothing
         return;
       }
     } else {
-      // For browsers without showDirectoryPicker, use a hidden file input
-      // placed outside the form so it won't upload
-      $('<input type="file" webkitdirectory style="display:none">')
-        .on('change', function() {
-          var files = this.files;
-          if (!files || files.length === 0) return;
-
-          var first = files[0];
-          var relPath = first.webkitRelativePath || first.name;
-          var parts = relPath.split('/');
-          parts.pop();
-          $field.val(parts.length > 0 ? parts.join('/') : relPath);
-          $(this).remove();
-        })
-        .appendTo('body')
-        .trigger('click');
+      // For browsers without showDirectoryPicker, use a file input that is
+      // never added to the form, so it won't upload
+      var picker = document.createElement('input');
+      picker.type = 'file';
+      picker.webkitdirectory = true;
+      picker.addEventListener('change', function() {
+        if (!picker.files || picker.files.length === 0) return;
+        var first = picker.files[0];
+        var relPath = first.webkitRelativePath || first.name;
+        var parts = relPath.split('/');
+        parts.pop();
+        field.value = parts.length > 0 ? parts.join('/') : relPath;
+      });
+      picker.click();
     }
   });
 });

@@ -10,9 +10,9 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     """Initialise module subparser."""
     parser = subparsers.add_parser(
         __name__.split(".")[-1],
-        description="Indexing tool for FASTA/FASTQ files",
+        description="Extract or re-create a directory structure",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        help="Indexing tool for FASTA/FASTQ files",
+        help="Extract or re-create a directory structure",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
     parser_extract = subcommands.add_parser(
