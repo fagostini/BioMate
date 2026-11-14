@@ -15,4 +15,4 @@ From: ubuntu:24.04
 
 %labels
     Author Federico Agostini
-    Version v0.0.1
+    Version v0.6.0
