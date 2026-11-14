@@ -4,11 +4,9 @@ import argparse
 import logging
 import pathlib
 from collections import Counter, defaultdict
-from itertools import product
 
 import dnaio
 import regex as re
-from jellyfish import levenshtein_distance
 
 from biomate.setup import setup_logging
 
@@ -153,96 +151,6 @@ def write_results(
         for key, value in results.items():
             counts = sum(value.values())
             output_file.write(f"{key} {counts} {counts / total_records:.2%}\n")
-
-
-def expand_regex(string: str) -> set[str]:
-    """Expand a regex into all its string (genomic) patterns."""
-    elements_list = []
-    i = 0
-    while i < len(string):
-        c = string[i]
-        if c == "." or c == "*":
-            elements_list.append(["A", "C", "G", "T", "N"])
-        elif c == "[":
-            i += 1
-            c = string[i]
-            sublist = []
-            while c != "]" and i < len(string):
-                sublist.append(string[i])
-                i += 1
-                c = string[i]
-            elements_list.append(sublist)
-        elif c == "(":
-            i += 1
-            c = string[i]
-            sublist = []
-            substring = ""
-            while c != ")" and i < len(string):
-                if c == "|":
-                    sublist.append(substring)
-                    substring = ""
-                else:
-                    substring += string[i]
-                i += 1
-                c = string[i]
-            sublist.append(substring)
-            if string[i + 1] == "?":
-                sublist.append("")
-                i += 1
-            elements_list.append(sublist)
-        elif c == "+":
-            raise ValueError(
-                "The '+' character is currently not supported in the regex patterns is not supported!"
-            )
-        else:
-            elements_list.append([string[i]])
-        i += 1
-    return set("".join(x) for x in product(*elements_list))
-
-
-def validate_indexes_distance(patterns: list, distance: int) -> None:
-    """Check all indexes for compatible distances."""
-    for query in patterns:
-        expanded_query = expand_regex(query)
-        for subject in patterns:
-            logging.debug(f"Validating: {query} vs {subject}")
-            if subject == query:
-                continue
-            expanded_subject = expand_regex(subject)
-            if distance == 0:
-                if any(
-                    [
-                        levenshtein_distance(q, s) <= distance
-                        for q in expanded_query
-                        for s in expanded_subject
-                    ]
-                ):
-                    raise ValueError(
-                        f"Conflicting patterns '{query}' and '{subject}' at Levenshtein distance {distance}!"
-                    )
-                logging.debug(f"No conflicts found for {query} vs {subject}")
-            else:
-                all_ok = False
-                valid_distance = distance
-                while not all_ok and valid_distance >= 0:
-                    distances = [
-                        levenshtein_distance(q, s)
-                        for q in expanded_query
-                        for s in expanded_subject
-                    ]
-                    all_ok = all(d > valid_distance for d in distances)
-                    logging.debug(
-                        f"Patterns: {query} vs {subject}, distances: {distances}, threshold: {valid_distance}"
-                    )
-                    if not all_ok:
-                        valid_distance -= 1
-                if valid_distance < 0:
-                    raise ValueError(
-                        f"Conflicting patterns '{query}' and '{subject}' at Levenshtein distance 0!"
-                    )
-                logging.debug(
-                    f"Minimum safe distance between {query} and {subject}: {valid_distance}"
-                )
 
 
 def main(args: argparse.Namespace) -> None:

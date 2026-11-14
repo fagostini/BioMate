@@ -126,9 +126,6 @@ class TestValidateArgs:
             alphabet="ACGT",
             seq_length=50,
             seq_number=100,
-            seq_mask=None,
-            index1=None,
-            index2=None,
             format="text",
             sample_sheet=None,
             output=None,
@@ -164,25 +161,6 @@ class TestValidateArgs:
         """--seq-number 0 raises ArgumentTypeError."""
         args = self._base_args(seq_number=0)
         with pytest.raises(argparse.ArgumentTypeError, match="[Nn]umber"):
-            validate_args(args)
-
-    def test_invalid_index1_non_alpha_raises(self):
-        """A non-alphabetic character in --index1 raises ArgumentTypeError."""
-        args = self._base_args(index1="ACGT1")
-        with pytest.raises(argparse.ArgumentTypeError, match="Index 1"):
-            validate_args(args)
-
-    def test_invalid_index2_non_alpha_raises(self):
-        """A non-alphabetic character in --index2 raises ArgumentTypeError."""
-        args = self._base_args(index2="123")
-        with pytest.raises(argparse.ArgumentTypeError, match="Index 2"):
-            validate_args(args)
-
-    def test_invalid_seq_mask_raises(self):
-        """An invalid --seq-mask raises ValueError."""
-        # 5 sections is invalid
-        args = self._base_args(seq_mask="Y151;I10;I10;Y151;Y50")
-        with pytest.raises(ValueError, match="OverrideCycles"):
             validate_args(args)
 
     def test_fastq_format_with_sample_sheet_requires_output(self, tmp_path):
@@ -480,9 +458,6 @@ def _blabber_args(
         flowcell_id=flowcell_id,
         seq_number=seq_number,
         seq_length=151,
-        seq_mask=None,
-        index1=None,
-        index2=None,
         taint=taint,
         taint_count=taint_count,
     )
@@ -804,9 +779,6 @@ class TestSimpleFastqGeneration:
             flowcell_id=None,
             seq_number=seq_number,
             seq_length=seq_length,
-            seq_mask=None,
-            index1=None,
-            index2=None,
             taint=False,
         )
         main(args)

@@ -18,6 +18,7 @@ from fastavro import parse_schema
 from fastavro import writer as avro_writer
 
 
+from biomate.samplesheet import read_section
 from biomate.setup import setup_logging
 
 TILE_WIDTH = 320  # 5120
@@ -210,50 +211,12 @@ def parse_sequence_mask(mask_string: str) -> dict:
     return mask_dict
 
 
-def extract_data_from_samplesheet(
-    sample_sheet: pathlib.Path, target_section: str = "[BCLConvert_Data]"
-) -> polars.DataFrame:
-    """
-    Parse the sample sheet file and return the Data section as DataTable.
-    """
-    # Read the sample sheet file and stores all lines in a list
-    with open(sample_sheet) as input_file:
-        lines = input_file.readlines()
-
-    # Find the line where the 'BCLConvert_Data'
-    skip_lines = [i for i, line in enumerate(lines) if line.startswith(target_section)]
-    if not skip_lines:
-        logging.error("No valid SampleSheet found! Data section not found in the file.")
-        exit(1)
-    else:
-        skip_lines = skip_lines[0] + 1
-
-    # Write the lines to a temporary file, skipping the header lines
-    tmp = tempfile.NamedTemporaryFile()
-    with open(tmp.name, "w") as f:
-        for line in lines[skip_lines:]:
-            # Stop writing when entering a new section
-            if line.startswith("["):
-                break
-            _ = f.write(line)
-
-    # Read the temporary file into a DataFrame
-    data = (
-        polars.read_csv(tmp.name)
-        if target_section == "[BCLConvert_Data]"
-        else polars.read_csv(tmp.name, has_header=False)
-    )
-    tmp.close()
-
-    return data
-
-
 def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
     """
     Parse the sample sheet file, extract and process the masks for later use.
     """
     # Read the sample sheet file and stores all lines in a list
-    data = extract_data_from_samplesheet(sample_sheet)
+    data = read_section(sample_sheet)
 
     # Exit if the design is not present among the data columns
     if "OverrideCycles" not in data.columns and "Recipe" not in data.columns:
@@ -414,7 +377,7 @@ def build_index_lookup(sample_sheet: pathlib.Path, masks_table: dict) -> dict:
     in the sample sheet, per lane; (lane, index1, index2) is expected to be
     unique within a lane.
     """
-    data = extract_data_from_samplesheet(sample_sheet)
+    data = read_section(sample_sheet)
     if "index" not in data.columns or "index2" not in data.columns:
         return {}
     lookup = {}
@@ -496,7 +459,7 @@ def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict[str, int]]":
     """
     Parse the sample sheet file and return the total number of cycles.
     """
-    data = extract_data_from_samplesheet(sample_sheet, "[Reads]")
+    data = read_section(sample_sheet, ("[Reads]",), has_header=False)
 
     total_cycles = int(data.get_column("column_2").sum())
 
@@ -857,15 +820,6 @@ def write_filter(filter_path: pathlib.Path, cluster_filter: list) -> None:
     with open(filter_path, "wb") as f_out:
         f_out.write(struct.pack("<III", 0, 3, len(cluster_filter)))
         f_out.write(bytes(cluster_filter))  # bit 0 is pass or failed filter
-
-
-def write_control(control_path: pathlib.Path, cluster_count: int) -> None:
-    """Write the control file."""
-    control_path.parent.mkdir(exist_ok=True, parents=True)
-    with open(control_path, "wb") as f_out:
-        f_out.write(struct.pack("<III", 0, 3, cluster_count))
-        # two bytes for each cluster
-        f_out.write(bytes([0, 0] * cluster_count))
 
 
 def encode_loc_bytes(x_pos, y_pos) -> bytes:
@@ -1438,14 +1392,12 @@ def main(args: argparse.Namespace) -> None:
     # Get one read name to extract the run details.
     # Some generated/undetermined files can be empty, so scan until a read is found.
     sample_read = None
-    sample_file = None
     for lane_files in lanes_dict.values():
         for sample_files in lane_files.values():
             for candidate_file in sorted(sample_files):
                 with dnaio.open(candidate_file) as reader:
                     for read in reader:
                         sample_read = read.name
-                        sample_file = candidate_file
                         break
                 if sample_read is not None:
                     break

@@ -30,6 +30,7 @@ import pathlib
 
 import polars
 
+from biomate.samplesheet import read_section
 from biomate.setup import setup_logging
 
 STATS_FILE_NAME = "Stats.json"
@@ -148,35 +149,16 @@ def get_shared_lanes_from_samplesheet(
     empty project are ignored.
     """
     projects_by_lane: defaultdict[str, set[str]] = defaultdict(set)
-    spreadsheet_version = None
-    with open(samplesheet, "r") as f:
-        for line in f:
-            line = line.strip()
-            if spreadsheet_version:
-                if line:
-                    parts = line.split(",")
-                    if spreadsheet_version == 1:
-                        lane, index1, index2, project = (
-                            parts[1],
-                            parts[5],
-                            parts[6],
-                            parts[11] if len(parts) > 11 else "",
-                        )
-                    else:
-                        lane, index1, index2, project = (
-                            parts[0],
-                            parts[3],
-                            parts[4],
-                            parts[5] if len(parts) > 5 else "",
-                        )
-                    if (index1 or index2) and project:
-                        projects_by_lane[lane].add(project)
-            elif line.startswith("Lane,"):
-                spreadsheet_version = 2
-            elif line.startswith("FCID,"):
-                spreadsheet_version = 1
-            else:
-                continue
+    data = read_section(samplesheet, infer_schema=False, bare_header=("Lane", "FCID"))
+    columns = ["Lane", "index", "index2", "Sample_Project"]
+    data = data.with_columns(
+        polars.lit(None, dtype=polars.String).alias(col)
+        for col in columns
+        if col not in data.columns
+    )
+    for lane, index1, index2, project in data.select(columns).iter_rows():
+        if (index1 or index2) and project:
+            projects_by_lane[lane].add(project)
 
     return sorted(
         int(lane) for lane, projects in projects_by_lane.items() if len(projects) > 1
@@ -304,19 +286,6 @@ def _count_threaded(f: pathlib.Path) -> Counter[str]:
     if reader.error is not None:
         raise reader.error
     return counts
-
-
-def _count_undetermined(f: pathlib.Path, force_threaded: bool = False) -> Counter[str]:
-    """Count the index pairs found in the headers of a gzipped FASTQ file.
-
-    Small files use one fused streaming pass. For larger files the zlib
-    inflate C call (which releases the GIL) runs in a producer thread,
-    overlapped with the counting pass: ~15% faster than the fused pass in
-    benchmarks (91MB file, 675MB decompressed: 2.04s -> 1.73s).
-    """
-    if force_threaded or f.stat().st_size >= THREADED_MIN_SIZE:
-        return _count_threaded(f)
-    return _count_serial(f)
 
 
 def _member_index_for(f: pathlib.Path, cache_dir: pathlib.Path) -> pathlib.Path:

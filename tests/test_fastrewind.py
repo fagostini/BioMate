@@ -1707,9 +1707,6 @@ def test_blabber_taint_count_round_trip_through_fastrewind(tmp_path, caplog):
             flowcell_id=flowcell_id,
             seq_number=4,
             seq_length=151,
-            seq_mask=None,
-            index1=None,
-            index2=None,
             taint=True,
             taint_count=2,
         )

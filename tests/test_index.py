@@ -7,7 +7,6 @@ import pytest
 
 from biomate.index.index import (
     compile_index_regex,
-    expand_regex,
     validate_args,
     write_results,
 )
@@ -73,66 +72,6 @@ class TestCompileIndexRegex:
         # ACGT has length 4; deleting a base gives length 3
         # The pattern allows s<=1, d<=0, i<=0
         assert not pattern.search("ACT")
-
-
-# ---------------------------------------------------------------------------
-# expand_regex
-# ---------------------------------------------------------------------------
-
-
-class TestExpandRegex:
-    """Tests for expand_regex."""
-
-    def test_literal_returns_single_element(self):
-        """A literal sequence expands to a set containing only itself."""
-        assert expand_regex("ACGT") == {"ACGT"}
-
-    def test_wildcard_dot_expands(self):
-        """A dot wildcard expands to the five nucleotide characters."""
-        result = expand_regex("A.T")
-        assert "AAT" in result
-        assert "ACT" in result
-        assert "AGT" in result
-        assert "ATT" in result
-        assert "ANT" in result
-
-    def test_character_class_expands(self):
-        """A character class expands to all listed bases."""
-        result = expand_regex("[ACG]T")
-        assert result == {"AT", "CT", "GT"}
-
-    def test_alternation_in_parens(self):
-        """Parenthesised alternation expands to each alternative."""
-        result = expand_regex("(A|C)GT")
-        assert result == {"AGT", "CGT"}
-
-    def test_optional_group(self):
-        """An optional group (A)? expands to both the group and the empty string."""
-        result = expand_regex("(A)?GT")
-        assert result == {"AGT", "GT"}
-
-    def test_multi_character_alternation(self):
-        """Multi-character alternation inside parentheses expands correctly."""
-        # "(AA|CC)" with ) at end-of-string triggers IndexError in expand_regex (known bug).
-        # Use a trailing literal to avoid the boundary condition.
-        result = expand_regex("(AA|CC)T")
-        assert result == {"AAT", "CCT"}
-
-    def test_plus_raises(self):
-        """A '+' character in the pattern raises ValueError."""
-        with pytest.raises(ValueError, match="\\+"):
-            expand_regex("A+C")
-
-    def test_literal_no_special_chars(self):
-        """A plain sequence with no special characters expands to itself."""
-        assert expand_regex("GGGG") == {"GGGG"}
-
-    def test_multiple_wildcards(self):
-        """Multiple dot wildcards produce 5^n unique expansions."""
-        result = expand_regex("A..")
-        # 5 choices × 5 choices = 25 unique sequences of length 3 starting with A
-        assert len(result) == 25
-        assert all(s.startswith("A") and len(s) == 3 for s in result)
 
 
 # ---------------------------------------------------------------------------

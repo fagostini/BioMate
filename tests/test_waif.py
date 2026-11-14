@@ -16,8 +16,9 @@ from biomate.waif.waif import (
     BoundedReader,
     _build_member_index,
     _count_for_file,
+    _count_serial,
+    _count_threaded,
     _count_from_index,
-    _count_undetermined,
     _find_member_offsets,
     _load_member_index,
     _member_index_for,
@@ -505,7 +506,7 @@ class TestCounters:
     def test_counter_matches_line_by_line_reference(self, tmp_path: Path) -> None:
         """The serial counter must equal the line-by-line reference."""
         for name, (f, expected) in fastq_fixtures(tmp_path).items():
-            got = dict(_count_undetermined(f))
+            got = dict(_count_serial(f))
             assert got == expected, f"{name}"
 
     def test_threaded_counter_matches_line_by_line_reference(
@@ -514,7 +515,7 @@ class TestCounters:
         """The threaded inflate+count pipeline must equal the same
         reference."""
         for name, (f, expected) in fastq_fixtures(tmp_path).items():
-            got = dict(_count_undetermined(f, force_threaded=True))
+            got = dict(_count_threaded(f))
             assert got == expected, f"{name}"
 
     def test_threaded_multi_member_mid_chunk(self, tmp_path: Path) -> None:
@@ -526,7 +527,7 @@ class TestCounters:
             gzip.compress(_fastq_text(64, 0).encode())
             + gzip.compress(_fastq_text(64, 100).encode())
         )
-        got = dict(_count_undetermined(f, force_threaded=True))
+        got = dict(_count_threaded(f))
         assert got == _reference_counts(text)
 
     def test_threaded_multi_member_three(self, tmp_path: Path) -> None:
@@ -534,7 +535,7 @@ class TestCounters:
         parts = [_fastq_text(40, 10 * k) for k in range(3)]
         f = tmp_path / "three.fastq.gz"
         f.write_bytes(b"".join(gzip.compress(p.encode()) for p in parts))
-        got = dict(_count_undetermined(f, force_threaded=True))
+        got = dict(_count_threaded(f))
         assert got == _reference_counts("".join(parts))
 
     def test_threaded_multi_member_aligned_boundary(
@@ -548,7 +549,7 @@ class TestCounters:
         f = tmp_path / "aligned.fastq.gz"
         f.write_bytes(m1 + m2)
         monkeypatch.setattr(waif, "_INFLATE_CHUNK", len(m1))
-        got = dict(_count_undetermined(f, force_threaded=True))
+        got = dict(_count_threaded(f))
         assert got == _reference_counts(_fastq_text(50, 0) + _fastq_text(50, 100))
 
     def test_threaded_member_spans_multiple_chunks(
@@ -562,7 +563,7 @@ class TestCounters:
         f = tmp_path / "bigmember.fastq.gz"
         f.write_bytes(gzip.compress(p1.encode()) + gzip.compress(p2.encode()))
         monkeypatch.setattr(waif, "_INFLATE_CHUNK", 64)
-        got = dict(_count_undetermined(f, force_threaded=True))
+        got = dict(_count_threaded(f))
         assert got == _reference_counts(p1 + p2)
 
 
