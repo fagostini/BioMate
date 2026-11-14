@@ -265,6 +265,13 @@ def validate_args(args) -> argparse.Namespace:
                 raise argparse.ArgumentTypeError(
                     f"Sample sheet file {args.sample_sheet} does not exist."
                 )
+            # Each sample draws sqrt(seq_number) distinct y positions on a tile
+            max_seq_number = (TILE_HEIGHT * 10 + 1 - 1000) ** 2
+            if args.seq_number > max_seq_number:
+                raise argparse.ArgumentTypeError(
+                    f"With a sample sheet, at most {max_seq_number} sequences "
+                    "per sample can be placed on the simulated tiles."
+                )
             if not args.output:
                 raise argparse.ArgumentTypeError(
                     "Output path is required when using a sample sheet."
@@ -361,8 +368,9 @@ def parse_sample_sheet(sample_sheet: pathlib.Path) -> tuple[str, dict]:
                 )
                 .iter_rows()
             ):
+                # Keyed by (id, lane): a sample may sit in several lanes
                 sample_sheet_dict[proj].setdefault(
-                    id,
+                    (id, lane),
                     tuple(
                         (
                             f"S{counter}_{name}",
@@ -384,13 +392,14 @@ def parse_sample_sheet(sample_sheet: pathlib.Path) -> tuple[str, dict]:
                 .select("Lane", "Lane_name", "Sample_ID", "Recipe")
                 .iter_rows()
             ):
+                # Keyed by (id, lane): a sample may sit in several lanes
                 sample_sheet_dict[proj].setdefault(
-                    id,
+                    (id, lane),
                     tuple(
                         (
                             f"S{counter}_{name}",
                             lane,
-                            parse_sequence_mask("Y" + recipe.replace("-", "Y")),
+                            parse_sequence_mask("Y" + recipe.replace("-", ";Y")),
                         )
                     ),
                 )
@@ -863,9 +872,7 @@ def main(args: argparse.Namespace) -> None:
             # Lanes record the (tile, x, y) positions of all their reads so
             # that taint copies (with --taint-count) can be assigned unique
             # cluster coordinates
-            used_positions = (
-                defaultdict(set) if taint_count is not None else None
-            )
+            used_positions = defaultdict(set) if taint_count is not None else None
             available_tiles = [
                 "".join(x)
                 for x in product(
@@ -910,7 +917,8 @@ def main(args: argparse.Namespace) -> None:
             )
 
             for proj, samples in sample_sheet.items():
-                for sample, (index, lane, recipe) in samples.items():
+                for sample_key, (index, lane, recipe) in samples.items():
+                    sample = sample_key[0]
                     proj_prefix = prefix + f":{lane}"  # Lane number
                     lane_key = re.sub(r"S\d+_", "S0_", index)
                     # unique_lanes.setdefault(lane_key, set()).add(recipe)
@@ -949,7 +957,7 @@ def main(args: argparse.Namespace) -> None:
                         recipe,
                         proj_prefix,
                         extension,
-                        sample_tiles[(proj, sample)],
+                        sample_tiles[(proj, sample_key)],
                         collect_taint,
                         taint_count=taint_count if collect_taint else None,
                         used_positions=(
@@ -1006,7 +1014,7 @@ def main(args: argparse.Namespace) -> None:
                 if args.output.is_dir()
                 else args.output
             )
-            with open(output_file, "a") as writer:
+            with open(output_file, "w") as writer:
                 writer.write("".join(f"{seq}\n" for seq in sequences))
         else:
             for seq in sequences:
