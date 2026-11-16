@@ -968,3 +968,18 @@ def test_dark_cycle_on_most_but_not_all_tiles(tmp_path):
     assert flags.select("kind", "cycle", "status").rows() == [
         ("dark_cycle", 10, "FAIL")
     ]
+
+
+@pytest.mark.parametrize("engine", ["python", "rust"])
+def test_spatial_sum_matches_per_file_counters(run_files, engine):
+    """Summing spatial counters as files finish gives the same table."""
+    from biomate.nspector.scan import SpatialSum
+
+    if engine == "rust":
+        pytest.importorskip("biomate_kernels")
+    expected = build_tables(scan_files(run_files, engine, bin_size=25), bin_size=25)
+    spatial_sum = SpatialSum()
+    scans = scan_files(run_files, engine, bin_size=25, spatial=spatial_sum)
+    assert all(scan.spatial == [] for scan in scans)
+    got = build_tables(scans, bin_size=25, spatial_sum=spatial_sum)
+    assert got.spatial.height and got.spatial.equals(expected.spatial)

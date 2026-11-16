@@ -6,6 +6,7 @@ import dataclasses
 import logging
 import os
 import pathlib
+import threading
 import re
 from collections import Counter, defaultdict
 from collections.abc import Callable
@@ -185,6 +186,60 @@ class FileScan:
     def reads_with_n(self) -> int:
         """Number of reads with at least one N."""
         return sum(t[3] for t in self.tiles)
+
+
+SPATIAL_SCHEMA = {
+    "lane": polars.UInt8,
+    "tile": polars.UInt32,
+    "x_bin": polars.UInt32,
+    "y_bin": polars.UInt32,
+    "window": polars.UInt16,
+    "n_bases": polars.UInt64,
+}
+
+
+class SpatialSum:
+    """Running sum of the scans' spatial counters, per project and read.
+
+    A file with Ns in most reads has one counter per occupied bin and cycle
+    window: hundreds of thousands of tuples. Summing them as each file
+    finishes keeps one project's bins in memory instead of every file's.
+    Safe to call from the scan threads.
+    """
+
+    KEYS = ["lane", "tile", "x_bin", "y_bin", "window"]
+
+    def __init__(self) -> None:
+        self._frames: dict[tuple[str, str], polars.DataFrame] = {}
+        self._lock = threading.Lock()
+
+    def add(self, scan: FileScan) -> None:
+        """Add ``scan.spatial``; files with a format error are left out."""
+        if scan.format_error is not None or not scan.spatial:
+            return
+        frame = polars.DataFrame(scan.spatial, schema=SPATIAL_SCHEMA, orient="row")
+        key = (scan.project, scan.read)
+        with self._lock:
+            if key in self._frames:
+                frame = (
+                    polars.concat([self._frames[key], frame])
+                    .group_by(self.KEYS)
+                    .agg(polars.col("n_bases").sum())
+                )
+            self._frames[key] = frame
+
+    def frame(self) -> polars.DataFrame:
+        """All sums, with ``project`` and ``read`` columns."""
+        schema = {"project": polars.Utf8, "read": polars.Utf8, **SPATIAL_SCHEMA}
+        frames = [
+            frame.select(
+                polars.lit(project).alias("project"),
+                polars.lit(read).alias("read"),
+                *SPATIAL_SCHEMA,
+            )
+            for (project, read), frame in self._frames.items()
+        ]
+        return polars.concat(frames) if frames else polars.DataFrame(schema=schema)
 
 
 class RawWriter:
@@ -397,6 +452,7 @@ def scan_files(
     min_qual: int = 20,
     cycle_window: int = 10,
     done: Callable[[pathlib.Path], None] | None = None,
+    spatial: SpatialSum | None = None,
 ) -> list[FileScan]:
     """Scan every input file with the requested engine.
 
@@ -404,10 +460,15 @@ def scan_files(
     ``raw_dir/<stem>_n_sequences/`` and the Python engine is used.
     ``done(path)`` is called as each file finishes (e.g. to advance a
     progress bar); with the Rust engine it runs on a worker thread.
+    With ``spatial`` set, each file's spatial counters are moved into it as
+    the file finishes and the returned scans have an empty ``spatial``.
     """
     engine = resolve_engine(engine)
 
     def finished(scan: FileScan) -> FileScan:
+        if spatial is not None:
+            spatial.add(scan)
+            scan.spatial = []
         if done is not None:
             done(scan.path)
         return scan

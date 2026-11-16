@@ -26,6 +26,7 @@ from biomate.nspector.runmetrics import (
 )
 from biomate.nspector.scan import (
     FileScan,
+    SpatialSum,
     discover_fastqs,
     extract_tile_coordinates,  # noqa: F401  (re-exported for callers/tests)
     project_of,
@@ -407,6 +408,8 @@ def _run(args: argparse.Namespace, progress: Progress) -> None:
         f"Scanning {len(sizes)} file(s)", total=sum(sizes.values()) or 1
     )
     started = time.perf_counter()
+    # --png draws each file's own spatial counters, so they must stay on the scans
+    spatial_sum = None if getattr(args, "png", False) else SpatialSum()
     scans = usable_scans(
         scan_files(
             args.input,
@@ -417,6 +420,7 @@ def _run(args: argparse.Namespace, progress: Progress) -> None:
             min_qual=getattr(args, "min_qual", 20),
             cycle_window=getattr(args, "spatial_cycle_window", 10),
             done=lambda path: progress.advance(scanning, sizes[path]),
+            spatial=spatial_sum,
         )
     )
     reads = sum(s.total_reads for s in scans)
@@ -447,6 +451,7 @@ def _run(args: argparse.Namespace, progress: Progress) -> None:
         scans,
         bin_size=bin_size,
         cycle_window=getattr(args, "spatial_cycle_window", 10),
+        spatial_sum=spatial_sum,
     )
     tables.flags = build_flags(
         tables, getattr(args, "warn_rate", 0.01), getattr(args, "fail_rate", 0.05)
