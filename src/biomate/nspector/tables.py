@@ -12,7 +12,7 @@ import pathlib
 
 import polars
 
-from biomate.nspector.scan import FileScan
+from biomate.nspector.scan import FileScan, SpatialSum
 
 KEYS = ["project", "sample", "read", "lane"]
 
@@ -110,9 +110,15 @@ FIRST_N_REGIONS = ["first 10 cycles", "middle", "last 10 cycles"]
 
 
 def build_tables(
-    scans: list[FileScan], bin_size: int = 1000, cycle_window: int = 10
+    scans: list[FileScan],
+    bin_size: int = 1000,
+    cycle_window: int = 10,
+    spatial_sum: SpatialSum | None = None,
 ) -> NspectorTables:
     """Combine per-file scan counters into the tidy nspector tables.
+
+    ``spatial_sum`` holds the spatial counters already taken from the scans
+    (see ``scan_files``); counters still on the scans are added to it.
 
     * ``sample_lane``: reads with N per sample/read/lane.
     * ``sample_cycle``: reads with an N at each cycle, per sample/read/lane
@@ -272,18 +278,11 @@ def build_tables(
         .sort([*KEYS, "n_count"])
     )
 
+    spatial_sum = spatial_sum or SpatialSum()
+    for scan in scans:
+        spatial_sum.add(scan)
     spatial = (
-        _concat(
-            scans,
-            "spatial",
-            {
-                **LANE_TILE,
-                "x_bin": polars.UInt32,
-                "y_bin": polars.UInt32,
-                "window": polars.UInt16,
-                "n_bases": polars.UInt64,
-            },
-        )
+        spatial_sum.frame()
         .with_columns(
             (polars.col("window") * cycle_window + 1).cast(polars.UInt16).alias("cycle")
         )
