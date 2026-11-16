@@ -551,6 +551,28 @@ def finalize(pair_frames: list[polars.DataFrame]) -> polars.DataFrame:
     )
 
 
+def shared_undetermined(
+    table: polars.DataFrame, lanes_to_filter: list[int]
+) -> polars.DataFrame:
+    """Barcodes undetermined in every dataset of each lane in ``lanes_to_filter``."""
+    table = (
+        table.filter(polars.col("Lane").is_in(lanes_to_filter))
+        # Longer barcodes first: combined with unique(maintain_order=True) this
+        # makes the longest-index dataset the hub (the truncated side).
+        .sort(["Lane", "Barcode_len", "Dataset"], descending=[False, True, False])
+        .drop(["Barcode_len"])
+    )
+
+    validate_table(table)
+
+    pair_frames = [
+        intersect_lane_datasets(table.filter(polars.col("Lane") == lane))
+        for lane in lanes_to_filter
+    ]
+
+    return finalize(pair_frames)
+
+
 def main(args: argparse.Namespace) -> None:
     """Main function."""
     if args.output_file is None:
@@ -583,22 +605,7 @@ def main(args: argparse.Namespace) -> None:
         )
         logging.info(f"{message}; nothing to report.")
 
-    table = (
-        table.filter(polars.col("Lane").is_in(lanes_to_filter))
-        # Longer barcodes first: combined with unique(maintain_order=True) this
-        # makes the longest-index dataset the hub (the truncated side).
-        .sort(["Lane", "Barcode_len", "Dataset"], descending=[False, True, False])
-        .drop(["Barcode_len"])
-    )
-
-    validate_table(table)
-
-    pair_frames = [
-        intersect_lane_datasets(table.filter(polars.col("Lane") == lane))
-        for lane in lanes_to_filter
-    ]
-
-    results = finalize(pair_frames)
+    results = shared_undetermined(table, lanes_to_filter)
 
     if args.output_file is not None:
         results.write_csv(args.output_file)

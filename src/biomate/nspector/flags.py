@@ -264,10 +264,13 @@ def flagged_share(tables: NspectorTables, flags: polars.DataFrame) -> float | No
         "dark_cycle": ["read", "lane", "cycle"],
         "tile_cycle": ["read", "lane", "tile", "cycle"],
     }
-    for kind, on in keys.items():
+    marks = [f"_{kind}" for kind in keys]
+    for (kind, on), mark in zip(keys.items(), marks):
         hit = flags.filter(polars.col("kind") == kind).select(on).unique()
-        cells = cells.join(hit.with_columns(polars.lit(True).alias(kind)), on=on, how="left")
-    explained = cells.filter(
-        polars.any_horizontal(polars.col(list(keys)).is_not_null())
-    )["n"].sum()
+        cells = cells.join(
+            hit.with_columns(polars.lit(True).alias(mark)), on=on, how="left"
+        )
+    explained = cells.filter(polars.any_horizontal(polars.col(marks).is_not_null()))[
+        "n"
+    ].sum()
     return int(explained) / total

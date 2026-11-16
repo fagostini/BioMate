@@ -698,9 +698,10 @@ class TestRunMetrics:
         assert "interop_metric" in {p["name"] for p in spec["params"]}
         pick = [p for p in spec["params"] if p["name"] == "pick_tile"]
         assert len(pick) == 1
-        # one click handler each: tile map, tile x cycle heatmap, InterOp scatter
+        # one click handler each: tile map, swath strip, tile x cycle heatmap,
+        # InterOp scatter
         vega = json.dumps(vl_convert.vegalite_to_vega(spec))
-        assert vega.count('"name": "pick_tile_tuple", "on"') == 3
+        assert vega.count('"name": "pick_tile_tuple", "on"') == 4
         assert "nspector_tile_interop.parquet" in {
             p.name for p in tables.write_parquet(tmp_path)
         }
@@ -849,3 +850,40 @@ def test_robust_z_is_zero_at_the_median_of_a_zero_spread_group():
     z = df.select(_robust_z(["g"]).alias("z")).get_column("z").to_list()
     assert z[:2] == [0.0, 0.0]
     assert z[2] == float("-inf")
+
+
+def test_sample_flag_and_flagged_share(tmp_path):
+    """One sample with far more Ns than its lane mates gets its own flag."""
+    from biomate.nspector.flags import flagged_share
+
+    for i in range(6):
+        seq = "NNNNACGT" if i == 0 else "ACGTACGT"
+        write_fastq_gz(
+            tmp_path / f"S{i}_S{i + 1}_L001_R1_001.fastq.gz",
+            [_rec(seq, x=str(j)) for j in range(20)],
+        )
+    tables = build_tables(scan_files(discover_fastqs([tmp_path]), "python"))
+    flags = build_flags(tables)
+    own = flags.filter(polars.col("kind") == "sample")
+    assert own["sample"].to_list() == ["S0"] and own["status"].to_list() == ["FAIL"]
+    # S0 fails on its own; with no flowcell-level flag the others would pass
+    lane_wide = flags.filter(polars.col("kind") != "sample")
+    status = dict(sample_status(tables, own).iter_rows())
+    assert status["S0"] == "FAIL" and set(status.values()) == {"FAIL", "PASS"}
+    assert flagged_share(tables, own) == 0.0
+    if lane_wide.height:
+        assert 0 < flagged_share(tables, flags) <= 1
+
+
+def test_new_charts_in_spec(tmp_path):
+    root = tmp_path / "run"
+    _demux_tree(root)
+    tables = build_tables(scan_files(discover_fastqs([root]), "python"))
+    spec = json.dumps(build_chart(tables).to_dict())
+    for text in (
+        "Reads lost when filtering",
+        "Tiles by surface and swath",
+        "Undetermined share vs N rate",
+        "reads scanned (yield)",
+    ):
+        assert text in spec

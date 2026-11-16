@@ -66,6 +66,14 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         formatter_class=argparse.RawDescriptionHelpFormatter,
         help="Evaluate indexes mixing across flowcell lanes.",
     )
+    add_arguments(parser)
+    parser.set_defaults(parse=validate_args, run=main)
+
+    return parser
+
+
+def add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the flowcell input/output arguments (shared with triage)."""
     parser.add_argument(
         "--input-path",
         type=pathlib.Path,
@@ -91,9 +99,6 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         default=1,
         help="Number of threads used to process the undetermined FASTQ files.",
     )
-    parser.set_defaults(parse=validate_args, run=main)
-
-    return parser
 
 
 def extract_indexes_from_sample_sheet(
@@ -132,6 +137,15 @@ def extract_indexes_from_undetermined_file(
     Reads the file header to extract index information, filtering out
     poly-G artifacts which indicate likely sequencing errors.
     """
+    return top_undetermined(
+        undetermined_file_path, count_header_indexes(undetermined_file_path)
+    )
+
+
+def top_undetermined(
+    undetermined_file_path: pathlib.Path, counts: Counter
+) -> list[dict[str, str | int | float]]:
+    """Rows of the most frequent header indexes (``counts``) of one file."""
     # Extract lane information from the file name
     lane = undetermined_file_path.name.split("_")[2]
     if not regex.match(r"^L\d{3}$", lane):
@@ -141,11 +155,7 @@ def extract_indexes_from_undetermined_file(
 
     # Skip indexes with poly-G artifacts (likely sequencing errors)
     indexes = Counter(
-        {
-            idx: count
-            for idx, count in count_header_indexes(undetermined_file_path).items()
-            if POLY_G_ARTIFACT not in idx
-        }
+        {idx: count for idx, count in counts.items() if POLY_G_ARTIFACT not in idx}
     )
 
     return [
@@ -300,6 +310,46 @@ def aggregate_results_by_lane(results: polars.DataFrame) -> polars.DataFrame:
     )
 
 
+def report(
+    sample_sheet_indexes: polars.DataFrame,
+    undetermined_rows: list[dict],
+    output_path: pathlib.Path,
+    basename: str,
+) -> None:
+    """Search the undetermined rows and write the two results CSV files."""
+    output_file = output_path / f"{basename}_unexpected_indexes.csv"
+    if not undetermined_rows:
+        logging.info("No indexes extracted from undetermined FASTQ files. Exiting.")
+        return
+
+    logging.debug("Extracting indexes from undetermined FASTQ files completed.")
+
+    undetermined_indexes = polars.from_dicts(undetermined_rows)
+
+    logging.info("Searching for unexpected indexes...")
+    results = search_for_unexpected_indexes(sample_sheet_indexes, undetermined_indexes)
+
+    logging.debug("Searching for unexpected indexes completed.")
+
+    if results.is_empty():
+        logging.info("No unexpected indexes found. Exiting.")
+    else:
+        # Sort results by lane and count, and filter out indexes that are expected in the lane
+        results = clean_results(
+            results.sort(["Lane", "Count"], descending=[False, True]),
+            sample_sheet_indexes,
+        )
+        results.write_csv(output_file)
+        logging.info(f"Results saved to {output_file}.")
+
+        aggregate_results_by_lane(results).write_csv(
+            output_path / f"{basename}_lane_summary.csv"
+        )
+        logging.info(
+            f"Lane summary saved to {output_path / f'{basename}_lane_summary.csv'}."
+        )
+
+
 def main(args: argparse.Namespace) -> None:
     """Main function."""
     setup_logging(args)
@@ -329,33 +379,4 @@ def main(args: argparse.Namespace) -> None:
         undetermined_files, args.threads
     )
 
-    if not undetermined_indexes:
-        logging.info("No indexes extracted from undetermined FASTQ files. Exiting.")
-        return
-
-    logging.debug("Extracting indexes from undetermined FASTQ files completed.")
-
-    undetermined_indexes = polars.from_dicts(undetermined_indexes)
-
-    logging.info("Searching for unexpected indexes...")
-    results = search_for_unexpected_indexes(sample_sheet_indexes, undetermined_indexes)
-
-    logging.debug("Searching for unexpected indexes completed.")
-
-    if results.is_empty():
-        logging.info("No unexpected indexes found. Exiting.")
-    else:
-        # Sort results by lane and count, and filter out indexes that are expected in the lane
-        results = clean_results(
-            results.sort(["Lane", "Count"], descending=[False, True]),
-            sample_sheet_indexes,
-        )
-        results.write_csv(output_file)
-        logging.info(f"Results saved to {output_file}.")
-
-        aggregate_results_by_lane(results).write_csv(
-            args.output_path / f"{basename}_lane_summary.csv"
-        )
-        logging.info(
-            f"Lane summary saved to {args.output_path / f'{basename}_lane_summary.csv'}."
-        )
+    report(sample_sheet_indexes, undetermined_indexes, args.output_path, basename)

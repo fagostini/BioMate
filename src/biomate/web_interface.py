@@ -596,6 +596,26 @@ MODULES: List[Dict[str, Any]] = [
     },
 ]
 
+# Triage takes the same arguments as strainer
+MODULES.append(
+    {
+        "name": "triage",
+        "title": "Undetermined Reads Triage",
+        "short_description": (
+            "Runs strainer, index discovery and waif on a flowcell from a "
+            "single pass over the Undetermined FASTQ headers."
+        ),
+        "description": (
+            "Triage counts the header indexes of every Undetermined*R1*.fastq.gz "
+            "file once, then writes the strainer reports (cross-lane and "
+            "reverse-complemented sample indexes), the largest undetermined "
+            "index groups of each file and, when re-run Stats.json files are "
+            "present, the barcodes undetermined in every run of a lane."
+        ),
+        "parameters": next(m for m in MODULES if m["name"] == "strainer")["parameters"],
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers

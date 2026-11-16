@@ -14,9 +14,15 @@ import warnings
 import altair as alt
 import polars
 
-from biomate.nspector.flags import FLAG_SCHEMA, sample_status
-from biomate.nspector.scan import FileScan
-from biomate.nspector.tables import NspectorTables
+from biomate.nspector.flags import (
+    FLAG_SCHEMA,
+    flag_rank,
+    flagged_share,
+    sample_status,
+    status_name,
+)
+from biomate.nspector.scan import UNDETERMINED, FileScan
+from biomate.nspector.tables import KEYS, NspectorTables
 
 # Upper bound on spatial rows embedded in the report; beyond this only the
 # tiles with the highest N rate keep their spatial map.
@@ -41,15 +47,15 @@ MAX_FLAG_ROWS = 50
 # Vega expression: the value plotted for the active metric.
 VALUE_EXPR = (
     "metric == 'rate' ? datum.n / datum.total"
-    " : metric == 'lowq' ? datum.lowq / datum.total : datum.n"
+    " : metric == 'lowq' ? datum.lowq / datum.total"
+    " : metric == 'reads' ? datum.total : datum.n"
 )
 # Project / Lane / Read controls: 'All' sums projects or lanes (global view);
 # Read = 'All' overlays the reads in line and bar charts and sums them in maps
 READ_FILTER = "(read_sel == 'All' || datum.read == read_sel)"
 LANE_FILTER = f"(lane_sel == 'All' || datum.lane == lane_sel) && {READ_FILTER}"
-SELECTION_FILTER = (
-    f"{LANE_FILTER} && (project_sel == 'All' || datum.project == project_sel)"
-)
+PROJECT_FILTER = "(project_sel == 'All' || datum.project == project_sel)"
+SELECTION_FILTER = f"{LANE_FILTER} && {PROJECT_FILTER}"
 
 
 # per read: a base colour and a lighter shade (R1 dark, R2 light, as asked)
@@ -86,7 +92,8 @@ def _caption(chart: alt.TopLevelMixin, text: str, width: int) -> alt.VConcatChar
 CAPTIONS = {
     "overview": (
         "Each cell is one sample on one lane, coloured by the metric chosen above "
-        "(N rate, N count or low-Q rate) for the selected project and read; with "
+        "(N rate, N count, low-Q rate or reads scanned) for the selected project and "
+        "read; with "
         "Read = All the reads are added together. Click a sample to focus the "
         "per-sample charts on it; shift-click adds samples, double-click clears."
     ),
@@ -143,6 +150,32 @@ CAPTIONS = {
         "extreme one; hover for exact values. Orange outlines mark FAIL flags (tick "
         "Show WARN flags for WARN too). Click a row to select its tile."
     ),
+    "read_loss": (
+        "The share of reads that a filter on N content would discard: at 0 every "
+        "read with an N is lost, at 1 only reads with two or more Ns, and so on. "
+        "A curve that drops to almost nothing after the first steps means the Ns "
+        "are isolated no-calls and a mild filter costs little; a long flat stretch "
+        "means many reads are mostly N."
+    ),
+    "swath": (
+        "One point per tile, in the row of its surface and swath, at the value "
+        "shown on the tile map (same cycle range); the orange tick is the row's "
+        "median. Red points are the first and last tile segment of the swath. A "
+        "row shifted as a whole points to a surface or swath effect, red points "
+        "on the right to an edge effect. Click a point to select the tile."
+    ),
+    "read_pair": (
+        "One point per tile: the fraction of its reads with an N in R1 against "
+        "R2. Tiles on the dashed diagonal are equally bad in both reads, which "
+        "points to a physical defect on the tile; tiles off the diagonal had a "
+        "problem during one read only, such as a dark cycle or a reagent issue. "
+        "Follows the Project and Lane controls."
+    ),
+    "undetermined": (
+        "One point per tile and read: the share of the tile's reads that were not "
+        "assigned to a sample against its N rate. Points rising to the right mean "
+        "the tiles that lose bases also lose reads at demultiplexing."
+    ),
     "interop": (
         "One point per tile: its N rate against the InterOp metric picked with the "
         "InterOp control (%PF, cluster density or %≥Q30), coloured by lane. Tiles "
@@ -174,7 +207,8 @@ def robust_scale(values: polars.Series) -> alt.Scale:
 
 # rate metrics as percentages, counts with thousands separators
 METRIC_LABELS = (
-    "metric == 'count' ? format(datum.value, ',.0f') : format(datum.value, '.2%')"
+    "metric == 'count' || metric == 'reads' ? format(datum.value, ',.0f')"
+    " : format(datum.value, '.2%')"
 )
 EMPTY_TEXT = "No N bases in this selection"
 
@@ -363,11 +397,12 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         name="metric",
         value="rate",
         bind=alt.binding_radio(
-            options=["rate", "count", "lowq"],
+            options=["rate", "count", "lowq", "reads"],
             labels=[
                 "N rate (fraction of reads)",
                 "N count (reads)",
                 "low-Q rate (called bases below --min-qual)",
+                "reads scanned (yield)",
             ],
             name="Metric ",
         ),
@@ -406,9 +441,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         tables.sample_lane.select(
             "project", "sample", "read", "lane", "n", "lowq", "total"
         )
-    ).transform_filter(
-        f"{READ_FILTER} && (project_sel == 'All' || datum.project == project_sel)"
-    )
+    ).transform_filter(f"{READ_FILTER} && {PROJECT_FILTER}")
     sample_x = alt.X(
         "label:N",
         title="Project / sample" + (" (hover for names)" if many_labels else ""),
@@ -631,6 +664,128 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         width=alt.Step(tile_step := max(12, min(48, 480 // n_segments))),
         height=alt.Step(max(20, min(60, 480 // n_rows))),
     )
+
+    # -- C2: tiles compared by surface/swath, between reads, with Undetermined
+    tile_point = {
+        "color": alt.Color("lane:N", title="Lane"),
+        "opacity": alt.when(pick_tile).then(alt.value(0.9)).otherwise(alt.value(0.2)),
+    }
+    edges = (int(layout["segment"].min() or 0), int(layout["segment"].max() or 0))
+    strip_base = _tile_layout_calcs(tile_base).transform_calculate(
+        where=f"datum.segment == {edges[0]} || datum.segment == {edges[1]}"
+        " ? 'edge segment' : 'inner segment'"
+    )
+    swath_strip = alt.layer(
+        strip_base.mark_point(filled=True, size=40)
+        .encode(
+            x=alt.X("value:Q", title="Value on the tile map"),
+            y=alt.Y("row:N", title=None),
+            color=alt.Color("where:N", title=None).scale(
+                domain=["edge segment", "inner segment"], range=["#d62728", "#4c78a8"]
+            ),
+            opacity=tile_point["opacity"],
+            tooltip=["tile:O", "where:N", alt.Tooltip("value:Q", format=".4g")],
+        )
+        .add_params(pick_tile),
+        strip_base.mark_tick(color=FLAG_COLOR, thickness=3).encode(
+            x="median(value):Q", y="row:N"
+        ),
+    ).properties(
+        title="Tiles by surface and swath (click a tile)",
+        width=360,
+        height=alt.Step(28),
+    )
+    tile_views = [_caption(swath_strip, CAPTIONS["swath"], 360)]
+
+    if {"R1", "R2"} <= set(reads):
+        pair = (
+            tables.tile_summary.filter(polars.col("read").is_in(["R1", "R2"]))
+            .group_by("project", "lane", "tile", "read")
+            .agg(polars.col("n", "total").sum())
+            .pivot("read", index=["project", "lane", "tile"], values=["n", "total"])
+            .fill_null(0)
+        )
+        pair_base = (
+            alt.Chart(pair)
+            .transform_filter(
+                f"(lane_sel == 'All' || datum.lane == lane_sel) && {PROJECT_FILTER}"
+            )
+            .transform_aggregate(
+                n_R1="sum(n_R1)",
+                total_R1="sum(total_R1)",
+                n_R2="sum(n_R2)",
+                total_R2="sum(total_R2)",
+                groupby=["lane", "tile"],
+            )
+            .transform_filter("datum.total_R1 > 0 && datum.total_R2 > 0")
+            .transform_calculate(
+                r1="datum.n_R1 / datum.total_R1", r2="datum.n_R2 / datum.total_R2"
+            )
+        )
+        diagonal = pair_base.transform_calculate(
+            top="max(datum.r1, datum.r2)"
+        ).transform_aggregate(top="max(top)")
+        read_pair = alt.layer(
+            # y = x from 0 to the largest rate shown
+            diagonal.transform_calculate(zero="0")
+            .mark_rule(strokeDash=[4, 4], color="#8a93a3")
+            .encode(x="zero:Q", y="zero:Q", x2="top:Q", y2="top:Q"),
+            pair_base.mark_circle(size=60)
+            .encode(
+                x=alt.X("r1:Q", title="N rate in R1").axis(format="%"),
+                y=alt.Y("r2:Q", title="N rate in R2").axis(format="%"),
+                **tile_point,
+                tooltip=[
+                    "lane:O",
+                    "tile:O",
+                    alt.Tooltip("r1:Q", title="N rate R1", format=".3%"),
+                    alt.Tooltip("r2:Q", title="N rate R2", format=".3%"),
+                ],
+            )
+            .add_params(pick_tile),
+        ).properties(
+            title="N rate per tile, R1 vs R2 (click a tile)", width=300, height=300
+        )
+        tile_views.append(_caption(read_pair, CAPTIONS["read_pair"], 300))
+
+    if UNDETERMINED in projects and len(projects) > 1:
+        undetermined = (
+            alt.Chart(
+                tables.tile_summary.group_by("read", "lane", "tile").agg(
+                    polars.col("n", "total").sum(),
+                    polars.col("total")
+                    .filter(polars.col("project") == UNDETERMINED)
+                    .sum()
+                    .alias("undetermined"),
+                )
+            )
+            .transform_filter(LANE_FILTER)
+            .transform_calculate(
+                share="datum.undetermined / datum.total", rate="datum.n / datum.total"
+            )
+            .mark_circle(size=60)
+            .encode(
+                x=alt.X("share:Q", title="Undetermined reads on the tile").axis(
+                    format="%"
+                ),
+                y=alt.Y("rate:Q", title="N rate (reads with N)").axis(format="%"),
+                **tile_point,
+                tooltip=[
+                    "read:N",
+                    "lane:O",
+                    "tile:O",
+                    alt.Tooltip("share:Q", title="Undetermined", format=".2%"),
+                    alt.Tooltip("rate:Q", title="N rate", format=".3%"),
+                ],
+            )
+            .add_params(pick_tile)
+            .properties(
+                title="Undetermined share vs N rate per tile (click a tile)",
+                width=300,
+                height=300,
+            )
+        )
+        tile_views.append(_caption(undetermined, CAPTIONS["undetermined"], 300))
 
     # -- D: tile × cycle heatmap --------------------------------------------
     n_tiles = tables.tile_cycle["tile"].n_unique()
@@ -872,6 +1027,60 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         height=240,
     )
 
+    # -- F2: reads lost to a "no more than k Ns" filter ------------------------
+    # n_per_read has no row for the reads without N: add them as n_count 0
+    read_loss = (
+        alt.Chart(
+            polars.concat(
+                [
+                    tables.n_per_read,
+                    tables.sample_lane.select(
+                        *KEYS,
+                        polars.lit(0, polars.UInt16).alias("n_count"),
+                        (polars.col("total") - polars.col("n")).alias("n_reads"),
+                    ),
+                ]
+            )
+        )
+        .transform_filter(SELECTION_FILTER)
+        .transform_filter(pick_sample)
+        .transform_aggregate(n_reads="sum(n_reads)", groupby=["n_count", "read"])
+        .transform_joinaggregate(total="sum(n_reads)", groupby=["read"])
+        # reads with at least n_count Ns; those with more are lost at n_count
+        .transform_window(
+            at_least="sum(n_reads)",
+            sort=[{"field": "n_count", "order": "descending"}],
+            groupby=["read"],
+            frame=[None, 0],
+        )
+        .transform_calculate(
+            lost="datum.at_least - datum.n_reads",
+            fraction="(datum.at_least - datum.n_reads) / datum.total",
+        )
+        .mark_line(interpolate="step-after", point=True)
+        .encode(
+            x=alt.X("n_count:Q", title="Most N bases allowed in a read").axis(
+                tickMinStep=1
+            ),
+            y=alt.Y("fraction:Q", title="Reads lost").axis(format="%"),
+            color=read_color,
+            opacity=shown(pick_read),
+            tooltip=[
+                "read:N",
+                alt.Tooltip("n_count:Q", title="N bases allowed"),
+                alt.Tooltip("lost:Q", title="Reads lost", format=","),
+                alt.Tooltip("fraction:Q", title="Fraction lost", format=".4%"),
+            ],
+        )
+        .add_params(pick_read)
+        .properties(
+            title="Reads lost when filtering on N bases per read "
+            "(clicked sample, or all)",
+            width=FULL_WIDTH,
+            height=200,
+        )
+    )
+
     # -- G: N vs low-Q per cycle (all samples of the lane) -------------------
     n_series = [f"{kind} {read}" for kind in READ_SHADES for read in reads]
     n_series_colors = [
@@ -1034,12 +1243,14 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             overview,
             sample_cycle,
             n_per_read,
+            read_loss,
             n_vs_lowq,
             run_length,
             first_n,
             tile_map,
             tile_step * n_segments,
             spatial_view,
+            tile_views,
             tile_cycle,
             cell * len(range(1, max_cycle + 1, window)),
             interop_view,
@@ -1051,12 +1262,14 @@ def _assemble(
     overview,
     sample_cycle,
     n_per_read,
+    read_loss,
     n_vs_lowq,
     run_length,
     first_n,
     tile_map,
     tile_map_width,
     spatial_view,
+    tile_views,
     tile_cycle,
     tile_cycle_width,
     interop_view,
@@ -1073,6 +1286,7 @@ def _assemble(
             _section(
                 "N within reads",
                 _caption(n_per_read, CAPTIONS["n_per_read"], FULL_WIDTH),
+                _caption(read_loss, CAPTIONS["read_loss"], FULL_WIDTH),
                 _caption(n_vs_lowq, CAPTIONS["n_vs_lowq"], FULL_WIDTH),
                 _caption(run_length, CAPTIONS["run_length"], FULL_WIDTH),
                 _caption(first_n, CAPTIONS["first_n"], FULL_WIDTH),
@@ -1084,6 +1298,7 @@ def _assemble(
                     _caption(spatial_view, CAPTIONS["spatial"], 540),
                     spacing=48,
                 ).resolve_scale(color="independent"),
+                alt.hconcat(*tile_views, spacing=48).resolve_scale(color="independent"),
                 _caption(tile_cycle, CAPTIONS["tile_cycle"], tile_cycle_width),
                 *(
                     [_caption(interop_view, CAPTIONS["interop"], 420)]
@@ -1110,7 +1325,7 @@ def _table(frame: polars.DataFrame, formats: dict[str, str] | None = None) -> st
         cells = []
         for col, value in row.items():
             fmt = formats.get(col)
-            text = format(value, fmt) if fmt and value is not None else str(value)
+            text = "" if value is None else format(value, fmt) if fmt else str(value)
             badge = col == "status" and text in ("PASS", "WARN", "FAIL")
             cls = f' class="badge {text.lower()}"' if badge else ""
             cells.append(f"<td><span{cls}>{html.escape(text)}</span></td>")
@@ -1184,16 +1399,11 @@ def project_summary(tables: NspectorTables) -> polars.DataFrame:
     """One row per project: samples, reads, N rates and the worst flag status.
 
     A project's status is the worst flag on the read/lanes it was sequenced on
-    (flags are flowcell-level, so they apply to every project on that lane).
+    (flowcell-level flags apply to every project on that lane) or on one of its
+    samples.
     """
-    rank = {"PASS": 0, "WARN": 1, "FAIL": 2}
-    worst = (
-        _flags(tables)
-        .group_by("read", "lane")
-        .agg(polars.col("status").replace_strict(rank, return_dtype=polars.Int8).max())
-    )
     return (
-        tables.sample_lane.join(worst, on=["read", "lane"], how="left")
+        flag_rank(tables, _flags(tables))
         .group_by("project")
         .agg(
             polars.col("sample").n_unique().alias("samples"),
@@ -1207,14 +1417,12 @@ def project_summary(tables: NspectorTables) -> polars.DataFrame:
             polars.col("n").sum().alias("reads with N"),
             polars.col("n_bases").sum().alias("N bases"),
             polars.col("bases").sum(),
-            polars.col("status").fill_null(0).max(),
+            polars.col("status").max(),
         )
         .with_columns(
             (polars.col("reads with N") / polars.col("reads scanned")).alias("N rate"),
             (polars.col("N bases") / polars.col("bases")).alias("N per base"),
-            polars.col("status").replace_strict(
-                {v: k for k, v in rank.items()}, return_dtype=polars.Utf8
-            ),
+            status_name(),
         )
         .select(
             "project",
@@ -1314,6 +1522,7 @@ _PAGE = """<!DOCTYPE html>
     <div class="stat"><b>{n_rate}</b><span>overall N rate (reads with N)</span></div>
     <div class="stat"><b>{n_per_base}</b><span>N per sequenced base</span></div>
     <div class="stat"><b>{n_tiles}</b><span>tiles across {n_lanes} lane(s)</span></div>
+    <div class="stat"><b>{flagged_share}</b><span>of N bases on flagged tiles or cycles</span></div>
     <div class="stat"><b>{flag_badges}</b><span>anomaly flags</span></div>
   </div>
   <section><h2>Projects</h2><div class="scroll">{projects}</div></section>
@@ -1425,7 +1634,7 @@ def write_report(
             + "</div>"
         )
     else:
-        flags_html = "<p class='meta'>No tile, cell or dark-cycle flags.</p>"
+        flags_html = "<p class='meta'>No tile, cell, dark-cycle or sample flags.</p>"
     total_reads = int(tables.sample_lane["total"].sum())
     n_reads = int(tables.sample_lane["n"].sum())
     bases = int(tables.sample_lane["bases"].sum())
@@ -1451,6 +1660,9 @@ def write_report(
         n_rate=f"{n_reads / total_reads:.3%}" if total_reads else "n/a",
         n_per_base=f"{n_bases / bases:.4%}" if bases else "n/a",
         flag_badges=flag_badges,
+        flagged_share="n/a"
+        if (share := flagged_share(tables, flags)) is None
+        else f"{share:.1%}",
         projects=_table(project_summary(tables), TABLE_FORMATS),
         n_tiles=tables.tile_summary.select("lane", "tile").unique().height,
         n_lanes=tables.sample_lane["lane"].n_unique(),
@@ -1544,7 +1756,7 @@ def write_multiqc(tables: NspectorTables, output: pathlib.Path) -> list[pathlib.
         table = {
             "id": "nspector_flags",
             "section_name": "nspector: anomaly flags",
-            "description": "Tiles, tile-cycle cells and dark cycles with high N rates "
+            "description": "Tiles, tile-cycle cells, dark cycles and samples with high N rates "
             "(see nspector_flags.parquet).",
             "plot_type": "table",
             "pconfig": {"id": "nspector_flags_table", "title": "nspector: flags"},
@@ -1603,7 +1815,7 @@ def write_multiqc(tables: NspectorTables, output: pathlib.Path) -> list[pathlib.
         "#         format: '{:,.3f}'",
         "#     - n_status:",
         "#         title: 'N status'",
-        "#         description: 'Worst nspector flag on the sample lanes (PASS/WARN/FAIL)'",
+        "#         description: 'Worst nspector flag on the sample or its lanes (PASS/WARN/FAIL)'",
         "Sample\tpct_reads_with_n\tn_bases\tpct_reads_lowq\tn_status",
     ]
     lines += [
