@@ -47,21 +47,24 @@ A swap of `index` and `index2` is not reported separately, as the matching ignor
 
 ## Output
 
-A single CSV file named `<flowcell_name>_unexpected_indexes.csv` is written to `--output-path`.
+Two CSV files are written to `--output-path`. The first, `<flowcell_name>_unexpected_indexes.csv`, lists the matches.
 Each row describes one unexpected index observation:
 
 | Column | Description |
 |---|---|
 | `Lane` | Lane in which the unexpected index was found |
-| `Index` | The combined index string from the undetermined read |
+| `Undetermined_Index` | The combined index string from the undetermined read |
 | `Count` | Number of times this index was observed |
+| `Fraction` | `Count` divided by the undetermined reads searched: those of the other lanes for `expected`, those of all lanes for the reverse-complement orientations |
 | `Sample_Project` | Project to which the matching sample belongs |
 | `Lane_Project` | Lane to which the matching sample was assigned |
 | `index1` | Index 1 of the matching sample |
 | `index2` | Index 2 of the matching sample (empty for single-index samples) |
 | `Orientation` | `expected`, or the reverse-complement combination that matched (`index2_rc`, `index1_rc`, `both_rc`) |
 
-If no unexpected indexes are found the file is still written but will contain only the header row.
+The second, `<flowcell_name>_lane_summary.csv`, has one row per lane and orientation, with the columns `Lane`, `Lane_Count`, `Lane_Fraction` (sums over the distinct undetermined indexes) and `Orientation`.
+
+If no unexpected indexes are found, neither file is written.
 
 ## Example
 
@@ -76,11 +79,13 @@ The above command processes all undetermined FASTQ files in the flowcell directo
 
 ```text
 strainer_results/
+├── 20260310_LM43899_0385_A12GGASZR5_lane_summary.csv
 └── 20260310_LM43899_0385_A12GGASZR5_unexpected_indexes.csv
 ```
 
 ## Notes
 
+- To run Strainer together with the index discovery and Waif from a single pass over the undetermined files, see [Triage](triage.md).
 - Only the top 1000 most-common undetermined indexes per lane are considered. Extremely rare cross-lane contamination events below this threshold will not be reported.
 - Indexes containing four or more consecutive G bases (`GGGG`) are excluded from the analysis, as these are characteristic of sequencing errors on Illumina instruments rather than genuine index sequences.
 - The module performs fuzzy matching with at most one substitution per index. Two substitutions or any insertion/deletion will not be matched.

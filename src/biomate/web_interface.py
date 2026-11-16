@@ -485,8 +485,10 @@ MODULES: List[Dict[str, Any]] = [
             "against expected indexes from the Sample Sheet. It reads all "
             "Undetermined*R1*.fastq.gz files, filters poly-G artifacts, and "
             "compares observed indexes against expected ones across all lanes "
-            "(allowing 1 mismatch). Outputs CSV reports of unexpected indexes "
-            "and lane summaries."
+            "(allowing 1 mismatch). Sample indexes are also searched "
+            "reverse-complemented in every lane, to reveal an index entered "
+            "in the wrong orientation. Outputs CSV reports of unexpected "
+            "indexes and lane summaries."
         ),
         "parameters": [
             {
