@@ -1042,6 +1042,12 @@ def test_collapsed_flags_name_the_tiles_of_one_cycle(tmp_path):
         ("1101, 1102", "12", 2, "FAIL")
     ]
     assert "2 tile × cycle event(s) at 1 cycle position(s)" in verdict(listed, None)
+    # the row carries what a click needs to show it in the charts
+    tables = build_tables(scan_files([path], "python"))
+    tables.flags = build_flags(tables)
+    page = write_report([], tables, tmp_path).read_text()
+    assert 'class="jump" tabindex="0" data-read="R1" data-lane="1"' in page
+    assert 'data-tiles="1101 1102" onclick="jumpToFlag(this)"' in page
 
 
 def test_removal_costs(tmp_path):

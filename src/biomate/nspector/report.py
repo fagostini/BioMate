@@ -1404,8 +1404,25 @@ def _assemble(
     )
 
 
-def _table(frame: polars.DataFrame, formats: dict[str, str] | None = None) -> str:
-    """Render a small polars frame as an HTML table."""
+def _jump_attrs(row: dict) -> str:
+    """Attributes that make a flag row jump to its lane, read and tiles on click."""
+    # "2201, 2302 and 3 more": the tiles named in the row
+    tiles = (row.get("tile") or "").split(" and ")[0].replace(", ", " ")
+    return (
+        f' class="jump" tabindex="0" data-read="{html.escape(str(row["read"]))}"'
+        f' data-lane="{row["lane"]}" data-tiles="{html.escape(tiles)}"'
+        ' onclick="jumpToFlag(this)"'
+        " onkeydown=\"if (event.key === 'Enter') jumpToFlag(this)\""
+    )
+
+
+def _table(
+    frame: polars.DataFrame, formats: dict[str, str] | None = None, row_attrs=None
+) -> str:
+    """Render a small polars frame as an HTML table.
+
+    ``row_attrs(row)`` returns extra attributes for the row's ``<tr>``.
+    """
     formats = formats or {}
     head = "".join(f"<th>{html.escape(c)}</th>" for c in frame.columns)
     rows = []
@@ -1417,7 +1434,8 @@ def _table(frame: polars.DataFrame, formats: dict[str, str] | None = None) -> st
             badge = col == "status" and text in ("PASS", "WARN", "FAIL")
             cls = f' class="badge {text.lower()}"' if badge else ""
             cells.append(f"<td><span{cls}>{html.escape(text)}</span></td>")
-        rows.append(f"<tr>{''.join(cells)}</tr>")
+        attrs = row_attrs(row) if row_attrs else ""
+        rows.append(f"<tr{attrs}>{''.join(cells)}</tr>")
     return (
         f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
     )
@@ -1570,6 +1588,8 @@ _PAGE = """<!DOCTYPE html>
   #controls .vega-bindings {{ display: flex; flex-wrap: wrap; gap: 4px 24px; padding: 8px 0; }}
   #controls label {{ cursor: pointer; }}
   #controls .vega-bind-name {{ font-weight: 600; }}
+  tr.jump {{ cursor: pointer; }}
+  tr.jump:hover td, tr.jump:focus td {{ background: color-mix(in srgb, var(--accent) 18%, transparent); }}
   .badge {{ display: inline-block; padding: 0 8px; border-radius: 10px; font-weight: 600; font-size: 12px; }}
   .badge.pass {{ background: #d3f9d8; color: #2b8a3e; }}
   .badge.warn {{ background: #fff3bf; color: #a35c00; }}
@@ -1675,6 +1695,20 @@ _PAGE = """<!DOCTYPE html>
       .catch(console.error);
   }}
 
+  // show a flag's lane, read and tiles: the charts are re-drawn with those
+  // values, like on a theme switch
+  function jumpToFlag(row) {{
+    const view = window.nspectorView;
+    if (!view) return;
+    const keep = Object.fromEntries(controls.map((name) => [name, view.signal(name)]));
+    keep.lane_sel = Number(row.dataset.lane);
+    keep.read_sel = row.dataset.read;
+    const tiles = row.dataset.tiles.split(' ').filter(Boolean).map((tile) => ({{"tile": Number(tile)}}));
+    if (tiles.length) keep.pick_tile = tiles;
+    render(document.documentElement.dataset.theme, keep)
+      .then(() => document.getElementById('controls').scrollIntoView());
+  }}
+
   function toggleTheme() {{
     const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = theme;
@@ -1746,13 +1780,15 @@ def write_report(
         flags_html = (
             f'<p class="meta">{flags.height} flag(s): {n_fail} FAIL, '
             f"{flags.height - n_fail} WARN. Consecutive cycles, and tiles hit at "
-            "the same cycles, are listed as one row with the largest rate.</p>"
+            "the same cycles, are listed as one row with the largest rate. Click a "
+            "row to show its lane, read and tiles in the charts.</p>"
             '<div class="scroll">'
-            + _table(listed.head(MAX_FLAG_ROWS).select(used), formats)
+            + _table(listed.head(MAX_FLAG_ROWS).select(used), formats, _jump_attrs)
             + "</div>"
             + (
                 f"<details><summary>Show the other {rest.height} row(s)</summary>"
-                f'<div class="scroll">{_table(rest, formats)}</div></details>'
+                f'<div class="scroll">{_table(rest, formats, _jump_attrs)}</div>'
+                "</details>"
                 if rest.height
                 else ""
             )
