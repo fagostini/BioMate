@@ -332,6 +332,13 @@ class TestReport:
         assert "vegaEmbed" in html
         assert not re.search(r"<script[^>]+src=", html)
         assert "<link" not in html
+        # the spec is embedded as gzip + base64 and unpacks to the chart
+        import base64
+        import gzip
+
+        packed = re.search(r'id="spec">([^<]+)</script>', html).group(1)
+        spec = json.loads(gzip.decompress(base64.b64decode(packed)))
+        assert spec["datasets"] and "vconcat" in spec
 
     def test_multiqc_files(self, built, tmp_path):
         paths = write_multiqc(built[1], tmp_path)
