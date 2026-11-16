@@ -7,6 +7,8 @@ import pytest
 
 from biomate.index.index import (
     compile_index_regex,
+    group_indexes,
+    main,
     validate_args,
     write_results,
 )
@@ -93,12 +95,14 @@ class TestValidateArgs:
     ):
         """Build an index Namespace with the given overrides."""
         return argparse.Namespace(
-            input=input_path,
+            input=[input_path],
             index_regex=index_regex,
             index_file=index_file,
             output=output,
             distance=distance,
             error_type=error_type,
+            min_count=1,
+            threads=1,
         )
 
     def test_valid_args_returned(self, tmp_path):
@@ -113,6 +117,16 @@ class TestValidateArgs:
         """A path that does not exist raises FileNotFoundError."""
         args = self._make_args(tmp_path / "missing.fastq")
         with pytest.raises(FileNotFoundError):
+            validate_args(args)
+
+    def test_duplicate_input_names_raise(self, tmp_path):
+        """Inputs with the same file name would share an output directory."""
+        for d in ("a", "b"):
+            (tmp_path / d).mkdir()
+            (tmp_path / d / "s.fastq").write_text("")
+        args = self._make_args(tmp_path / "a" / "s.fastq")
+        args.input.append(tmp_path / "b" / "s.fastq")
+        with pytest.raises(ValueError):
             validate_args(args)
 
 
@@ -175,32 +189,36 @@ class TestWriteResults:
 # ---------------------------------------------------------------------------
 
 
-def _main_args(input_path, pattern, engine="regex"):
-    """Build a Namespace for index main without an output directory."""
+def _main_args(input_path, pattern, engine="regex", output=None):
+    """Build a Namespace for index main; input_path may be a list."""
     return argparse.Namespace(
-        input=input_path,
+        input=input_path if isinstance(input_path, list) else [input_path],
         index_regex=pattern,
         index_file=None,
-        output=None,
+        output=output,
         distance=1,
         error_type="s",
         engine=engine,
+        min_count=1,
+        threads=1,
         verbose=False,
         quiet=False,
     )
 
 
-def _write_fastq(path, sequences):
-    """Write sequences as a plain FASTQ file."""
+def _write_fastq(path, sequences, indexes=None):
+    """Write sequences as a plain FASTQ file, optionally with header indexes."""
+    names = [
+        f"r{i}" if indexes is None else f"r{i} 1:N:0:{indexes[i]}"
+        for i in range(len(sequences))
+    ]
     path.write_text(
-        "".join(f"@r{i}\n{s}\n+\n{'I' * len(s)}\n" for i, s in enumerate(sequences))
+        "".join(f"@{n}\n{s}\n+\n{'I' * len(s)}\n" for n, s in zip(names, sequences))
     )
 
 
 def test_main_prints_results_without_output(tmp_path, capsys):
     """Without --output the matches go to stdout."""
-    from biomate.index.index import main
-
     f = tmp_path / "r.fastq"
     _write_fastq(f, ["AAACGTACGTAA"])
     main(_main_args(f, "ACGTACGT"))
@@ -210,11 +228,119 @@ def test_main_prints_results_without_output(tmp_path, capsys):
 def test_rust_engine_is_skipped_for_regex_syntax(tmp_path, capsys):
     """A pattern with regex syntax gives the regex-engine result on both engines."""
     pytest.importorskip("biomate_kernels")
-    from biomate.index.index import main
-
     f = tmp_path / "r.fastq"
     _write_fastq(f, ["AAACGTACGTAA"])
     main(_main_args(f, "ACG[TA]ACGT", engine="regex"))
     expected = capsys.readouterr().out
     main(_main_args(f, "ACG[TA]ACGT", engine="rust"))
     assert expected and capsys.readouterr().out == expected
+
+
+# ---------------------------------------------------------------------------
+# index discovery and multiple inputs
+# ---------------------------------------------------------------------------
+
+
+class TestGroupIndexes:
+    """Tests for group_indexes."""
+
+    def test_one_mismatch_joins_most_frequent_seed(self):
+        """A less frequent index within the distance joins the seed."""
+        groups = group_indexes(Counter({"ACGT+TTTT": 10, "ACGA+TTTT": 2}), 1)
+        assert groups == {"ACGT+TTTT": [(0, "ACGT+TTTT", 10), (1, "ACGA+TTTT", 2)]}
+
+    def test_beyond_distance_or_other_length_seeds_new_group(self):
+        """Indexes too far away or of another length start their own group."""
+        groups = group_indexes(Counter({"ACGT": 10, "AAAA": 5, "ACGTA": 3}), 1)
+        assert list(groups) == ["ACGT", "AAAA", "ACGTA"]
+
+    def test_distance_zero_is_exact_count(self):
+        """With distance 0 every distinct index is its own group."""
+        groups = group_indexes(Counter({"ACGT": 3, "ACGA": 1}), 0)
+        assert groups == {"ACGT": [(0, "ACGT", 3)], "ACGA": [(0, "ACGA", 1)]}
+
+
+def test_group_indexes_matches_brute_force():
+    """Many seeds switch to the variant lookup; results match a plain scan."""
+    import random
+
+    rng = random.Random(0)
+    counts = Counter(
+        {
+            "".join(rng.choice("ACG") for _ in range(5)): rng.randint(1, 50)
+            for _ in range(150)
+        }
+    )
+    expected: dict = {}
+    for index, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        for seed, members in expected.items():
+            dist = sum(a != b for a, b in zip(seed, index))
+            if dist <= 1:
+                members.append((dist, index, count))
+                break
+        else:
+            expected[index] = [(0, index, count)]
+    assert len(expected) > 20  # more seeds than variants of a 5-mer
+    assert group_indexes(counts, 1) == expected
+
+
+def test_main_discovers_header_indexes(tmp_path, capsys):
+    """Without a pattern the header indexes are counted and grouped."""
+    f = tmp_path / "r.fastq"
+    idx = ["ACGT+TTTT"] * 3 + ["ACGA+TTTT", "GGCC+AATT"]
+    _write_fastq(f, ["AAAA"] * 5, idx)
+    main(_main_args(f, None))
+    assert capsys.readouterr().out.splitlines() == [
+        "ACGT+TTTT 0 ACGT+TTTT 3 60.00%",
+        "ACGT+TTTT 1 ACGA+TTTT 1 20.00%",
+        "GGCC+AATT 0 GGCC+AATT 1 20.00%",
+    ]
+
+
+def test_main_keeps_results_per_input_file(tmp_path, capsys):
+    """Several inputs give one block / output subdirectory per file."""
+    a, b = tmp_path / "a.fastq", tmp_path / "b.fastq"
+    _write_fastq(a, ["AAAA"], ["ACGT"])
+    _write_fastq(b, ["AAAA"], ["GGCC"])
+    main(_main_args([a, b], None))
+    assert capsys.readouterr().out.splitlines() == [
+        f"# {a}",
+        "ACGT 0 ACGT 1 100.00%",
+        f"# {b}",
+        "GGCC 0 GGCC 1 100.00%",
+    ]
+
+    out = tmp_path / "out"
+    main(_main_args([a, b], None, output=out))
+    assert (out / "a" / "indexes_matches.txt").read_text() == "ACGT 0 ACGT 1 100.00%\n"
+    assert (out / "b" / "indexes_groups.txt").read_text() == "GGCC 1 100.00%\n"
+
+
+def test_main_min_count_drops_rare_indexes(tmp_path, capsys):
+    """Indexes below --min-count are left out and reported as one total."""
+    f = tmp_path / "r.fastq"
+    idx = ["ACGT+TTTT"] * 3 + ["ACGA+TTTT", "GGCC+AATT"]
+    _write_fastq(f, ["AAAA"] * 5, idx)
+    args = _main_args(f, None)
+    args.min_count = 2
+    main(args)
+    assert capsys.readouterr().out.splitlines() == [
+        "ACGT+TTTT 0 ACGT+TTTT 3 60.00%",
+        "# 2 reads in 2 indexes below --min-count 2 (40.00%)",
+    ]
+
+
+def test_main_threads_give_same_files(tmp_path):
+    """Parallel inputs write the same per-file results as a serial run."""
+    a, b = tmp_path / "a.fastq", tmp_path / "b.fastq"
+    _write_fastq(a, ["AAAA"] * 2, ["ACGT", "ACGA"])
+    _write_fastq(b, ["AAAA"], ["GGCC"])
+    for threads in (1, 2):
+        args = _main_args([a, b], None, output=tmp_path / f"t{threads}")
+        args.threads = threads
+        main(args)
+    for name in ("a", "b"):
+        for out in ("indexes_matches.txt", "indexes_groups.txt"):
+            serial = (tmp_path / "t1" / name / out).read_text()
+            assert serial
+            assert (tmp_path / "t2" / name / out).read_text() == serial
