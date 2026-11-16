@@ -1,6 +1,6 @@
 # Index
 
-This module allows you to scan a fastq file, either gzipped or uncompressed, and extract the sequences that match a given pattern, or a list of patterns.
+This module allows you to scan one or more FASTQ files, either gzipped or uncompressed, and extract the sequences that match a given pattern, or a list of patterns. Without a pattern, it counts and groups all the indexes found in the read headers.
 
 ## Usage
 
@@ -8,12 +8,20 @@ The command `biomate index` takes at least two arguments: the path to a FASTQ fi
 
 ## Options
 
-- `--input`: Path to the input FASTQ file. It can be gzipped or uncompressed.
+- `--input`: Path(s) to the input FASTQ file(s). They can be gzipped or uncompressed. Results are kept per file: with several inputs, standard output prints a `# <path>` line before each file's results, and `--output` gets one subdirectory per input file, named after the file without its `.fastq.gz`/`.fq.gz`/`.fasta`/`.fa` suffix (input file names must therefore be distinct).
 - `--output`: Path to the output directory where the results will be saved. If not specified, the results will be printed to the standard output. The output directory will contain two files: `indexing_patterns.txt` with the statistics for each matched pattern, and `indexing_errors.txt` with the statistics for each edit distance.
 - `--index-regex`: Regular expression to search for in the sequences.
 - `--index-file`: Path to a file containing a list of patterns or regular expressions to search for in the sequences. Each line in the file should contain a single pattern or regular expression.
 - `--distance`: Maximum edit distance to consider when matching patterns. Default is 0 (exact match).
+- `--min-count`: Index discovery only. Indexes seen fewer times are not grouped or listed; their read and index totals are reported in one `# ... below --min-count ...` line (at the end of standard output, or of `indexes_groups.txt`). Default is 1 (keep all). On large files most distinct indexes are sequencing noise seen once or twice, so a small cutoff (e.g. 10) cuts grouping time, memory and output size by orders of magnitude.
+- `--threads`: Number of input files processed in parallel. Only used with several inputs and `--output`; standard output is always written one file at a time. Default is 1.
 - `--error-type`: Type of error to consider when calculating the edit distance. Can be insertions (`i`), deletions (`d`), substitutions (`s`), or any error (`e`). Default is `s`.
+
+## Index discovery
+
+When neither `--index-regex` nor `--index-file` is given, the module reads the index from each read header (the text after the last `:` of the comment, e.g. `ACGTACGT+TTTTGGGG` in `@... 1:N:0:ACGTACGT+TTTTGGGG`) and groups similar indexes. Indexes are visited from most to least frequent: each joins the first, more frequent, index of the same length within `--distance` substitutions (Hamming distance; `--error-type` and `--engine` are ignored), otherwise it starts a new group. With `--distance 0` this is a plain count of identical indexes.
+
+Each output line is `<group index> <distance> <index> <count> <percentage>`, groups sorted by their total count. With `--output`, these lines go to `indexes_matches.txt`, and `indexes_groups.txt` holds one `<group index> <total count> <percentage>` line per group.
 
 ## Example of Standard Output
 

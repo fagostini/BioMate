@@ -3,7 +3,11 @@
 import argparse
 import logging
 import pathlib
+import sys
 from collections import Counter, defaultdict
+from itertools import combinations, product
+from math import comb
+from multiprocessing import Pool
 
 import dnaio
 import regex as re
@@ -39,8 +43,9 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     parser.add_argument(
         "--input",
         type=pathlib.Path,
+        nargs="+",
         required=True,
-        help="Path to the input FastQ file",
+        help="Path(s) to the input FASTA/FASTQ file(s); results are kept per file",
     )
     parser.add_argument(
         "--output",
@@ -48,18 +53,20 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         required=False,
         help="Path to the output path where the results will be saved",
     )
-    index_group = parser.add_mutually_exclusive_group(required=True)
+    index_group = parser.add_mutually_exclusive_group(required=False)
     index_group.add_argument(
         "--index-regex",
         type=str,
         default=None,
-        help="Regular expression to search in the FastQ file",
+        help="Regular expression to search in the FastQ file. Without it and "
+        "--index-file, the indexes in the read headers are counted and grouped",
     )
     index_group.add_argument(
         "--index-file",
         type=pathlib.Path,
         default=None,
-        help="Path to the index file. One index per line",
+        help="Path to the index file. One index per line. Without it and "
+        "--index-regex, the indexes in the read headers are counted and grouped",
     )
     distance_group = parser.add_argument_group("Distance Options")
     distance_group.add_argument(
@@ -82,6 +89,19 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         default="regex",
         help="Search engine: 'regex' (default) or 'rust' (requires the optional biomate_kernels package)",
     )
+    parser.add_argument(
+        "--min-count",
+        type=int,
+        default=1,
+        help="Index discovery only: ignore header indexes seen fewer times "
+        "(their total is reported separately). Default: 1, keep all",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help="Number of input files processed in parallel (with --output only)",
+    )
     parser.set_defaults(parse=validate_args, run=main)
 
     return parser
@@ -91,9 +111,24 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     """
     Validate the command line arguments.
     """
-    if not args.input.is_file():
-        raise FileNotFoundError(f"Input file {args.input} does not exist.")
+    if args.min_count < 1:
+        raise ValueError("--min-count must be >= 1.")
+    if args.threads < 1:
+        raise ValueError("--threads must be >= 1.")
+    for path in args.input:
+        if not path.is_file():
+            raise FileNotFoundError(f"Input file {path} does not exist.")
+    names = [_output_name(path) for path in args.input]
+    if len(set(names)) != len(names):
+        raise ValueError(
+            "Input files must have distinct names: per-file results would overwrite each other."
+        )
     return args
+
+
+def _output_name(path: pathlib.Path) -> str:
+    """Input file name without the .gz and FASTA/FASTQ suffixes."""
+    return re.sub(r"\.f(ast)?[aq](\.gz)?$", "", path.name)
 
 
 def compile_index_regex(index_regex: str, distance: int, error_type: str) -> re.Pattern:
@@ -153,28 +188,153 @@ def write_results(
             output_file.write(f"{key} {counts} {counts / total_records:.2%}\n")
 
 
-def main(args: argparse.Namespace) -> None:
-    """Main function."""
-    if not args.output:
-        args.quiet = True
-    setup_logging(args)
+def extract_header_indexes(path: pathlib.Path) -> tuple[Counter, int]:
+    """Count the indexes in the read headers (``... 1:N:0:ACGT+TTTT``).
 
-    logging.info(f"Input file: {args.input}")
-    input_type = _detect_input_type(args.input.name)
-    logging.info(f"Input type: {input_type}")
-    logging.info(f"Output file: {args.output}")
-    patterns_list = []
-    if args.index_regex:
-        logging.info(f"Using regex for indexing: {args.index_regex}")
-        patterns_list.append(args.index_regex)
-    if args.index_file:
-        logging.info(f"Using index file: {args.index_file}")
-        with open(args.index_file, "r") as index_file:
-            for line in index_file:
-                line = line.strip()
-                if line:
-                    patterns_list.append(line)
+    Returns the index counter and the total number of records.
+    """
+    indexes: Counter = Counter()
+    total_records = 0
+    no_index = 0
+    with dnaio.open(path) as reader:
+        for record in reader:
+            total_records += 1
+            parts = record.name.split(" ", 1)
+            if len(parts) < 2 or ":" not in parts[1]:
+                no_index += 1
+                continue
+            indexes[parts[1].split(":")[-1]] += 1
+    if no_index:
+        logging.warning(f"{no_index} records in {path} have no index in the header")
+    return indexes, total_records
 
+
+_BASES = "ACGTN"
+
+
+def _neighbours(index: str, distance: int):
+    """Yield ``(variant, k)`` for every string ``k`` (1..distance) substitutions
+    away from ``index``, using A/C/G/T/N and keeping ``+`` separators fixed."""
+    positions = [i for i, c in enumerate(index) if c != "+"]
+    for k in range(1, distance + 1):
+        for pos in combinations(positions, k):
+            for subs in product(_BASES, repeat=k):
+                if any(index[p] == b for p, b in zip(pos, subs)):
+                    continue
+                chars = list(index)
+                for p, b in zip(pos, subs):
+                    chars[p] = b
+                yield "".join(chars), k
+
+
+def group_indexes(
+    counts: Counter, distance: int
+) -> dict[str, list[tuple[int, str, int]]]:
+    """Greedily group indexes within ``distance`` substitutions.
+
+    The most frequent index seeds a group; each less frequent index joins the
+    first (most frequent) seed of the same length within the Hamming distance,
+    otherwise it seeds a new group. Members are ``(distance, index, count)``.
+    """
+    groups: dict[str, list[tuple[int, str, int]]] = {}
+    rank: dict[str, int] = {}
+    for index, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        best = None
+        if distance > 0:
+            n_variants = sum(
+                comb(len(index), k) * (len(_BASES) - 1) ** k
+                for k in range(1, distance + 1)
+            )
+            # Each index costs min(seeds, variants): scanning the seeds is
+            # cheap early on, looking up the variants once seeds pile up
+            if len(groups) <= n_variants:
+                for seed in groups:
+                    if len(seed) == len(index):
+                        dist = sum(a != b for a, b in zip(seed, index))
+                        if dist <= distance:
+                            best = (dist, seed)
+                            break
+            else:
+                hits = [
+                    (rank[v], k, v)
+                    for v, k in _neighbours(index, distance)
+                    if v in rank
+                ]
+                if hits:
+                    _, dist, seed = min(hits)
+                    best = (dist, seed)
+        if best is None:
+            rank[index] = len(rank)
+            groups[index] = [(0, index, count)]
+        else:
+            groups[best[1]].append((best[0], index, count))
+    return groups
+
+
+def _run_discovery(
+    path: pathlib.Path, args: argparse.Namespace, out_dir: pathlib.Path | None
+) -> None:
+    """Count and group the header indexes of one input file."""
+    if args.error_type != "s":
+        logging.warning("Index discovery groups by substitutions only")
+    counts, total_records = extract_header_indexes(path)
+    if not counts:
+        logging.warning("   No indexes found.")
+        return
+    # Rare indexes (mostly sequencing noise) are dropped before grouping:
+    # it bounds grouping time, memory and output size on large files
+    below_reads = below_indexes = 0
+    if args.min_count > 1:
+        kept = Counter()
+        for index, count in counts.items():
+            if count >= args.min_count:
+                kept[index] = count
+            else:
+                below_reads += count
+                below_indexes += 1
+        counts = kept
+    groups = group_indexes(counts, args.distance)
+    del counts
+    ordered = sorted(
+        groups.items(), key=lambda kv: (-sum(c for _, _, c in kv[1]), kv[0])
+    )
+    below = (
+        f"{below_reads} reads in {below_indexes} indexes below --min-count "
+        f"{args.min_count} ({below_reads / total_records:.2%})"
+    )
+    if below_indexes:
+        logging.info(below)
+
+    if out_dir is None:
+        _write_discovery(ordered, total_records, sys.stdout)
+        if below_indexes:
+            print(f"# {below}")
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with open(out_dir.joinpath("indexes_matches.txt"), "w") as matches:
+        _write_discovery(ordered, total_records, matches)
+    with open(out_dir.joinpath("indexes_groups.txt"), "w") as output_file:
+        for seed, members in ordered:
+            total = sum(c for _, _, c in members)
+            output_file.write(f"{seed} {total} {total / total_records:.2%}\n")
+        if below_indexes:
+            output_file.write(f"# {below}\n")
+
+
+def _write_discovery(ordered: list, total_records: int, handle) -> None:
+    """Stream one line per grouped index to ``handle``."""
+    for seed, members in ordered:
+        for dist, index, cnt in members:
+            handle.write(f"{seed} {dist} {index} {cnt} {cnt / total_records:.2%}\n")
+
+
+def _run_patterns(
+    path: pathlib.Path,
+    patterns_list: list[str],
+    args: argparse.Namespace,
+    out_dir: pathlib.Path | None,
+) -> None:
+    """Search one input file for each pattern."""
     for i, pattern in enumerate(patterns_list, start=1):
         logging.info(f"Processing pattern {i}: {pattern}")
 
@@ -219,7 +379,7 @@ def main(args: argparse.Namespace) -> None:
             for idx in fallback:
                 count_match(chunk[idx])
 
-        with dnaio.open(args.input) as reader:
+        with dnaio.open(path) as reader:
             chunk: list[str] = []
             for record in reader:
                 if rust_kernel is None:
@@ -237,8 +397,8 @@ def main(args: argparse.Namespace) -> None:
             logging.warning("   No matches found.")
             continue
 
-        if args.output:
-            write_results(results, total_records, args.output, file_index=i)
+        if out_dir is not None:
+            write_results(results, total_records, out_dir, file_index=i)
         else:
             for key, value in results.items():
                 for seq, cnt in _sorted_by_count(value):
@@ -246,3 +406,58 @@ def main(args: argparse.Namespace) -> None:
                     print(
                         f"{key} {' '.join(list(seq))} {cnt} {cnt / total_records:.2%}"
                     )
+
+
+def main(args: argparse.Namespace) -> None:
+    """Main function."""
+    if not args.output:
+        args.quiet = True
+    setup_logging(args)
+
+    logging.info(f"Output file: {args.output}")
+    patterns_list = []
+    if args.index_regex:
+        logging.info(f"Using regex for indexing: {args.index_regex}")
+        patterns_list.append(args.index_regex)
+    if args.index_file:
+        logging.info(f"Using index file: {args.index_file}")
+        with open(args.index_file, "r") as index_file:
+            for line in index_file:
+                line = line.strip()
+                if line:
+                    patterns_list.append(line)
+    if not patterns_list:
+        logging.info("No index pattern given: grouping the header indexes")
+
+    multiple = len(args.input) > 1
+    jobs = []
+    for path in args.input:
+        out_dir = args.output
+        if multiple and out_dir is not None:
+            out_dir = out_dir / _output_name(path)
+        jobs.append((path, patterns_list, args, out_dir))
+
+    # Workers would interleave their stdout, so only files run in parallel
+    if args.threads > 1 and multiple and args.output is not None:
+        with Pool(min(args.threads, len(jobs))) as pool:
+            pool.starmap(_process_file, jobs)
+        return
+    for job in jobs:
+        if multiple and args.output is None:
+            print(f"# {job[0]}")
+        _process_file(*job)
+
+
+def _process_file(
+    path: pathlib.Path,
+    patterns_list: list[str],
+    args: argparse.Namespace,
+    out_dir: pathlib.Path | None,
+) -> None:
+    """Search or discover the indexes of one input file."""
+    logging.info(f"Input file: {path}")
+    logging.info(f"Input type: {_detect_input_type(path.name)}")
+    if patterns_list:
+        _run_patterns(path, patterns_list, args, out_dir)
+    else:
+        _run_discovery(path, args, out_dir)
