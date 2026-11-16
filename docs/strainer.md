@@ -43,7 +43,8 @@ With the indexes as written in the sample sheet (`Orientation` = `expected`), re
 
 Each sample is also searched with its indexes reverse-complemented: `index2_rc`, `index1_rc` and `both_rc` (only `index1_rc` for single-index samples).
 These are searched in every lane, the sample's own included: an index entered in the wrong orientation leaves the sample undetermined in its own lane.
-A swap of `index` and `index2` is not reported separately, as the matching ignores the position of each index within the combined string.
+A reverse-complemented index must match exactly (no substitution) and in its own half of the combined string (`index` before the `+`, `index2` after it): a wrongly oriented sample shows up as its exact reverse complement, in bulk.
+A swap of `index` and `index2` is not reported separately: with the indexes as written in the sample sheet, the matching ignores the position of each index within the combined string.
 
 ## Output
 

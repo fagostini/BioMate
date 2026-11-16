@@ -61,7 +61,6 @@ def test_main_writes_every_report(tmp_path, threads):
         unexpected.select("Lane", "Undetermined_Index", "Orientation").rows()
     ) == [
         ("L001", "GAACTGAGCG+TCGTGGAGCG", "index2_rc"),
-        ("L001", "GAACTGAGCT+TCGTGGAGCG", "index2_rc"),
         ("L002", "GAACTGAGCG+CGCTCCACGA", "expected"),
     ]
     assert (out / "FC_lane_summary.csv").is_file()

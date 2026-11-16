@@ -38,6 +38,8 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
 
 def _scan(path: pathlib.Path) -> tuple[int, list[dict], list[tuple[str, int]]]:
     """Count one file; return only what the reports need (workers pickle it)."""
+    # Serial count: the threaded inflate of headers.py measured 2.5x slower
+    # on a 4.7 GB NextSeq undetermined file (234 s against 90 s)
     counts = count_header_indexes(path)
     return (
         sum(counts.values()),
@@ -85,9 +87,9 @@ def main(args: argparse.Namespace) -> None:
     sample_sheet = args.sample_sheet or args.input_path / "SampleSheet.csv"
     sample_sheet_indexes = strainer.extract_indexes_from_sample_sheet(sample_sheet)
 
-    files = sorted(args.input_path.glob("**/Undetermined*R1*.fastq.gz"))
+    files = strainer.find_undetermined(args.input_path)
     logging.info(f"Counting the header indexes of {len(files)} undetermined files...")
-    if args.threads > 1:
+    if args.threads > 1 and len(files) > 1:
         with Pool(min(args.threads, len(files))) as pool:
             scans = pool.map(_scan, files)
     else:

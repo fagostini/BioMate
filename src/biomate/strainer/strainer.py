@@ -129,6 +129,21 @@ def extract_indexes_from_sample_sheet(
     return data
 
 
+def find_undetermined(input_path: pathlib.Path) -> list[pathlib.Path]:
+    """Find the undetermined R1 files under ``input_path``.
+
+    A link and its target are the same reads, so they count once; a broken
+    link (e.g. a run folder copied from another machine) is skipped.
+    """
+    files: dict[pathlib.Path, pathlib.Path] = {}
+    for f in sorted(input_path.glob("**/Undetermined*R1*.fastq.gz")):
+        if not f.is_file():
+            logging.warning(f"Skipping {f}: broken link")
+            continue
+        files.setdefault(f.resolve(), f)
+    return list(files.values())
+
+
 def extract_indexes_from_undetermined_file(
     undetermined_file_path: pathlib.Path,
 ) -> list[dict[str, str | int | float]]:
@@ -214,11 +229,17 @@ def search_for_unexpected_indexes(
 ) -> polars.DataFrame:
     """Search for the sample sheet indexes among the undetermined reads.
 
-    Allows up to 1 mismatch per index. The indexes as given in the sample
-    sheet ("expected") are searched in the other lanes only; their
+    The indexes as given in the sample sheet ("expected") are searched in
+    the other lanes only, allowing up to 1 mismatch per index; their
     reverse-complement combinations are searched in every lane, the sample's
     own included (a wrongly oriented index leaves the sample undetermined in
     its own lane). ``Fraction`` is relative to the reads searched.
+
+    "expected" indexes may match anywhere in the combined index string; the
+    reverse complements must match in their own half (index1 before ``+``,
+    index2 after) and exactly: a wrongly oriented sample gives its exact
+    reverse complement in bulk, while a match with a mismatch or spanning the
+    separator is mostly another index or a shifted read.
     """
     results = []
     und_rows = undetermined_df.rows()
@@ -232,14 +253,22 @@ def search_for_unexpected_indexes(
             expected = label == "expected"
             total_count = total_all - lane_totals[ss_lane] if expected else total_all
             patterns = [
-                regex.compile(r"(" + regex.escape(index) + "){s<=1}")
+                regex.compile(
+                    r"(" + regex.escape(index) + "){s<=%d}" % (1 if expected else 0)
+                )
                 for index in (index1, index2)
                 if index is not None
             ]
             for und_lane, und_index, und_count in und_rows:
                 if expected and und_lane == ss_lane:
                     continue
-                if all(pattern.search(und_index) for pattern in patterns):
+                if expected:
+                    targets = [und_index] * len(patterns)
+                else:
+                    targets = und_index.split("+")
+                    if len(targets) < len(patterns):
+                        continue
+                if all(p.search(t) for p, t in zip(patterns, targets)):
                     results.append(
                         {
                             "Lane": und_lane,
@@ -371,7 +400,7 @@ def main(args: argparse.Namespace) -> None:
     sample_sheet_indexes = extract_indexes_from_sample_sheet(sample_sheet)
 
     # Recursively find all undetermined FASTQ files in the input directory
-    undetermined_files = list(args.input_path.glob("**/Undetermined*R1*.fastq.gz"))
+    undetermined_files = find_undetermined(args.input_path)
     logging.debug(f"Found {len(undetermined_files)} undetermined FASTQ files.")
 
     logging.info("Extracting indexes from undetermined FASTQ files...")

@@ -18,6 +18,7 @@ from biomate.strainer.strainer import (
     extract_indexes_from_sample_sheet,
     clean_results,
     extract_indexes_from_undetermined_file,
+    find_undetermined,
     main,
     search_for_unexpected_indexes,
     validate_args,
@@ -491,3 +492,46 @@ def test_clean_results_keeps_own_lane_orientation_hits():
     assert kept.get_column("Orientation").to_list() == ["index2_rc"]
     expected = results.with_columns(polars.lit("expected").alias("Orientation"))
     assert clean_results(expected, ss_df).is_empty()
+
+
+def test_find_undetermined_skips_broken_links_and_duplicates(tmp_path):
+    """A link to a found file counts once; a broken link is skipped."""
+    real = tmp_path / "Demultiplexing_0" / "Undetermined_S0_L001_R1_001.fastq.gz"
+    real.parent.mkdir()
+    write_fastq_gz(real, [(illumina_header(), "ACGT", "####")])
+    links = tmp_path / "Demultiplexing"
+    links.mkdir()
+    (links / real.name).symlink_to(real)
+    (links / "Undetermined_S0_L002_R1_001.fastq.gz").symlink_to(tmp_path / "gone")
+    assert [f.resolve() for f in find_undetermined(tmp_path)] == [real]
+
+
+def test_orientation_match_must_not_span_the_separator():
+    """A shifted index2 ("+TAGAGAG") is not a reverse-complemented index1."""
+    ss_df = _make_ss_df(
+        [
+            {
+                "Lane": "L001",
+                "Sample_Project": "P",
+                "index": "CTCTCTAC",
+                "index2": "ATAGAGAG",
+            }
+        ]
+    )
+    und_df = _make_und_df([{"Lane": "L001", "Index": "CCTAAGAC+TAGAGAGG", "Count": 9}])
+    assert search_for_unexpected_indexes(ss_df, und_df).is_empty()
+
+
+def test_orientation_match_is_exact():
+    """One substitution away from a reverse complement is another index."""
+    ss_df = _make_ss_df(
+        [{"Lane": "L001", "Sample_Project": "P", "index": "TCCTGAGC", "index2": None}]
+    )
+    und_df = _make_und_df(
+        [
+            {"Lane": "L001", "Index": "GCTCAGGA", "Count": 9},
+            {"Lane": "L001", "Index": "GCTCATGA", "Count": 5},
+        ]
+    )
+    result = search_for_unexpected_indexes(ss_df, und_df)
+    assert result.get_column("Undetermined_Index").to_list() == ["GCTCAGGA"]
