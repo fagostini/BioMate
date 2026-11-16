@@ -37,7 +37,13 @@ An undetermined read is flagged as unexpected if:
 - Its combined index string contains a sequence that matches `index` within **one substitution** (`s≤1`), **and**
 - If `index2` is present, the combined index string also contains a sequence matching `index2` within one substitution.
 
-Reads from the same lane as the sample are never flagged.
+With the indexes as written in the sample sheet (`Orientation` = `expected`), reads from the same lane as the sample are never flagged.
+
+### Index orientation
+
+Each sample is also searched with its indexes reverse-complemented: `index2_rc`, `index1_rc` and `both_rc` (only `index1_rc` for single-index samples).
+These are searched in every lane, the sample's own included: an index entered in the wrong orientation leaves the sample undetermined in its own lane.
+A swap of `index` and `index2` is not reported separately, as the matching ignores the position of each index within the combined string.
 
 ## Output
 
@@ -53,6 +59,7 @@ Each row describes one unexpected index observation:
 | `Lane_Project` | Lane to which the matching sample was assigned |
 | `index1` | Index 1 of the matching sample |
 | `index2` | Index 2 of the matching sample (empty for single-index samples) |
+| `Orientation` | `expected`, or the reverse-complement combination that matched (`index2_rc`, `index1_rc`, `both_rc`) |
 
 If no unexpected indexes are found the file is still written but will contain only the header row.
 

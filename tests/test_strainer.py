@@ -16,6 +16,7 @@ from tests.conftest import (
 )
 from biomate.strainer.strainer import (
     extract_indexes_from_sample_sheet,
+    clean_results,
     extract_indexes_from_undetermined_file,
     main,
     search_for_unexpected_indexes,
@@ -331,8 +332,48 @@ class TestSearchForUnexpectedIndexes:
             "Lane_Project",
             "index1",
             "index2",
+            "Orientation",
         }
         assert set(result.columns) == expected_cols
+
+    def test_reverse_complemented_index2_flagged_in_own_lane(self):
+        """A wrongly oriented index2 shows up undetermined in the sample's lane."""
+        ss_df = _make_ss_df(
+            [
+                {
+                    "Lane": "L001",
+                    "Sample_Project": "ProjA",
+                    "index": "AACCGGTA",
+                    "index2": "AAAACCCC",
+                },
+            ]
+        )
+        und_df = _make_und_df(
+            [
+                {"Lane": "L001", "Index": "AACCGGTA+GGGGTTTT", "Count": 90},
+                {"Lane": "L001", "Index": "AACCGGTA+AAAACCCC", "Count": 10},
+            ]
+        )
+        result = search_for_unexpected_indexes(ss_df, und_df)
+        assert result.select(
+            "Undetermined_Index", "Orientation", "Fraction"
+        ).rows() == [("AACCGGTA+GGGGTTTT", "index2_rc", pytest.approx(0.9))]
+
+    def test_single_index_reverse_complement(self):
+        """A single-index sample is also searched reverse-complemented."""
+        ss_df = _make_ss_df(
+            [
+                {
+                    "Lane": "L001",
+                    "Sample_Project": "P",
+                    "index": "AACCGGTA",
+                    "index2": None,
+                }
+            ]
+        )
+        und_df = _make_und_df([{"Lane": "L001", "Index": "TACCGGTT", "Count": 3}])
+        result = search_for_unexpected_indexes(ss_df, und_df)
+        assert result.get_column("Orientation").to_list() == ["index1_rc"]
 
 
 # ---------------------------------------------------------------------------
@@ -432,3 +473,21 @@ def test_main_reports_only_cross_lane_index(tmp_path):
     out = polars.read_csv(tmp_path / "FC_unexpected_indexes.csv")
     assert out.get_column("Undetermined_Index").to_list() == ["GAACTGAGCG+CGCTCCACGA"]
     assert out.get_column("Sample_Project").to_list() == ["ProjectA"]
+
+
+def test_clean_results_keeps_own_lane_orientation_hits():
+    """Only "expected" hits are dropped when the sample belongs to the lane."""
+    ss_df = polars.DataFrame(
+        {
+            "Lane": ["L001"],
+            "Sample_Project": ["P"],
+            "index1": ["AACCGGTA"],
+            "index2": ["AAAACCCC"],
+        }
+    )
+    und_df = _make_und_df([{"Lane": "L001", "Index": "AACCGGTA+GGGGTTTT", "Count": 5}])
+    results = search_for_unexpected_indexes(ss_df, und_df)
+    kept = clean_results(results, ss_df)
+    assert kept.get_column("Orientation").to_list() == ["index2_rc"]
+    expected = results.with_columns(polars.lit("expected").alias("Orientation"))
+    assert clean_results(expected, ss_df).is_empty()

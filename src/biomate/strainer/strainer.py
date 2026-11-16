@@ -24,7 +24,9 @@ RESULTS_SCHEMA = {
     "Lane_Project": polars.String,
     "index1": polars.String,
     "index2": polars.String,
+    "Orientation": polars.String,
 }
+_COMPLEMENT = str.maketrans("ACGTN", "TGCAN")
 REQUIRED_COLUMNS = ["Lane", "Sample_Project", "index"]
 
 
@@ -175,59 +177,77 @@ def parallel_extract_indexes_from_undetermined_files(
     return flat_results
 
 
+def _orientations(index1: str, index2: str | None):
+    """Yield ``(label, index1, index2)``: the sheet indexes as given, then
+    every distinct reverse-complement combination of them."""
+    rc1 = index1[::-1].translate(_COMPLEMENT)
+    if index2 is None:
+        pairs = [("expected", index1, None), ("index1_rc", rc1, None)]
+    else:
+        rc2 = index2[::-1].translate(_COMPLEMENT)
+        pairs = [
+            ("expected", index1, index2),
+            ("index2_rc", index1, rc2),
+            ("index1_rc", rc1, index2),
+            ("both_rc", rc1, rc2),
+        ]
+    seen = set()
+    for label, i1, i2 in pairs:
+        # A palindromic index gives the same pair twice
+        if (i1, i2) not in seen:
+            seen.add((i1, i2))
+            yield label, i1, i2
+
+
 def search_for_unexpected_indexes(
     sample_sheet_df: polars.DataFrame, undetermined_df: polars.DataFrame
 ) -> polars.DataFrame:
-    """Search for unexpected indexes among the undetermined lanes.
+    """Search for the sample sheet indexes among the undetermined reads.
 
-    Compares undetermined indexes with expected indexes from the sample sheet,
-    allowing up to 1 mismatch per index.
+    Allows up to 1 mismatch per index. The indexes as given in the sample
+    sheet ("expected") are searched in the other lanes only; their
+    reverse-complement combinations are searched in every lane, the sample's
+    own included (a wrongly oriented index leaves the sample undetermined in
+    its own lane). ``Fraction`` is relative to the reads searched.
     """
     results = []
+    und_rows = undetermined_df.rows()
+    lane_totals: Counter = Counter()
+    for und_lane, _, und_count in und_rows:
+        lane_totals[und_lane] += und_count
+    total_all = sum(lane_totals.values())
 
-    for lane in sample_sheet_df.get_column("Lane").unique():
-        ss_lane_df = sample_sheet_df.filter(polars.col("Lane") == lane)
-        und_lane_df = undetermined_df.filter(polars.col("Lane") != lane)
-
-        # Compute total count for fraction calculation
-        total_count = und_lane_df.get_column("Count").sum()
-
-        # Iterate through each sample in the sample sheet for this lane
-        for ss_lane, ss_project, ss_index1, ss_index2 in ss_lane_df.iter_rows():
-            # Iterate through undetermined indexes from other lanes
-            for und_lane, und_index, und_count in und_lane_df.iter_rows():
-                # Compute fraction from count and total
-                und_fraction = und_count / total_count if total_count > 0 else 0.0
-
-                # Allow up to 1 mismatch in each index
-                match_1 = regex.search(
-                    r"(" + regex.escape(ss_index1) + "){s<=1}", und_index
-                )
-                match_2 = None
-                if ss_index2 is not None:
-                    match_2 = regex.search(
-                        r"(" + regex.escape(ss_index2) + "){s<=1}", und_index
-                    )
-
-                # If both indices match (or index2 is not required), record as potential mixing
-                if match_1 and (match_2 or ss_index2 is None):
+    for ss_lane, ss_project, ss_index1, ss_index2 in sample_sheet_df.iter_rows():
+        for label, index1, index2 in _orientations(ss_index1, ss_index2):
+            expected = label == "expected"
+            total_count = total_all - lane_totals[ss_lane] if expected else total_all
+            patterns = [
+                regex.compile(r"(" + regex.escape(index) + "){s<=1}")
+                for index in (index1, index2)
+                if index is not None
+            ]
+            for und_lane, und_index, und_count in und_rows:
+                if expected and und_lane == ss_lane:
+                    continue
+                if all(pattern.search(und_index) for pattern in patterns):
                     results.append(
                         {
                             "Lane": und_lane,
                             "Undetermined_Index": und_index,
                             "Count": und_count,
-                            "Fraction": und_fraction,
+                            "Fraction": und_count / total_count,
                             "Sample_Project": ss_project,
                             "Lane_Project": ss_lane,
                             "index1": ss_index1,
                             "index2": ss_index2,
+                            "Orientation": label,
                         }
                     )
 
     if not results:
         return polars.DataFrame(schema=RESULTS_SCHEMA)
 
-    return polars.from_dicts(results)
+    return polars.from_dicts(results, schema=RESULTS_SCHEMA)
 
 
 def clean_results(
@@ -250,7 +270,11 @@ def clean_results(
 
     # Keep only rows where the expected columns are null (i.e., unexpected indexes)
     return (
-        joined.filter(polars.col("Sample_Project_expected").is_null())
+        joined.filter(
+            # A reverse-complement hit in the sample's own lane is the finding
+            (polars.col("Orientation") != "expected")
+            | polars.col("Sample_Project_expected").is_null()
+        )
         .drop("Sample_Project_expected")
         .sort(["Lane", "Count"], descending=[False, True])
     )
@@ -259,19 +283,20 @@ def clean_results(
 def aggregate_results_by_lane(results: polars.DataFrame) -> polars.DataFrame:
     """Aggregate results by lane, summing counts and fractions for each lane."""
     return (
-        results.group_by(["Lane", "Undetermined_Index"])
+        results.group_by(["Lane", "Orientation", "Undetermined_Index"])
         .agg(
             polars.col("Count").first(),
             polars.col("Fraction").first(),
             polars.col("Sample_Project"),
             polars.col("Lane_Project"),
         )
-        .group_by("Lane")
+        .group_by(["Lane", "Orientation"])
         .agg(
             polars.col("Count").sum().alias("Lane_Count"),
             polars.col("Fraction").sum().alias("Lane_Fraction"),
         )
-        .sort("Lane")
+        .select(["Lane", "Lane_Count", "Lane_Fraction", "Orientation"])
+        .sort(["Lane", "Orientation"])
     )
 
 
