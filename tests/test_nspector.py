@@ -887,3 +887,37 @@ def test_new_charts_in_spec(tmp_path):
         "reads scanned (yield)",
     ):
         assert text in spec
+
+
+def test_lane_flag_and_collapsed_cycles(tmp_path):
+    """A lane bad on every tile is one flag; cycle runs are listed as ranges."""
+    from biomate.nspector.flags import collapse_flags
+    from biomate.nspector.report import verdict
+
+    records = []
+    for t in range(1, 6):
+        for i in range(40):
+            seq = list("ACGT" * 5)
+            if i < 20:
+                # every tile is bad, each at two cycles of its own
+                seq[6 + 2 * t : 8 + 2 * t] = "NN"
+            if i < 36:
+                seq[4:7] = "NNN"  # cycles 5-7 dark
+            records.append(_rec("".join(seq), tile=f"110{t}", x=str(i), y=str(i)))
+    path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+    write_fastq_gz(path, records)
+    tables = build_tables(scan_files([path], "python"))
+    tables.flags = flags = build_flags(tables)
+    assert sorted(flags["kind"].unique()) == ["dark_cycle", "lane"]
+    listed = collapse_flags(flags)
+    assert listed.filter(polars.col("kind") == "dark_cycle")["cycles"].to_list() == [
+        "5–7"
+    ]
+    text = verdict(listed, 1.0)
+    assert "Whole lane elevated: lane 1 R1" in text and "5–7" in text
+    assert verdict(listed.clear(), None).startswith("No anomalies")
+    page = write_report([], tables, tmp_path, {"--warn-rate": 0.01}).read_text()
+    for part in ("--warn-rate 0.01", 'class="verdict"', "<details", 'id="worst"'):
+        assert part in page
+    # summary tables come before the charts
+    assert page.index('id="worst"') < page.index('id="vis"')

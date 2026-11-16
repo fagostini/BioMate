@@ -11,6 +11,9 @@ Flag kinds:
   above ``warn_rate`` at that cycle.
 * ``tile``: the tile's mean per-cycle rate (dark cycles left out) is at or
   above ``warn_rate``.
+* ``lane``: at least ``DARK_TILE_FRACTION`` of a lane's tiles (two or more)
+  qualify for a tile flag. Reported once; tiles and cells on that lane are
+  listed only when they are worse than the lane flag.
 * ``tile_cycle``: one tile at one cycle is a robust outlier among the lane's
   tiles at that cycle (z >= ``Z_THRESHOLD``) and at or above ``warn_rate``.
   Cells already explained by a dark cycle, or by a tile flag at least as
@@ -66,6 +69,20 @@ def _robust_z(group: list[str]) -> polars.Expr:
     # 0/0 (rate at the median of a zero-spread group) is NaN, which polars
     # orders above every number: a tile at the median is not an outlier
     return ((polars.col("rate") - median) / (MAD_SCALE * mad)).fill_nan(0.0)
+
+
+def _not_covered(
+    frame: polars.DataFrame, cover: polars.DataFrame, on: list[str]
+) -> polars.DataFrame:
+    """Drop the ``frame`` flags explained by a ``cover`` flag at least as severe."""
+    return (
+        frame.join(cover.select(*on, _cover="status"), on=on, how="left")
+        .filter(
+            polars.col("_cover").is_null()
+            | ((polars.col("status") == "FAIL") & (polars.col("_cover") == "WARN"))
+        )
+        .drop("_cover")
+    )
 
 
 def dense_tile_cycle(tables: NspectorTables) -> polars.DataFrame:
@@ -134,41 +151,53 @@ def build_flags(
         )
     )
 
-    tiles = (
+    tile_rates = (
         dense.join(dark, on=lane_cycle, how="anti")
         .group_by("read", "lane", "tile")
         .agg(polars.col("rate").mean())
         .with_columns(_robust_z(["read", "lane"]).alias("z"))
-        .filter(polars.col("rate") >= warn_rate)
+    )
+    lanes = (
+        tile_rates.group_by("read", "lane")
+        .agg(
+            (polars.col("rate") >= warn_rate).mean().alias("frac"),
+            polars.col("rate").mean(),
+            polars.len().alias("tiles"),
+        )
+        .filter((polars.col("frac") >= DARK_TILE_FRACTION) & (polars.col("tiles") > 1))
         .with_columns(
-            polars.lit("tile").alias("kind"),
+            polars.lit("lane").alias("kind"),
             *flowcell,
+            polars.lit(None, polars.UInt32).alias("tile"),
             polars.lit(None, polars.UInt16).alias("cycle"),
-            polars.lit("mean N rate per cycle over the whole read").alias("detail"),
+            polars.lit(None, polars.Float64).alias("z"),
+            polars.format(
+                "{}% of {} tiles at or above the warn rate",
+                (100 * polars.col("frac")).round(0).cast(polars.Int64),
+                polars.col("tiles"),
+            ).alias("detail"),
             _status(fail_rate),
         )
     )
+    all_tiles = tile_rates.filter(polars.col("rate") >= warn_rate).with_columns(
+        polars.lit("tile").alias("kind"),
+        *flowcell,
+        polars.lit(None, polars.UInt16).alias("cycle"),
+        polars.lit("mean N rate per cycle over the whole read").alias("detail"),
+        _status(fail_rate),
+    )
+    tiles = _not_covered(all_tiles, lanes, ["read", "lane"])
 
-    cells = (
-        dense.with_columns(_robust_z(lane_cycle).alias("z"))
-        .filter((polars.col("z") >= Z_THRESHOLD) & (polars.col("rate") >= warn_rate))
-        .join(dark, on=lane_cycle, how="anti")
-        .with_columns(_status(fail_rate))
-        .join(
-            tiles.select("read", "lane", "tile", tile_status="status"),
-            on=["read", "lane", "tile"],
-            how="left",
-        )
-        # keep a cell on a flagged tile only when it is worse than the tile flag
-        .filter(
-            polars.col("tile_status").is_null()
-            | ((polars.col("status") == "FAIL") & (polars.col("tile_status") == "WARN"))
-        )
-        .with_columns(
-            polars.lit("tile_cycle").alias("kind"),
-            *flowcell,
-            polars.lit("outlier among the lane's tiles at this cycle").alias("detail"),
-        )
+    cells = dense.with_columns(_robust_z(lane_cycle).alias("z")).filter(
+        (polars.col("z") >= Z_THRESHOLD) & (polars.col("rate") >= warn_rate)
+    )
+    cells = cells.join(dark, on=lane_cycle, how="anti").with_columns(_status(fail_rate))
+    # keep a cell only when it is worse than the flag on its tile or lane
+    cells = _not_covered(cells, all_tiles, ["read", "lane", "tile"])
+    cells = _not_covered(cells, lanes, ["read", "lane"]).with_columns(
+        polars.lit("tile_cycle").alias("kind"),
+        *flowcell,
+        polars.lit("outlier among the lane's tiles at this cycle").alias("detail"),
     )
 
     samples = (
@@ -188,7 +217,10 @@ def build_flags(
     columns = list(FLAG_SCHEMA)
     return (
         polars.concat(
-            [f.select(columns).cast(FLAG_SCHEMA) for f in (dark, tiles, cells, samples)]
+            [
+                f.select(columns).cast(FLAG_SCHEMA)
+                for f in (dark, lanes, tiles, cells, samples)
+            ]
         )
         .with_columns(polars.col("status").eq("FAIL").alias("_fail"))
         .sort(
@@ -249,7 +281,7 @@ def sample_status(tables: NspectorTables, flags: polars.DataFrame) -> polars.Dat
 
 
 def flagged_share(tables: NspectorTables, flags: polars.DataFrame) -> float | None:
-    """Fraction of all N bases on a flagged tile, cell or dark cycle.
+    """Fraction of all N bases on a flagged lane, tile, cell or dark cycle.
 
     High: the Ns come from the flagged events. Low: they are spread over the
     run. ``None`` without N bases. ``tile_cycle.n`` (reads with an N at a
@@ -260,6 +292,7 @@ def flagged_share(tables: NspectorTables, flags: polars.DataFrame) -> float | No
     if not total:
         return None
     keys = {
+        "lane": ["read", "lane"],
         "tile": ["read", "lane", "tile"],
         "dark_cycle": ["read", "lane", "cycle"],
         "tile_cycle": ["read", "lane", "tile", "cycle"],
@@ -274,3 +307,48 @@ def flagged_share(tables: NspectorTables, flags: polars.DataFrame) -> float | No
         "n"
     ].sum()
     return int(explained) / total
+
+
+def collapse_flags(flags: polars.DataFrame) -> polars.DataFrame:
+    """Flags for display: each run of consecutive cycles becomes one row.
+
+    ``cycles`` is ``"31"`` or ``"45–52"``; ``rate`` and ``z`` are the largest of
+    the run and ``status`` its worst. FAIL first, like ``build_flags``.
+    """
+    keys = ["kind", "project", "sample", "read", "lane", "tile"]
+    first, last = polars.col("_from"), polars.col("_to")
+    return (
+        flags.sort(*keys, "cycle")
+        # consecutive cycles share cycle - position
+        .with_columns(
+            (
+                polars.col("cycle").cast(polars.Int64)
+                - polars.int_range(polars.len()).over(keys)
+            ).alias("_run")
+        )
+        .group_by(*keys, "_run")
+        .agg(
+            polars.col("status").eq("FAIL").any().alias("_fail"),
+            polars.col("cycle").min().alias("_from"),
+            polars.col("cycle").max().alias("_to"),
+            polars.col("rate").max(),
+            polars.col("z").max(),
+            polars.col("detail").first(),
+        )
+        .with_columns(
+            polars.when("_fail")
+            .then(polars.lit("FAIL"))
+            .otherwise(polars.lit("WARN"))
+            .alias("status"),
+            polars.when(first == last)
+            .then(first.cast(polars.Utf8))
+            .otherwise(polars.format("{}–{}", first, last))
+            .alias("cycles"),
+        )
+        .sort(
+            ["_fail", "kind", "read", "lane", "tile", "_from"],
+            descending=[True, False, False, False, False, False],
+            nulls_last=True,
+        )
+        .select("status", *keys, "cycles", "rate", "z", "detail")
+    )

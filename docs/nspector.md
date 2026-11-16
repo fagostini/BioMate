@@ -76,6 +76,7 @@ Flags are computed from the tables after the scan, so they cost no extra reading
 | --- | --- |
 | `dark_cycle` | At least 80% of a lane's tiles are at or above `--warn-rate` at that cycle. |
 | `tile` | The tile's mean per-cycle N rate, leaving out dark cycles, is at or above `--warn-rate`. |
+| `lane` | At least 80% of a lane's tiles (two or more) qualify for a `tile` flag. Reported once; tiles and cells on that lane are listed only when they are worse than the lane flag. |
 | `tile_cycle` | One tile at one cycle is at or above `--warn-rate` and is a robust outlier among the lane's tiles at that cycle: `(rate - median) / (1.4826 × MAD) ≥ 5`. Cells already explained by a dark cycle, or by a tile flag at least as severe, are not listed again. |
 | `sample` | One sample's N per sequenced base is at or above `--warn-rate` and is a robust outlier among the lane's samples (same score, `≥ 5`). Undetermined reads are left out. This is the only kind that names a project and a sample; it does not affect the other samples on the lane. |
 
@@ -85,7 +86,8 @@ The defaults come from a NextSeq 2000 run, where healthy cycles had about 0.1–
 Flags appear:
 
 - in `nspector_flags.parquet`;
-- at the top of the report, with the share of all N bases that sit on a flagged tile, cell or dark cycle (high: the Ns come from the flagged events; low: they are spread over the run), and as orange outlines on the tile map and the tile × cycle heatmap;
+- at the top of the report: a short written verdict, the share of all N bases that sit on a flagged lane, tile, cell or dark cycle (high: the Ns come from the flagged events; low: they are spread over the run), and a flag table where consecutive cycles are one row (`45–52`) with the largest rate of the run;
+- as orange outlines on the tile map and the tile × cycle heatmap;
 - in a status column of the worst-tiles table;
 - in MultiQC, as an `N status` column (worst flag on the sample or its lanes) and a flags table.
 
@@ -139,11 +141,7 @@ The **Project**, **Lane**, **Read**, **Metric** and **Show WARN flags** controls
 
 The tile-level views (tile map, tile × cycle and spatial) sum the samples of the selected projects. Tile defects are physical, so they affect every sample on that lane; flags are always computed on the whole flowcell.
 
-Under the charts, the page lists:
-
-- the tiles with the highest N rate;
-- the cycles with the highest N rate;
-- each input file with its read counts.
+Above the charts, the page lists the flags, the tiles and the cycles with the highest N rate; the input files with their read counts are under the charts. The header prints the BioMate version and the thresholds used (`--warn-rate`, `--fail-rate`, `--min-qual`, spatial bin size and cycle window), and the N rate per read.
 
 The embedded data depends on lanes, tiles and cycles, not on the number of reads. Two budgets keep it bounded:
 

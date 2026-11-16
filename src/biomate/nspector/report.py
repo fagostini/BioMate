@@ -16,6 +16,7 @@ import polars
 
 from biomate.nspector.flags import (
     FLAG_SCHEMA,
+    collapse_flags,
     flag_rank,
     flagged_share,
     sample_status,
@@ -1438,6 +1439,53 @@ def project_summary(tables: NspectorTables) -> polars.DataFrame:
     )
 
 
+def _some(items: list[str], limit: int = 5) -> str:
+    """Join ``items`` with commas, naming at most ``limit`` of them."""
+    more = len(items) - limit
+    return ", ".join(items[:limit]) + (f" and {more} more" if more > 0 else "")
+
+
+def verdict(flags: polars.DataFrame, share: float | None) -> str:
+    """Sum up the collapsed flags (``collapse_flags``) in a few plain sentences."""
+    if not flags.height:
+        return "No anomalies: no lane, tile, cycle or sample reaches the warn rate."
+
+    def of(kind: str) -> list[dict]:
+        return flags.filter(polars.col("kind") == kind).to_dicts()
+
+    def where(row: dict) -> str:
+        return f"lane {row['lane']} {row['read']}"
+
+    def fails(rows: list[dict]) -> str:
+        count = sum(r["status"] == "FAIL" for r in rows)
+        return f" ({count} FAIL)" if count else ""
+
+    parts = []
+    if rows := of("lane"):
+        names = _some([f"{where(r)} ({r['status']})" for r in rows])
+        parts.append(f"Whole lane elevated: {names}.")
+    dark: dict[str, list[str]] = {}
+    for row in of("dark_cycle"):
+        dark.setdefault(where(row), []).append(row["cycles"])
+    parts += [f"Dark cycles on {k}: {_some(v)}." for k, v in dark.items()]
+    if rows := of("tile"):
+        worst = max(rows, key=lambda r: r["rate"])
+        parts.append(
+            f"{len(rows)} flagged tile(s){fails(rows)}; the worst is "
+            f"{worst['tile']} on {where(worst)}, at {worst['rate']:.2%} per cycle."
+        )
+    if rows := of("tile_cycle"):
+        parts.append(f"{len(rows)} short tile × cycle event(s){fails(rows)}.")
+    if rows := of("sample"):
+        names = dict.fromkeys(f"{r['project']} / {r['sample']}" for r in rows)
+        parts.append(f"Outlier sample(s): {_some(list(names))}.")
+    if share is not None:
+        parts.append(
+            f"Flagged lanes, tiles and cycles hold {share:.0%} of all N bases."
+        )
+    return " ".join(parts)
+
+
 # number formats of the HTML summary tables
 TABLE_FORMATS = {
     "N rate": ".3%",
@@ -1472,7 +1520,10 @@ _PAGE = """<!DOCTYPE html>
   th, td {{ text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }}
   tbody tr:nth-child(even) {{ background: var(--panel); }}
   th {{ color: var(--muted); font-weight: 600; font-size: 12px; }}
-  .help {{ background: var(--panel); border-left: 3px solid var(--accent); padding: 8px 14px; border-radius: 4px; }}
+  .help {{ background: var(--panel); border-left: 3px solid var(--accent); padding: 8px 14px; border-radius: 4px; margin-top: 20px; }}
+  .help summary {{ cursor: pointer; font-weight: 600; }}
+  .verdict {{ font-size: 15px; margin: 0 0 12px; }}
+  nav a {{ color: var(--accent); }}
   .help li {{ margin: 2px 0; }}
   #vis {{ margin: 8px 0 48px; overflow-x: auto; }}
   #controls {{ position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line); margin-top: 16px; }}
@@ -1493,7 +1544,7 @@ _PAGE = """<!DOCTYPE html>
   :root[data-theme="dark"] .badge.fail {{ background: #431f22; color: #ffa8a8; }}
   @media print {{
     @page {{ size: A3 landscape; margin: 10mm; }}
-    #controls, .help, .toolbar {{ display: none; }}
+    #controls, .help, .toolbar, nav {{ display: none; }}
     #vis {{ overflow: visible; }}
     #vis canvas {{ max-width: 100%; height: auto !important; }}
     section, .stat {{ break-inside: avoid; }}
@@ -1516,20 +1567,28 @@ _PAGE = """<!DOCTYPE html>
   <div class="toolbar"><button type="button" id="theme-toggle" onclick="toggleTheme()">Dark mode</button><button type="button" onclick="window.print()">Print / save as PDF</button></div>
   <h1>nspector report</h1>
   <p class="meta">Generated {generated} · {n_files} input file(s) · read length up to {max_len} cycles</p>
+  <p class="meta">{params}</p>
   <div class="stats">
     <div class="stat"><b>{total_reads}</b><span>reads scanned</span></div>
     <div class="stat"><b>{n_reads}</b><span>reads with at least one N</span></div>
-    <div class="stat"><b>{n_rate}</b><span>overall N rate (reads with N)</span></div>
+    <div class="stat"><b>{n_rate}</b><span>overall N rate (reads with N){by_read}</span></div>
     <div class="stat"><b>{n_per_base}</b><span>N per sequenced base</span></div>
     <div class="stat"><b>{n_tiles}</b><span>tiles across {n_lanes} lane(s)</span></div>
-    <div class="stat"><b>{flagged_share}</b><span>of N bases on flagged tiles or cycles</span></div>
+    <div class="stat"><b>{flagged_share}</b><span>of N bases on flagged lanes, tiles or cycles</span></div>
     <div class="stat"><b>{flag_badges}</b><span>anomaly flags</span></div>
   </div>
-  <section><h2>Projects</h2><div class="scroll">{projects}</div></section>
+  <p class="verdict">{verdict}</p>
+  <nav class="meta"><a href="#projects">Projects</a> · <a href="#flags">Flags</a> · <a href="#worst">Worst tiles and cycles</a> · <a href="#controls">Charts</a> · <a href="#inputs">Inputs</a></nav>
+  <section id="projects"><h2>Projects</h2><div class="scroll">{projects}</div></section>
 </header>
 <main>
-  <section><h2>Anomaly flags</h2>{flags}</section>
-  <div class="help">
+  <section id="flags"><h2>Anomaly flags</h2>{flags}</section>
+  <div class="grid" id="worst">
+    <section><h2>Tiles with the highest N rate</h2><div class="scroll">{worst_tiles}</div></section>
+    <section><h2>Cycles with the highest N rate</h2><div class="scroll">{worst_cycles}</div></section>
+  </div>
+  <details class="help">
+    <summary>How to use the charts</summary>
     <ul>
       <li>Use the <b>Project</b>, <b>Lane</b>, <b>Read</b> and <b>Metric</b> controls above the charts to switch views. <i>All</i> combines every project or lane (global view); pick <i>Undetermined</i> to see only the reads that were not assigned to a sample. <i>Rate</i> divides by the reads scanned on that tile or sample.</li>
       <li><b>Click a read in a chart legend</b> to show only that read (or series) in the charts that have it; shift-click adds another, double-click shows all again.</li>
@@ -1538,14 +1597,10 @@ _PAGE = """<!DOCTYPE html>
       <li><b>Click a tile</b> on the tile map or a row of the tile × cycle heatmap to highlight it in the heatmap and show where on the tile its N reads are.</li>
       <li><i>Low-Q rate</i> counts reads with a called base (not N) below <code>--min-qual</code>. High N with normal low-Q means the basecaller gave up; high low-Q means degraded but called.</li>
     </ul>
-  </div>
+  </details>
   <div id="controls"></div>
   <div id="vis"></div>
-  <div class="grid">
-    <section><h2>Tiles with the highest N rate</h2><div class="scroll">{worst_tiles}</div></section>
-    <section><h2>Cycles with the highest N rate</h2><div class="scroll">{worst_cycles}</div></section>
-  </div>
-  <section><h2>Inputs</h2><div class="scroll">{inputs}</div></section>
+  <section id="inputs"><h2>Inputs</h2><div class="scroll">{inputs}</div></section>
   <p class="meta" style="margin:24px 0">Full tables: <code>nspector_*.parquet</code> in this directory.</p>
 </main>
 <script type="text/javascript">
@@ -1598,9 +1653,18 @@ def _vegaembed_bundle() -> str:
 
 
 def write_report(
-    scans: list[FileScan], tables: NspectorTables, output: pathlib.Path
+    scans: list[FileScan],
+    tables: NspectorTables,
+    output: pathlib.Path,
+    params: dict[str, object] | None = None,
 ) -> pathlib.Path:
-    """Write the self-contained interactive report to ``output/nspector_report.html``."""
+    """Write the self-contained interactive report to ``output/nspector_report.html``.
+
+    ``params`` (option name -> value) are printed in the header, so the
+    thresholds behind the flags travel with the report.
+    """
+    from biomate import __version__
+
     # row counts are bounded by MAX_SPATIAL_ROWS / MAX_TILE_CYCLE_ROWS instead
     with alt.data_transformers.disable_max_rows():
         # pick_tile is shared on purpose by the tile map and the InterOp scatter
@@ -1619,22 +1683,36 @@ def write_report(
 
     inputs, worst_tiles, worst_cycles = summary_tables(scans, tables)
     flags = _flags(tables)
+    listed = collapse_flags(flags)
+    share = flagged_share(tables, flags)
     if flags.height:
         n_fail = int((flags["status"] == "FAIL").sum())
         more = (
-            f"; showing the first {MAX_FLAG_ROWS}, all in nspector_flags.parquet"
-            if flags.height > MAX_FLAG_ROWS
+            f"; showing the first {MAX_FLAG_ROWS} rows, all in nspector_flags.parquet"
+            if listed.height > MAX_FLAG_ROWS
             else ""
         )
+        # project and sample only show up with sample flags, tile with tile flags
+        used = [c for c in listed.columns if listed[c].null_count() < listed.height]
         flags_html = (
             f'<p class="meta">{flags.height} flag(s): {n_fail} FAIL, '
-            f"{flags.height - n_fail} WARN{more}.</p>"
+            f"{flags.height - n_fail} WARN. Consecutive cycles are listed as one "
+            f"row, with the largest rate{more}.</p>"
             '<div class="scroll">'
-            + _table(flags.head(MAX_FLAG_ROWS), {"rate": ".3%", "z": ".1f"})
+            + _table(
+                listed.head(MAX_FLAG_ROWS).select(used), {"rate": ".3%", "z": ".1f"}
+            )
             + "</div>"
         )
     else:
-        flags_html = "<p class='meta'>No tile, cell, dark-cycle or sample flags.</p>"
+        flags_html = (
+            "<p class='meta'>No lane, tile, cell, dark-cycle or sample flags.</p>"
+        )
+    by_read = (
+        tables.sample_lane.group_by("read")
+        .agg((polars.col("n").sum() / polars.col("total").sum()).alias("rate"))
+        .sort("read")
+    )
     total_reads = int(tables.sample_lane["total"].sum())
     n_reads = int(tables.sample_lane["n"].sum())
     bases = int(tables.sample_lane["bases"].sum())
@@ -1660,9 +1738,19 @@ def write_report(
         n_rate=f"{n_reads / total_reads:.3%}" if total_reads else "n/a",
         n_per_base=f"{n_bases / bases:.4%}" if bases else "n/a",
         flag_badges=flag_badges,
-        flagged_share="n/a"
-        if (share := flagged_share(tables, flags)) is None
-        else f"{share:.1%}",
+        flagged_share="n/a" if share is None else f"{share:.1%}",
+        verdict=html.escape(verdict(listed, share)),
+        params=html.escape(
+            " · ".join(
+                [
+                    f"biomate {__version__}",
+                    *(f"{k} {v}" for k, v in (params or {}).items()),
+                ]
+            )
+        ),
+        by_read="<br>" + " · ".join(f"{r} {v:.3%}" for r, v in by_read.iter_rows())
+        if by_read.height > 1
+        else "",
         projects=_table(project_summary(tables), TABLE_FORMATS),
         n_tiles=tables.tile_summary.select("lane", "tile").unique().height,
         n_lanes=tables.sample_lane["lane"].n_unique(),

@@ -472,7 +472,18 @@ def _run(args: argparse.Namespace, progress: Progress) -> None:
 
     if write_html:
         phase = time.perf_counter()
-        path = write_report(scans, tables, args.output)
+        path = write_report(
+            scans,
+            tables,
+            args.output,
+            {
+                "--warn-rate": getattr(args, "warn_rate", 0.01),
+                "--fail-rate": getattr(args, "fail_rate", 0.05),
+                "--min-qual": getattr(args, "min_qual", 20),
+                "--spatial-bin-size": bin_size,
+                "--spatial-cycle-window": getattr(args, "spatial_cycle_window", 10),
+            },
+        )
         logging.info(
             f"Interactive report written to {path} in {time.perf_counter() - phase:.1f} s."
         )
