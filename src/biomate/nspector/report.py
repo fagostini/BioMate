@@ -1915,7 +1915,69 @@ def write_multiqc(tables: NspectorTables, output: pathlib.Path) -> list[pathlib.
     path.write_text(json.dumps(linegraph, indent=1))
     written.append(path)
 
+    # read-loss curve: reads a "no more than k N bases" filter discards, per read
+    totals = dict(
+        tables.sample_lane.group_by("read").agg(polars.col("total").sum()).iter_rows()
+    )
+    loss: dict[str, dict[int, float]] = {}
+    for read, counts in (
+        tables.n_per_read.group_by("read", "n_count")
+        .agg(polars.col("n_reads").sum())
+        .sort("n_count", descending=True)
+        .partition_by("read", as_dict=True)
+        .items()
+    ):
+        name = read[0]
+        # reads with more Ns than k, for every k below the largest count seen
+        above = counts.with_columns(polars.col("n_reads").cum_sum().alias("above"))
+        loss[name] = {
+            int(k) - 1: round(100 * n / totals[name], 4)
+            for k, n in above.select("n_count", "above").iter_rows()
+        }
+    if loss:
+        curve = {
+            "id": "nspector_read_loss",
+            "section_name": "nspector: reads lost to an N filter",
+            "description": "Percentage of reads discarded when reads with more than "
+            "the given number of N bases are filtered out.",
+            "plot_type": "linegraph",
+            "pconfig": {
+                "id": "nspector_read_loss_plot",
+                "title": "nspector: reads lost when filtering on N bases per read",
+                "xlab": "Most N bases allowed in a read",
+                "ylab": "% reads lost",
+                "ymin": 0,
+            },
+            "data": {
+                read: dict(sorted(points.items())) for read, points in loss.items()
+            },
+        }
+        path = folder / "nspector_read_loss_mqc.json"
+        path.write_text(json.dumps(curve, indent=1))
+        written.append(path)
+
     flags = _flags(tables)
+    # the verdict and what removing the flagged tiles and cycles would cost
+    share = flagged_share(tables, flags)
+    costs = "".join(
+        f"<li>{html.escape(c['action'])} ({html.escape(c['what'])}): "
+        f"{c['lost']:.2%} of the reads or called bases lost, "
+        f"{c['n_removed']:.2%} of the N bases removed.</li>"
+        for c in removal_costs(tables, flags)
+    )
+    path = folder / "nspector_verdict_mqc.html"
+    path.write_text(
+        "<!--\n"
+        "id: 'nspector_verdict'\n"
+        "section_name: 'nspector: verdict'\n"
+        "description: 'What the N content of this run points to, from the nspector "
+        "anomaly flags.'\n"
+        "-->\n"
+        f"<p>{html.escape(verdict(collapse_flags(flags), share))}</p>\n"
+        + (f"<ul>{costs}</ul>\n" if costs else "")
+    )
+    written.append(path)
+
     if flags.height:
         table = {
             "id": "nspector_flags",
