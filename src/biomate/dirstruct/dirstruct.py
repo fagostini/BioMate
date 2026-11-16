@@ -1,6 +1,7 @@
 """DirStruct main script."""
 
 import argparse
+import logging
 import pathlib
 
 from biomate.setup import setup_logging
@@ -125,6 +126,7 @@ def main(args: argparse.Namespace) -> None:
             # Create the destination path if it does not exist
             if not args.output_path.exists():
                 args.output_path.mkdir(parents=True, exist_ok=True)
+        n_created = n_existing = n_conflict = 0
         with args.source_file.open("r") as input_file:
             for line in input_file:
                 line = line.strip()
@@ -134,34 +136,50 @@ def main(args: argparse.Namespace) -> None:
                 # Parse line into path and optional type tag
                 parts = line.split("\t")
                 destination_path_str = parts[0].strip()
-                destination_type_str = parts[-1].strip() if len(parts) > 1 else ""
-
-                # Normalize destination type
-                type_map = {"file": "file", "dir": "dir"}
-                destination_type = type_map.get(destination_type_str, None)
+                destination_type = parts[-1].strip() if len(parts) > 1 else ""
 
                 destination = args.output_path.joinpath(destination_path_str)
 
-                # Create destination based on type
-                try:
-                    if destination_type == "file":
-                        # Create parent directories and then the file
-                        if not destination.parent.is_dir():
-                            destination.parent.mkdir(parents=True, exist_ok=True)
-                        destination.touch(exist_ok=True)
-                    elif destination_type == "dir":
-                        # Create the directory
-                        destination.mkdir(parents=True, exist_ok=True)
+                if destination_type in ("file", "dir"):
+                    is_file = destination_type == "file"
+                else:
+                    # No type specified: infer from file extension
+                    # Files with an extension or special files (.DS_Store) are treated as files
+                    is_file = (
+                        destination.suffix != "" or destination.name == ".DS_Store"
+                    )
+                kind = "file" if is_file else "directory"
+
+                # Leave pre-existing paths untouched (symlinks included, even broken ones)
+                if destination.exists() or destination.is_symlink():
+                    if destination.is_dir() != is_file:
+                        n_existing += 1
+                        logging.debug(f"Keeping existing {kind} '{destination}'")
                     else:
-                        # No type specified: infer from file extension
-                        # Files with an extension or special files (.DS_Store) are treated as files
-                        if destination.suffix != "" or destination.name == ".DS_Store":
-                            # Has extension or is .DS_Store - treat as file
-                            if not destination.parent.is_dir():
-                                destination.parent.mkdir(parents=True, exist_ok=True)
-                            destination.touch(exist_ok=True)
-                        else:
-                            # No extension and not .DS_Store - treat as directory
-                            destination.mkdir(parents=True, exist_ok=True)
+                        n_conflict += 1
+                        logging.warning(
+                            f"'{destination}' exists but is not a {kind}; skipping"
+                        )
+                    continue
+
+                try:
+                    if is_file:
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        destination.touch()
+                    else:
+                        destination.mkdir(parents=True)
+                except (FileExistsError, NotADirectoryError) as e:
+                    # A parent component exists as a file
+                    n_conflict += 1
+                    logging.warning(
+                        f"Cannot create {kind} '{destination}': {e}; skipping"
+                    )
+                    continue
                 except OSError as e:
                     raise OSError(f"Failed to create '{destination}': {e}") from e
+                n_created += 1
+
+        logging.info(
+            f"Created {n_created} entries, kept {n_existing} existing, "
+            f"skipped {n_conflict} conflicting"
+        )

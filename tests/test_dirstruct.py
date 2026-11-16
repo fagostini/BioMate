@@ -1,6 +1,7 @@
 """Tests for the dirstruct module."""
 
 import argparse
+import os
 
 import pytest
 
@@ -179,3 +180,76 @@ class TestCreateCommand:
         assert (dest / src.name / "a").is_dir()
         assert (dest / src.name / "a" / "b").is_dir()
         assert (dest / src.name / "a" / "file.txt").is_file()
+
+
+class TestCreateWithExistingPaths:
+    """create leaves pre-existing paths untouched and fills in what is missing."""
+
+    def test_existing_file_keeps_content_and_mtime(self, tmp_path):
+        """A real file already at a listed path is neither truncated nor touched."""
+        struct_file = tmp_path / "struct.txt"
+        struct_file.write_text("d\tdir\nd/real.txt\tfile\nd/new.txt\tfile\n")
+        dest = tmp_path / "dest"
+        (dest / "d").mkdir(parents=True)
+        real = dest / "d" / "real.txt"
+        real.write_text("content")
+        os.utime(real, (1_000_000, 1_000_000))
+
+        main(_create_args(struct_file, dest, quiet=True))
+
+        assert real.read_text() == "content"
+        assert real.stat().st_mtime == 1_000_000
+        assert (dest / "d" / "new.txt").is_file()
+
+    def test_existing_dir_with_extra_files_untouched(self, tmp_path):
+        """Unlisted files in an existing directory are kept; missing siblings created."""
+        struct_file = tmp_path / "struct.txt"
+        struct_file.write_text("d\tdir\nd/sub\tdir\n")
+        dest = tmp_path / "dest"
+        (dest / "d").mkdir(parents=True)
+        (dest / "d" / "extra.bin").write_bytes(b"x")
+
+        main(_create_args(struct_file, dest, quiet=True))
+
+        assert (dest / "d" / "extra.bin").read_bytes() == b"x"
+        assert (dest / "d" / "sub").is_dir()
+
+    def test_dir_expected_but_file_present(self, tmp_path, caplog):
+        """A file where a directory is expected is kept and reported, not fatal."""
+        struct_file = tmp_path / "struct.txt"
+        struct_file.write_text("a\tdir\nb\tdir\n")
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        (dest / "a").write_text("keep")
+
+        main(_create_args(struct_file, dest))
+
+        assert (dest / "a").read_text() == "keep"
+        assert (dest / "b").is_dir()
+        assert "is not a directory" in caplog.text
+
+    def test_file_expected_but_dir_present(self, tmp_path, caplog):
+        """A directory where a file is expected is kept and reported."""
+        struct_file = tmp_path / "struct.txt"
+        struct_file.write_text("x.txt\tfile\n")
+        dest = tmp_path / "dest"
+        (dest / "x.txt").mkdir(parents=True)
+
+        main(_create_args(struct_file, dest))
+
+        assert (dest / "x.txt").is_dir()
+        assert "is not a file" in caplog.text
+
+    def test_parent_component_is_file(self, tmp_path, caplog):
+        """Entries under a path that exists as a file are skipped; the rest is created."""
+        struct_file = tmp_path / "struct.txt"
+        struct_file.write_text("a/b.txt\tfile\na/c\tdir\nok\tdir\n")
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        (dest / "a").write_text("keep")
+
+        main(_create_args(struct_file, dest))
+
+        assert (dest / "a").read_text() == "keep"
+        assert (dest / "ok").is_dir()
+        assert "Cannot create" in caplog.text
