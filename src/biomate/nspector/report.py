@@ -179,11 +179,45 @@ CAPTIONS = {
     ),
     "interop": (
         "One point per tile: its N rate against the InterOp metric picked with the "
-        "InterOp control (%PF, cluster density or %≥Q30), coloured by lane. Tiles "
+        "InterOp control (%PF, cluster density, %≥Q30 and, when the instrument "
+        "wrote them, % occupied and the phasing rates), coloured by lane. Tiles "
         "with a high N rate and a low %PF or Q30 are likely physical problems on "
         "the flowcell. Click a point to select the tile."
     ),
+    "cycle_interop": (
+        "What the instrument recorded at each cycle, averaged over the lane's "
+        "tiles; one line per lane, dashed for R2. Compare with N per cycle above: "
+        "an N spike where the intensity drops points to fluidics or reagents, "
+        "where the spot width (FWHM) jumps to a focus problem, and with neither to "
+        "the base calling itself. The error rate needs a PhiX spike-in."
+    ),
 }
+
+
+# InterOp columns offered when present: tile scatter control, per-cycle charts
+INTEROP_LABELS = {
+    "pct_pf": "% PF",
+    "density_k": "Density (K/mm²)",
+    "pct_q30": "% ≥ Q30",
+    "pct_occupied": "% occupied",
+    "pct_phasing": "Phasing (%)",
+    "pct_prephasing": "Prephasing (%)",
+}
+CYCLE_INTEROP_LABELS = {
+    "intensity": "P90 intensity",
+    "fwhm": "Spot width (FWHM)",
+    "error_rate": "PhiX error rate (%)",
+    "pct_no_call": "No calls (%)",
+}
+
+
+def _with_data(frame: polars.DataFrame, labels: dict[str, str]) -> dict[str, str]:
+    """The ``labels`` whose column exists in ``frame`` with at least one value."""
+    return {
+        column: label
+        for column, label in labels.items()
+        if column in frame.columns and frame[column].null_count() < frame.height
+    }
 
 
 def robust_scale(values: polars.Series) -> alt.Scale:
@@ -1133,13 +1167,14 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
     # -- I: N rate against InterOp tile metrics (with --run-folder) ---------
     interop_view = None
     if tables.tile_interop is not None:
+        offered = _with_data(tables.tile_interop, INTEROP_LABELS) or {
+            "pct_pf": INTEROP_LABELS["pct_pf"]
+        }
         interop_metric = alt.param(
             name="interop_metric",
-            value="pct_pf",
+            value=next(iter(offered)),
             bind=alt.binding_radio(
-                options=["pct_pf", "density_k", "pct_q30"],
-                labels=["% PF", "Density (K/mm²)", "% ≥ Q30"],
-                name="InterOp ",
+                options=list(offered), labels=list(offered.values()), name="InterOp "
             ),
         )
         interop_view = (
@@ -1176,6 +1211,35 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
                 height=240,
             )
         )
+
+    # -- I2: InterOp per cycle, to read next to N per cycle ------------------
+    cycle_interop = None
+    if tables.cycle_interop is not None and (
+        offered := _with_data(tables.cycle_interop, CYCLE_INTEROP_LABELS)
+    ):
+        cycle_interop = alt.vconcat(
+            *[
+                alt.Chart(tables.cycle_interop)
+                .transform_filter(LANE_FILTER)
+                .transform_filter(f"isValid(datum.{column})")
+                .mark_line()
+                .encode(
+                    x=alt.X("cycle:Q", title="Cycle", axis=cycle_ticks),
+                    y=alt.Y(f"{column}:Q", title=label).scale(zero=False),
+                    color=alt.Color("lane:N", title="Lane"),
+                    strokeDash=alt.StrokeDash("read:N", title="Read"),
+                    tooltip=[
+                        "read:N",
+                        "lane:O",
+                        "cycle:Q",
+                        alt.Tooltip(f"{column}:Q", title=label, format=".4g"),
+                    ],
+                )
+                .properties(width=FULL_WIDTH, height=90)
+                for column, label in offered.items()
+            ],
+            spacing=8,
+        ).properties(title="InterOp per cycle (mean over the lane's tiles)")
 
     # -- H: N-run shape ------------------------------------------------------
     shape = (
@@ -1255,6 +1319,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             tile_cycle,
             cell * len(range(1, max_cycle + 1, window)),
             interop_view,
+            cycle_interop,
             (project_sel, lane_sel, read_sel, metric, show_warn),
         )
 
@@ -1274,6 +1339,7 @@ def _assemble(
     tile_cycle,
     tile_cycle_width,
     interop_view,
+    cycle_interop,
     controls,
 ) -> alt.VConcatChart:
     """Lay the charts out in captioned sections, with the page-level controls."""
@@ -1283,6 +1349,11 @@ def _assemble(
                 "Samples and cycles",
                 _caption(overview, CAPTIONS["overview"], FULL_WIDTH),
                 _caption(sample_cycle, CAPTIONS["sample_cycle"], FULL_WIDTH),
+                *(
+                    [_caption(cycle_interop, CAPTIONS["cycle_interop"], FULL_WIDTH)]
+                    if cycle_interop is not None
+                    else []
+                ),
             ),
             _section(
                 "N within reads",

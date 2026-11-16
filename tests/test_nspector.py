@@ -44,6 +44,7 @@ from biomate.nspector.scan import (
 from biomate.nspector.flags import build_flags, dense_tile_cycle, sample_status
 from biomate.nspector.runmetrics import (
     INTEROP_SCHEMA,
+    cycle_frame,
     join_tile_interop,
     read_tile_metrics,
 )
@@ -683,7 +684,7 @@ class TestRunMetrics:
     def test_join_and_report(self, run_files, tmp_path):
         tables = build_tables(scan_files(run_files, "python"))
         metrics = polars.DataFrame(
-            [("R1", 1, 1101, 210.0, 80.0, 91.0)],
+            [("R1", 1, 1101, 210.0, 80.0, 91.0, 95.0, None, None)],
             schema=INTEROP_SCHEMA,
             orient="row",
         )
@@ -705,6 +706,29 @@ class TestRunMetrics:
         assert "nspector_tile_interop.parquet" in {
             p.name for p in tables.write_parquet(tmp_path)
         }
+        # % occupied has data, the phasing columns do not
+        options = next(p for p in spec["params"] if p["name"] == "interop_metric")
+        assert options["bind"]["options"] == [
+            "pct_pf",
+            "density_k",
+            "pct_q30",
+            "pct_occupied",
+        ]
+
+    def test_cycle_metrics_and_chart(self, run_files):
+        core = pytest.importorskip("interop.core")
+        cycles = cycle_frame(core._run_metrics_example_fixture())
+        # the example run has one sequencing read of 3 cycles and two index reads
+        assert cycles.select("read", "lane", "cycle", "error_rate").rows() == [
+            ("R1", 1, 1, pytest.approx(0.1)),
+            ("R1", 1, 2, pytest.approx(0.2)),
+            ("R1", 1, 3, pytest.approx(0.3)),
+        ]
+        assert cycles["intensity"].to_list() == [10.0, 10.0, 10.0]
+        tables = build_tables(scan_files(run_files, "python"))
+        tables.cycle_interop = cycles
+        spec = json.dumps(build_chart(tables).to_dict())
+        assert "InterOp per cycle" in spec and "P90 intensity" in spec
 
     def test_run_folder_needs_interop_dir(self, tmp_path):
         fq = tmp_path / "x.fastq.gz"
