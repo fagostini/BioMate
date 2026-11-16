@@ -166,7 +166,7 @@ CAPTIONS = {
         "on the right to an edge effect. Click a point to select the tile."
     ),
     "read_pair": (
-        "One point per tile: the fraction of its reads with an N in R1 against "
+        "One point per tile: the fraction of its bases called N in R1 against "
         "R2. Tiles on the dashed diagonal are equally bad in both reads, which "
         "points to a physical defect on the tile; tiles off the diagonal had a "
         "problem during one read only, such as a dark cycle or a reagent issue. "
@@ -174,19 +174,19 @@ CAPTIONS = {
     ),
     "undetermined": (
         "One point per tile and read: the share of the tile's reads that were not "
-        "assigned to a sample against its N rate. Points rising to the right mean "
+        "assigned to a sample against its N per base. Points rising to the right mean "
         "the tiles that lose bases also lose reads at demultiplexing."
     ),
     "interop": (
-        "One point per tile: its N rate against the InterOp metric picked with the "
+        "One point per tile: its N per base against the InterOp metric picked with the "
         "InterOp control (%PF, cluster density, %≥Q30 and, when the instrument "
         "wrote them, % occupied and the phasing rates), coloured by lane. Tiles "
-        "with a high N rate and a low %PF or Q30 are likely physical problems on "
+        "with many Ns and a low %PF or Q30 are likely physical problems on "
         "the flowcell. Click a point to select the tile."
     ),
     "cycle_interop": (
         "What the instrument recorded at each cycle, averaged over the lane's "
-        "tiles; one line per lane, dashed for R2. Compare with N per cycle above: "
+        "tiles; R1 in the base colour, R2 lighter, one dash pattern per lane. Compare with N per cycle above: "
         "an N spike where the intensity drops points to fluidics or reagents, "
         "where the spot width (FWHM) jumps to a focus problem, and with neither to "
         "the base calling itself. The error rate needs a PhiX spike-in."
@@ -736,8 +736,10 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         pair = (
             tables.tile_summary.filter(polars.col("read").is_in(["R1", "R2"]))
             .group_by("project", "lane", "tile", "read")
-            .agg(polars.col("n", "total").sum())
-            .pivot("read", index=["project", "lane", "tile"], values=["n", "total"])
+            .agg(polars.col("n_bases", "bases").sum())
+            .pivot(
+                "read", index=["project", "lane", "tile"], values=["n_bases", "bases"]
+            )
             .fill_null(0)
         )
         pair_base = (
@@ -746,15 +748,16 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
                 f"(lane_sel == 'All' || datum.lane == lane_sel) && {PROJECT_FILTER}"
             )
             .transform_aggregate(
-                n_R1="sum(n_R1)",
-                total_R1="sum(total_R1)",
-                n_R2="sum(n_R2)",
-                total_R2="sum(total_R2)",
+                n_R1="sum(n_bases_R1)",
+                bases_R1="sum(bases_R1)",
+                n_R2="sum(n_bases_R2)",
+                bases_R2="sum(bases_R2)",
                 groupby=["lane", "tile"],
             )
-            .transform_filter("datum.total_R1 > 0 && datum.total_R2 > 0")
+            .transform_filter("datum.bases_R1 > 0 && datum.bases_R2 > 0")
+            # N per base: reads with N would read 100% after one dark cycle
             .transform_calculate(
-                r1="datum.n_R1 / datum.total_R1", r2="datum.n_R2 / datum.total_R2"
+                r1="datum.n_R1 / datum.bases_R1", r2="datum.n_R2 / datum.bases_R2"
             )
         )
         diagonal = pair_base.transform_calculate(
@@ -767,19 +770,19 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             .encode(x="zero:Q", y="zero:Q", x2="top:Q", y2="top:Q"),
             pair_base.mark_circle(size=60)
             .encode(
-                x=alt.X("r1:Q", title="N rate in R1").axis(format="%"),
-                y=alt.Y("r2:Q", title="N rate in R2").axis(format="%"),
+                x=alt.X("r1:Q", title="N per base in R1").axis(format="~%"),
+                y=alt.Y("r2:Q", title="N per base in R2").axis(format="~%"),
                 **tile_point,
                 tooltip=[
                     "lane:O",
                     "tile:O",
-                    alt.Tooltip("r1:Q", title="N rate R1", format=".3%"),
-                    alt.Tooltip("r2:Q", title="N rate R2", format=".3%"),
+                    alt.Tooltip("r1:Q", title="N per base R1", format=".3%"),
+                    alt.Tooltip("r2:Q", title="N per base R2", format=".3%"),
                 ],
             )
             .add_params(pick_tile),
         ).properties(
-            title="N rate per tile, R1 vs R2 (click a tile)", width=300, height=300
+            title="N per base per tile, R1 vs R2 (click a tile)", width=300, height=300
         )
         tile_views.append(_caption(read_pair, CAPTIONS["read_pair"], 300))
 
@@ -787,7 +790,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         undetermined = (
             alt.Chart(
                 tables.tile_summary.group_by("read", "lane", "tile").agg(
-                    polars.col("n", "total").sum(),
+                    polars.col("n_bases", "bases", "total").sum(),
                     polars.col("total")
                     .filter(polars.col("project") == UNDETERMINED)
                     .sum()
@@ -796,26 +799,27 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             )
             .transform_filter(LANE_FILTER)
             .transform_calculate(
-                share="datum.undetermined / datum.total", rate="datum.n / datum.total"
+                share="datum.undetermined / datum.total",
+                rate="datum.n_bases / datum.bases",
             )
             .mark_circle(size=60)
             .encode(
                 x=alt.X("share:Q", title="Undetermined reads on the tile").axis(
                     format="%"
                 ),
-                y=alt.Y("rate:Q", title="N rate (reads with N)").axis(format="%"),
+                y=alt.Y("rate:Q", title="N per base").axis(format="~%"),
                 **tile_point,
                 tooltip=[
                     "read:N",
                     "lane:O",
                     "tile:O",
                     alt.Tooltip("share:Q", title="Undetermined", format=".2%"),
-                    alt.Tooltip("rate:Q", title="N rate", format=".3%"),
+                    alt.Tooltip("rate:Q", title="N per base", format=".3%"),
                 ],
             )
             .add_params(pick_tile)
             .properties(
-                title="Undetermined share vs N rate per tile (click a tile)",
+                title="Undetermined share vs N per base, per tile (click a tile)",
                 width=300,
                 height=300,
             )
@@ -1182,7 +1186,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             .transform_filter(READ_FILTER)
             .transform_calculate(
                 metric_value="datum[interop_metric]",
-                rate="datum.n / datum.total",
+                rate="datum.n_bases / datum.bases",
             )
             .transform_filter("isValid(datum.metric_value)")
             .mark_circle(size=60)
@@ -1190,7 +1194,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
                 x=alt.X("metric_value:Q", title="InterOp metric (see control)").scale(
                     zero=False
                 ),
-                y=alt.Y("rate:Q", title="N rate (reads with N)").axis(format="%"),
+                y=alt.Y("rate:Q", title="N per base").axis(format="~%"),
                 color=alt.Color("lane:N", title="Lane"),
                 opacity=alt.when(pick_tile)
                 .then(alt.value(0.9))
@@ -1198,7 +1202,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
                 tooltip=[
                     "lane:O",
                     "tile:O",
-                    alt.Tooltip("rate:Q", title="N rate", format=".3%"),
+                    alt.Tooltip("rate:Q", title="N per base", format=".3%"),
                     alt.Tooltip("pct_pf:Q", title="% PF", format=".1f"),
                     alt.Tooltip("density_k:Q", title="Density K/mm²", format=".0f"),
                     alt.Tooltip("pct_q30:Q", title="% ≥ Q30", format=".1f"),
@@ -1206,7 +1210,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             )
             .add_params(interop_metric, pick_tile)
             .properties(
-                title="N rate vs InterOp tile metric (click a tile)",
+                title="N per base vs InterOp tile metric (click a tile)",
                 width=420,
                 height=240,
             )
@@ -1226,8 +1230,8 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
                 .encode(
                     x=alt.X("cycle:Q", title="Cycle", axis=cycle_ticks),
                     y=alt.Y(f"{column}:Q", title=label).scale(zero=False),
-                    color=alt.Color("lane:N", title="Lane"),
-                    strokeDash=alt.StrokeDash("read:N", title="Read"),
+                    color=read_color,
+                    strokeDash=alt.StrokeDash("lane:N", title="Lane"),
                     tooltip=[
                         "read:N",
                         "lane:O",
@@ -1240,6 +1244,8 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             ],
             spacing=8,
         ).properties(title="InterOp per cycle (mean over the lane's tiles)")
+        # same cycle axis in every panel, whatever cycles a metric covers
+        cycle_interop = cycle_interop.resolve_scale(x="shared")
 
     # -- H: N-run shape ------------------------------------------------------
     shape = (

@@ -11,7 +11,7 @@ Flag kinds:
   above ``warn_rate`` at that cycle.
 * ``tile``: the tile's mean per-cycle rate (dark cycles left out) is at or
   above ``warn_rate``.
-* ``lane``: at least ``DARK_TILE_FRACTION`` of a lane's tiles (two or more)
+* ``lane``: at least ``LANE_TILE_FRACTION`` of a lane's tiles (two or more)
   qualify for a tile flag. Reported once; tiles and cells on that lane are
   listed only when they are worse than the lane flag.
 * ``tile_cycle``: one tile at one cycle is a robust outlier among the lane's
@@ -34,7 +34,10 @@ from biomate.nspector.scan import UNDETERMINED
 from biomate.nspector.tables import KEYS, NspectorTables
 
 Z_THRESHOLD = 5.0
-DARK_TILE_FRACTION = 0.8
+# half the tiles: above it the median tile is dark, so the cells of that cycle
+# are no longer outliers and only a dark-cycle flag can report them
+DARK_TILE_FRACTION = 0.5
+LANE_TILE_FRACTION = 0.8
 # MAD of a normal distribution is 0.6745 sigma; 1.4826 = 1 / 0.6745
 MAD_SCALE = 1.4826
 
@@ -164,7 +167,7 @@ def build_flags(
             polars.col("rate").mean(),
             polars.len().alias("tiles"),
         )
-        .filter((polars.col("frac") >= DARK_TILE_FRACTION) & (polars.col("tiles") > 1))
+        .filter((polars.col("frac") >= LANE_TILE_FRACTION) & (polars.col("tiles") > 1))
         .with_columns(
             polars.lit("lane").alias("kind"),
             *flowcell,
