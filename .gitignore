@@ -202,3 +202,7 @@ test/*
 
 # Personal performance work notes (not for release)
 docs/todo/
+
+# Local benchmark output and test data archives
+bench_out/
+DemuxCasesData.tar.gz
