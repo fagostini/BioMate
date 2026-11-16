@@ -19,7 +19,11 @@ from rich.progress import (
 )
 
 from biomate.nspector.flags import build_flags
-from biomate.nspector.runmetrics import join_tile_interop, read_tile_metrics
+from biomate.nspector.runmetrics import (
+    join_tile_interop,
+    read_cycle_metrics,
+    read_tile_metrics,
+)
 from biomate.nspector.scan import (
     FileScan,
     discover_fastqs,
@@ -162,8 +166,9 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         "--run-folder",
         type=pathlib.Path,
         default=None,
-        help="Illumina run folder: add per-tile cluster density, %%PF and %%>=Q30 "
-        "from InterOp, plotted against the N rate. Needs biomate[interop].",
+        help="Illumina run folder: add InterOp metrics per tile (cluster density, "
+        "%%PF, %%>=Q30, %% occupied, phasing), plotted against the N rate, and per "
+        "cycle (intensity, focus, error rate). Needs biomate[interop].",
     )
     parser.add_argument(
         "--raw",
@@ -456,6 +461,9 @@ def _run(args: argparse.Namespace, progress: Progress) -> None:
                 f"{missing} read/lane/tile rows have no InterOp tile metrics "
                 "(different run folder or tile naming?)."
             )
+        cycles = read_cycle_metrics(args.run_folder)
+        if cycles.height:
+            tables.cycle_interop = cycles
     tables.write_parquet(args.output)
     if tables.flags.height:
         counts = tables.flags["status"].value_counts().sort("status")
@@ -472,7 +480,18 @@ def _run(args: argparse.Namespace, progress: Progress) -> None:
 
     if write_html:
         phase = time.perf_counter()
-        path = write_report(scans, tables, args.output)
+        path = write_report(
+            scans,
+            tables,
+            args.output,
+            {
+                "--warn-rate": getattr(args, "warn_rate", 0.01),
+                "--fail-rate": getattr(args, "fail_rate", 0.05),
+                "--min-qual": getattr(args, "min_qual", 20),
+                "--spatial-bin-size": bin_size,
+                "--spatial-cycle-window": getattr(args, "spatial_cycle_window", 10),
+            },
+        )
         logging.info(
             f"Interactive report written to {path} in {time.perf_counter() - phase:.1f} s."
         )

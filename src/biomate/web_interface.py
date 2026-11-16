@@ -485,8 +485,10 @@ MODULES: List[Dict[str, Any]] = [
             "against expected indexes from the Sample Sheet. It reads all "
             "Undetermined*R1*.fastq.gz files, filters poly-G artifacts, and "
             "compares observed indexes against expected ones across all lanes "
-            "(allowing 1 mismatch). Outputs CSV reports of unexpected indexes "
-            "and lane summaries."
+            "(allowing 1 mismatch). Sample indexes are also searched "
+            "reverse-complemented in every lane, to reveal an index entered "
+            "in the wrong orientation. Outputs CSV reports of unexpected "
+            "indexes and lane summaries."
         ),
         "parameters": [
             {
@@ -595,6 +597,26 @@ MODULES: List[Dict[str, Any]] = [
         ],
     },
 ]
+
+# Triage takes the same arguments as strainer
+MODULES.append(
+    {
+        "name": "triage",
+        "title": "Undetermined Reads Triage",
+        "short_description": (
+            "Runs strainer, index discovery and waif on a flowcell from a "
+            "single pass over the Undetermined FASTQ headers."
+        ),
+        "description": (
+            "Triage counts the header indexes of every Undetermined*R1*.fastq.gz "
+            "file once, then writes the strainer reports (cross-lane and "
+            "reverse-complemented sample indexes), the largest undetermined "
+            "index groups of each file and, when re-run Stats.json files are "
+            "present, the barcodes undetermined in every run of a lane."
+        ),
+        "parameters": next(m for m in MODULES if m["name"] == "strainer")["parameters"],
+    }
+)
 
 
 # ---------------------------------------------------------------------------

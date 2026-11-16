@@ -35,6 +35,8 @@ class NspectorTables:
     flags: polars.DataFrame | None = None
     # filled from --run-folder by biomate.nspector.runmetrics.join_tile_interop
     tile_interop: polars.DataFrame | None = None
+    # filled from --run-folder by biomate.nspector.runmetrics.read_cycle_metrics
+    cycle_interop: polars.DataFrame | None = None
 
     def items(self) -> list[tuple[str, polars.DataFrame]]:
         """Return (name, frame) pairs for every table."""

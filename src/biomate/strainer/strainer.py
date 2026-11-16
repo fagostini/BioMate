@@ -6,10 +6,10 @@ import pathlib
 from collections import Counter
 from multiprocessing import Pool
 
-import dnaio
 import polars
 import regex
 
+from biomate.headers import count_header_indexes
 from biomate.samplesheet import read_section
 from biomate.setup import setup_logging
 
@@ -24,7 +24,9 @@ RESULTS_SCHEMA = {
     "Lane_Project": polars.String,
     "index1": polars.String,
     "index2": polars.String,
+    "Orientation": polars.String,
 }
+_COMPLEMENT = str.maketrans("ACGTN", "TGCAN")
 REQUIRED_COLUMNS = ["Lane", "Sample_Project", "index"]
 
 
@@ -64,6 +66,14 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         formatter_class=argparse.RawDescriptionHelpFormatter,
         help="Evaluate indexes mixing across flowcell lanes.",
     )
+    add_arguments(parser)
+    parser.set_defaults(parse=validate_args, run=main)
+
+    return parser
+
+
+def add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the flowcell input/output arguments (shared with triage)."""
     parser.add_argument(
         "--input-path",
         type=pathlib.Path,
@@ -89,9 +99,6 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         default=1,
         help="Number of threads used to process the undetermined FASTQ files.",
     )
-    parser.set_defaults(parse=validate_args, run=main)
-
-    return parser
 
 
 def extract_indexes_from_sample_sheet(
@@ -122,6 +129,21 @@ def extract_indexes_from_sample_sheet(
     return data
 
 
+def find_undetermined(input_path: pathlib.Path) -> list[pathlib.Path]:
+    """Find the undetermined R1 files under ``input_path``.
+
+    A link and its target are the same reads, so they count once; a broken
+    link (e.g. a run folder copied from another machine) is skipped.
+    """
+    files: dict[pathlib.Path, pathlib.Path] = {}
+    for f in sorted(input_path.glob("**/Undetermined*R1*.fastq.gz")):
+        if not f.is_file():
+            logging.warning(f"Skipping {f}: broken link")
+            continue
+        files.setdefault(f.resolve(), f)
+    return list(files.values())
+
+
 def extract_indexes_from_undetermined_file(
     undetermined_file_path: pathlib.Path,
 ) -> list[dict[str, str | int | float]]:
@@ -130,6 +152,15 @@ def extract_indexes_from_undetermined_file(
     Reads the file header to extract index information, filtering out
     poly-G artifacts which indicate likely sequencing errors.
     """
+    return top_undetermined(
+        undetermined_file_path, count_header_indexes(undetermined_file_path)
+    )
+
+
+def top_undetermined(
+    undetermined_file_path: pathlib.Path, counts: Counter
+) -> list[dict[str, str | int | float]]:
+    """Rows of the most frequent header indexes (``counts``) of one file."""
     # Extract lane information from the file name
     lane = undetermined_file_path.name.split("_")[2]
     if not regex.match(r"^L\d{3}$", lane):
@@ -137,22 +168,10 @@ def extract_indexes_from_undetermined_file(
             f"Invalid lane format in file name: {undetermined_file_path.name}. Expected format: *_*_LXXX_*"
         )
 
-    indexes = Counter()
-    with dnaio.open(undetermined_file_path) as reader:
-        for record in reader:
-            # Expected format: name parts separated by space, index in second part after last colon
-            name_parts = record.name.split(" ")
-            if len(name_parts) < 2:
-                raise ValueError(
-                    f"Invalid read name format in {undetermined_file_path.name}: {record.name}"
-                )
-
-            # Extract index from second part (format: control:barcode)
-            idx = name_parts[1].split(":")[-1]
-
-            # Skip indexes with poly-G artifacts (likely sequencing errors)
-            if POLY_G_ARTIFACT not in idx:
-                indexes.update({idx})
+    # Skip indexes with poly-G artifacts (likely sequencing errors)
+    indexes = Counter(
+        {idx: count for idx, count in counts.items() if POLY_G_ARTIFACT not in idx}
+    )
 
     return [
         {
@@ -183,59 +202,91 @@ def parallel_extract_indexes_from_undetermined_files(
     return flat_results
 
 
+def _orientations(index1: str, index2: str | None):
+    """Yield ``(label, index1, index2)``: the sheet indexes as given, then
+    every distinct reverse-complement combination of them."""
+    rc1 = index1[::-1].translate(_COMPLEMENT)
+    if index2 is None:
+        pairs = [("expected", index1, None), ("index1_rc", rc1, None)]
+    else:
+        rc2 = index2[::-1].translate(_COMPLEMENT)
+        pairs = [
+            ("expected", index1, index2),
+            ("index2_rc", index1, rc2),
+            ("index1_rc", rc1, index2),
+            ("both_rc", rc1, rc2),
+        ]
+    seen = set()
+    for label, i1, i2 in pairs:
+        # A palindromic index gives the same pair twice
+        if (i1, i2) not in seen:
+            seen.add((i1, i2))
+            yield label, i1, i2
+
+
 def search_for_unexpected_indexes(
     sample_sheet_df: polars.DataFrame, undetermined_df: polars.DataFrame
 ) -> polars.DataFrame:
-    """Search for unexpected indexes among the undetermined lanes.
+    """Search for the sample sheet indexes among the undetermined reads.
 
-    Compares undetermined indexes with expected indexes from the sample sheet,
-    allowing up to 1 mismatch per index.
+    The indexes as given in the sample sheet ("expected") are searched in
+    the other lanes only, allowing up to 1 mismatch per index; their
+    reverse-complement combinations are searched in every lane, the sample's
+    own included (a wrongly oriented index leaves the sample undetermined in
+    its own lane). ``Fraction`` is relative to the reads searched.
+
+    "expected" indexes may match anywhere in the combined index string; the
+    reverse complements must match in their own half (index1 before ``+``,
+    index2 after) and exactly: a wrongly oriented sample gives its exact
+    reverse complement in bulk, while a match with a mismatch or spanning the
+    separator is mostly another index or a shifted read.
     """
     results = []
+    und_rows = undetermined_df.rows()
+    lane_totals: Counter = Counter()
+    for und_lane, _, und_count in und_rows:
+        lane_totals[und_lane] += und_count
+    total_all = sum(lane_totals.values())
 
-    for lane in sample_sheet_df.get_column("Lane").unique():
-        ss_lane_df = sample_sheet_df.filter(polars.col("Lane") == lane)
-        und_lane_df = undetermined_df.filter(polars.col("Lane") != lane)
-
-        # Compute total count for fraction calculation
-        total_count = und_lane_df.get_column("Count").sum()
-
-        # Iterate through each sample in the sample sheet for this lane
-        for ss_lane, ss_project, ss_index1, ss_index2 in ss_lane_df.iter_rows():
-            # Iterate through undetermined indexes from other lanes
-            for und_lane, und_index, und_count in und_lane_df.iter_rows():
-                # Compute fraction from count and total
-                und_fraction = und_count / total_count if total_count > 0 else 0.0
-
-                # Allow up to 1 mismatch in each index
-                match_1 = regex.search(
-                    r"(" + regex.escape(ss_index1) + "){s<=1}", und_index
+    for ss_lane, ss_project, ss_index1, ss_index2 in sample_sheet_df.iter_rows():
+        for label, index1, index2 in _orientations(ss_index1, ss_index2):
+            expected = label == "expected"
+            total_count = total_all - lane_totals[ss_lane] if expected else total_all
+            patterns = [
+                regex.compile(
+                    r"(" + regex.escape(index) + "){s<=%d}" % (1 if expected else 0)
                 )
-                match_2 = None
-                if ss_index2 is not None:
-                    match_2 = regex.search(
-                        r"(" + regex.escape(ss_index2) + "){s<=1}", und_index
-                    )
-
-                # If both indices match (or index2 is not required), record as potential mixing
-                if match_1 and (match_2 or ss_index2 is None):
+                for index in (index1, index2)
+                if index is not None
+            ]
+            for und_lane, und_index, und_count in und_rows:
+                if expected and und_lane == ss_lane:
+                    continue
+                if expected:
+                    targets = [und_index] * len(patterns)
+                else:
+                    targets = und_index.split("+")
+                    if len(targets) < len(patterns):
+                        continue
+                if all(p.search(t) for p, t in zip(patterns, targets)):
                     results.append(
                         {
                             "Lane": und_lane,
                             "Undetermined_Index": und_index,
                             "Count": und_count,
-                            "Fraction": und_fraction,
+                            "Fraction": und_count / total_count,
                             "Sample_Project": ss_project,
                             "Lane_Project": ss_lane,
                             "index1": ss_index1,
                             "index2": ss_index2,
+                            "Orientation": label,
                         }
                     )
 
     if not results:
         return polars.DataFrame(schema=RESULTS_SCHEMA)
 
-    return polars.from_dicts(results)
+    return polars.from_dicts(results, schema=RESULTS_SCHEMA)
 
 
 def clean_results(
@@ -258,7 +309,11 @@ def clean_results(
 
     # Keep only rows where the expected columns are null (i.e., unexpected indexes)
     return (
-        joined.filter(polars.col("Sample_Project_expected").is_null())
+        joined.filter(
+            # A reverse-complement hit in the sample's own lane is the finding
+            (polars.col("Orientation") != "expected")
+            | polars.col("Sample_Project_expected").is_null()
+        )
         .drop("Sample_Project_expected")
         .sort(["Lane", "Count"], descending=[False, True])
     )
@@ -267,20 +322,61 @@ def clean_results(
 def aggregate_results_by_lane(results: polars.DataFrame) -> polars.DataFrame:
     """Aggregate results by lane, summing counts and fractions for each lane."""
     return (
-        results.group_by(["Lane", "Undetermined_Index"])
+        results.group_by(["Lane", "Orientation", "Undetermined_Index"])
         .agg(
             polars.col("Count").first(),
             polars.col("Fraction").first(),
             polars.col("Sample_Project"),
             polars.col("Lane_Project"),
         )
-        .group_by("Lane")
+        .group_by(["Lane", "Orientation"])
         .agg(
             polars.col("Count").sum().alias("Lane_Count"),
             polars.col("Fraction").sum().alias("Lane_Fraction"),
         )
-        .sort("Lane")
+        .select(["Lane", "Lane_Count", "Lane_Fraction", "Orientation"])
+        .sort(["Lane", "Orientation"])
     )
+
+
+def report(
+    sample_sheet_indexes: polars.DataFrame,
+    undetermined_rows: list[dict],
+    output_path: pathlib.Path,
+    basename: str,
+) -> None:
+    """Search the undetermined rows and write the two results CSV files."""
+    output_file = output_path / f"{basename}_unexpected_indexes.csv"
+    if not undetermined_rows:
+        logging.info("No indexes extracted from undetermined FASTQ files. Exiting.")
+        return
+
+    logging.debug("Extracting indexes from undetermined FASTQ files completed.")
+
+    undetermined_indexes = polars.from_dicts(undetermined_rows)
+
+    logging.info("Searching for unexpected indexes...")
+    results = search_for_unexpected_indexes(sample_sheet_indexes, undetermined_indexes)
+
+    logging.debug("Searching for unexpected indexes completed.")
+
+    if results.is_empty():
+        logging.info("No unexpected indexes found. Exiting.")
+    else:
+        # Sort results by lane and count, and filter out indexes that are expected in the lane
+        results = clean_results(
+            results.sort(["Lane", "Count"], descending=[False, True]),
+            sample_sheet_indexes,
+        )
+        results.write_csv(output_file)
+        logging.info(f"Results saved to {output_file}.")
+
+        aggregate_results_by_lane(results).write_csv(
+            output_path / f"{basename}_lane_summary.csv"
+        )
+        logging.info(
+            f"Lane summary saved to {output_path / f'{basename}_lane_summary.csv'}."
+        )
 
 
 def main(args: argparse.Namespace) -> None:
@@ -304,7 +400,7 @@ def main(args: argparse.Namespace) -> None:
     sample_sheet_indexes = extract_indexes_from_sample_sheet(sample_sheet)
 
     # Recursively find all undetermined FASTQ files in the input directory
-    undetermined_files = list(args.input_path.glob("**/Undetermined*R1*.fastq.gz"))
+    undetermined_files = find_undetermined(args.input_path)
     logging.debug(f"Found {len(undetermined_files)} undetermined FASTQ files.")
 
     logging.info("Extracting indexes from undetermined FASTQ files...")
@@ -312,33 +408,4 @@ def main(args: argparse.Namespace) -> None:
         undetermined_files, args.threads
     )
 
-    if not undetermined_indexes:
-        logging.info("No indexes extracted from undetermined FASTQ files. Exiting.")
-        return
-
-    logging.debug("Extracting indexes from undetermined FASTQ files completed.")
-
-    undetermined_indexes = polars.from_dicts(undetermined_indexes)
-
-    logging.info("Searching for unexpected indexes...")
-    results = search_for_unexpected_indexes(sample_sheet_indexes, undetermined_indexes)
-
-    logging.debug("Searching for unexpected indexes completed.")
-
-    if results.is_empty():
-        logging.info("No unexpected indexes found. Exiting.")
-    else:
-        # Sort results by lane and count, and filter out indexes that are expected in the lane
-        results = clean_results(
-            results.sort(["Lane", "Count"], descending=[False, True]),
-            sample_sheet_indexes,
-        )
-        results.write_csv(output_file)
-        logging.info(f"Results saved to {output_file}.")
-
-        aggregate_results_by_lane(results).write_csv(
-            args.output_path / f"{basename}_lane_summary.csv"
-        )
-        logging.info(
-            f"Lane summary saved to {args.output_path / f'{basename}_lane_summary.csv'}."
-        )
+    report(sample_sheet_indexes, undetermined_indexes, args.output_path, basename)

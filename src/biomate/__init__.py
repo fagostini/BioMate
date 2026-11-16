@@ -14,6 +14,7 @@ from biomate import (
     index,
     nspector,
     strainer,
+    triage,
     waif,
     web_interface,
 )
@@ -95,6 +96,7 @@ def main():
     fastrewind.fastrewind.init_parser(subparsers)
     nspector.nspector.init_parser(subparsers)
     strainer.strainer.init_parser(subparsers)
+    triage.triage.init_parser(subparsers)
     waif.waif.init_parser(subparsers)
     web_interface.init_parser(subparsers)
     _add_verbosity_flags(subparsers)

@@ -12,6 +12,7 @@ Install it as a command-line tool with `uv tool install git+https://github.com/f
 - [FastRewind](fastrewind.md) - Convert a demultiplexed folder back into the Illumina NovaSeqXPlus output. It can be used to generate a subset for demultiplex testing.
 - [Nspector](nspector.md) - Inspect FASTQ files for N-base content and their distribution across flowcell tiles and sequencing cycles.
 - [Strainer](strainer.md) - Evaluate index mixing across flowcell lanes by identifying sample indexes from one lane appearing in undetermined reads of another.
+- [Triage](triage.md) - Triage the undetermined reads of a flowcell: Strainer, index discovery and Waif from a single pass over the FASTQ headers.
 - [Waif](waif.md) - Report the barcodes that remain undetermined in every demultiplexing run of a lane, with an estimated read count.
 
 ## General options

@@ -99,6 +99,7 @@ class TestModulesDefinition:
             "fastrewind",
             "nspector",
             "strainer",
+            "triage",
             "waif",
         ]
         for expected in expected_modules:
@@ -386,6 +387,7 @@ class TestModuleForms(tornado.testing.AsyncHTTPTestCase):
             biomate.fastrewind.fastrewind,
             biomate.nspector.nspector,
             biomate.strainer.strainer,
+            biomate.triage.triage,
             biomate.waif.waif,
         ):
             mod.init_parser(subparsers)

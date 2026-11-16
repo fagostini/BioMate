@@ -21,6 +21,8 @@ The command `biomate index` takes at least two arguments: the path to a FASTQ fi
 
 When neither `--index-regex` nor `--index-file` is given, the module reads the index from each read header (the text after the last `:` of the comment, e.g. `ACGTACGT+TTTTGGGG` in `@... 1:N:0:ACGTACGT+TTTTGGGG`) and groups similar indexes. Indexes are visited from most to least frequent: each joins the first, more frequent, index of the same length within `--distance` substitutions (Hamming distance; `--error-type` and `--engine` are ignored), otherwise it starts a new group. With `--distance 0` this is a plain count of identical indexes.
 
+Index discovery reads FASTQ input only (gzipped or uncompressed, four lines per record); pattern search also accepts FASTA. The header format is checked on the first record: if it carries no index, a warning is logged and no index is reported for that file. Percentages are relative to the number of reads in the file.
+
 Each output line is `<group index> <distance> <index> <count> <percentage>`, groups sorted by their total count. With `--output`, these lines go to `indexes_matches.txt`, and `indexes_groups.txt` holds one `<group index> <total count> <percentage>` line per group.
 
 ## Example of Standard Output

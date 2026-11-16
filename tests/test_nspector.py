@@ -44,6 +44,7 @@ from biomate.nspector.scan import (
 from biomate.nspector.flags import build_flags, dense_tile_cycle, sample_status
 from biomate.nspector.runmetrics import (
     INTEROP_SCHEMA,
+    cycle_frame,
     join_tile_interop,
     read_tile_metrics,
 )
@@ -683,7 +684,7 @@ class TestRunMetrics:
     def test_join_and_report(self, run_files, tmp_path):
         tables = build_tables(scan_files(run_files, "python"))
         metrics = polars.DataFrame(
-            [("R1", 1, 1101, 210.0, 80.0, 91.0)],
+            [("R1", 1, 1101, 210.0, 80.0, 91.0, 95.0, None, None)],
             schema=INTEROP_SCHEMA,
             orient="row",
         )
@@ -698,12 +699,36 @@ class TestRunMetrics:
         assert "interop_metric" in {p["name"] for p in spec["params"]}
         pick = [p for p in spec["params"] if p["name"] == "pick_tile"]
         assert len(pick) == 1
-        # one click handler each: tile map, tile x cycle heatmap, InterOp scatter
+        # one click handler each: tile map, swath strip, tile x cycle heatmap,
+        # InterOp scatter
         vega = json.dumps(vl_convert.vegalite_to_vega(spec))
-        assert vega.count('"name": "pick_tile_tuple", "on"') == 3
+        assert vega.count('"name": "pick_tile_tuple", "on"') == 4
         assert "nspector_tile_interop.parquet" in {
             p.name for p in tables.write_parquet(tmp_path)
         }
+        # % occupied has data, the phasing columns do not
+        options = next(p for p in spec["params"] if p["name"] == "interop_metric")
+        assert options["bind"]["options"] == [
+            "pct_pf",
+            "density_k",
+            "pct_q30",
+            "pct_occupied",
+        ]
+
+    def test_cycle_metrics_and_chart(self, run_files):
+        core = pytest.importorskip("interop.core")
+        cycles = cycle_frame(core._run_metrics_example_fixture())
+        # the example run has one sequencing read of 3 cycles and two index reads
+        assert cycles.select("read", "lane", "cycle", "error_rate").rows() == [
+            ("R1", 1, 1, pytest.approx(0.1)),
+            ("R1", 1, 2, pytest.approx(0.2)),
+            ("R1", 1, 3, pytest.approx(0.3)),
+        ]
+        assert cycles["intensity"].to_list() == [10.0, 10.0, 10.0]
+        tables = build_tables(scan_files(run_files, "python"))
+        tables.cycle_interop = cycles
+        spec = json.dumps(build_chart(tables).to_dict())
+        assert "InterOp per cycle" in spec and "P90 intensity" in spec
 
     def test_run_folder_needs_interop_dir(self, tmp_path):
         fq = tmp_path / "x.fastq.gz"
@@ -849,3 +874,74 @@ def test_robust_z_is_zero_at_the_median_of_a_zero_spread_group():
     z = df.select(_robust_z(["g"]).alias("z")).get_column("z").to_list()
     assert z[:2] == [0.0, 0.0]
     assert z[2] == float("-inf")
+
+
+def test_sample_flag_and_flagged_share(tmp_path):
+    """One sample with far more Ns than its lane mates gets its own flag."""
+    from biomate.nspector.flags import flagged_share
+
+    for i in range(6):
+        seq = "NNNNACGT" if i == 0 else "ACGTACGT"
+        write_fastq_gz(
+            tmp_path / f"S{i}_S{i + 1}_L001_R1_001.fastq.gz",
+            [_rec(seq, x=str(j)) for j in range(20)],
+        )
+    tables = build_tables(scan_files(discover_fastqs([tmp_path]), "python"))
+    flags = build_flags(tables)
+    own = flags.filter(polars.col("kind") == "sample")
+    assert own["sample"].to_list() == ["S0"] and own["status"].to_list() == ["FAIL"]
+    # S0 fails on its own; with no flowcell-level flag the others would pass
+    lane_wide = flags.filter(polars.col("kind") != "sample")
+    status = dict(sample_status(tables, own).iter_rows())
+    assert status["S0"] == "FAIL" and set(status.values()) == {"FAIL", "PASS"}
+    assert flagged_share(tables, own) == 0.0
+    if lane_wide.height:
+        assert 0 < flagged_share(tables, flags) <= 1
+
+
+def test_new_charts_in_spec(tmp_path):
+    root = tmp_path / "run"
+    _demux_tree(root)
+    tables = build_tables(scan_files(discover_fastqs([root]), "python"))
+    spec = json.dumps(build_chart(tables).to_dict())
+    for text in (
+        "Reads lost when filtering",
+        "Tiles by surface and swath",
+        "Undetermined share vs N rate",
+        "reads scanned (yield)",
+    ):
+        assert text in spec
+
+
+def test_lane_flag_and_collapsed_cycles(tmp_path):
+    """A lane bad on every tile is one flag; cycle runs are listed as ranges."""
+    from biomate.nspector.flags import collapse_flags
+    from biomate.nspector.report import verdict
+
+    records = []
+    for t in range(1, 6):
+        for i in range(40):
+            seq = list("ACGT" * 5)
+            if i < 20:
+                # every tile is bad, each at two cycles of its own
+                seq[6 + 2 * t : 8 + 2 * t] = "NN"
+            if i < 36:
+                seq[4:7] = "NNN"  # cycles 5-7 dark
+            records.append(_rec("".join(seq), tile=f"110{t}", x=str(i), y=str(i)))
+    path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+    write_fastq_gz(path, records)
+    tables = build_tables(scan_files([path], "python"))
+    tables.flags = flags = build_flags(tables)
+    assert sorted(flags["kind"].unique()) == ["dark_cycle", "lane"]
+    listed = collapse_flags(flags)
+    assert listed.filter(polars.col("kind") == "dark_cycle")["cycles"].to_list() == [
+        "5–7"
+    ]
+    text = verdict(listed, 1.0)
+    assert "Whole lane elevated: lane 1 R1" in text and "5–7" in text
+    assert verdict(listed.clear(), None).startswith("No anomalies")
+    page = write_report([], tables, tmp_path, {"--warn-rate": 0.01}).read_text()
+    for part in ("--warn-rate 0.01", 'class="verdict"', "<details", 'id="worst"'):
+        assert part in page
+    # summary tables come before the charts
+    assert page.index('id="worst"') < page.index('id="vis"')
