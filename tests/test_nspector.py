@@ -1013,3 +1013,34 @@ def test_collapsed_flags_name_the_tiles_of_one_cycle(tmp_path):
         ("1101, 1102", "12", 2, "FAIL")
     ]
     assert "2 tile × cycle event(s) at 1 cycle position(s)" in verdict(listed, None)
+
+
+def test_removal_costs(tmp_path):
+    """Costs of excluding a flagged tile and trimming trailing dark cycles."""
+    from biomate.nspector.flags import removal_costs
+
+    records = []
+    for t in range(1, 11):
+        for i in range(20):
+            seq = list("ACGT" * 5)
+            if t == 1 and i < 10:
+                seq[2:6] = "NNNN"  # tile 1101: 4 Ns in half its reads
+            seq[18:] = "NN"  # the last two cycles are dark everywhere
+            if i < 16:
+                seq[9] = "N"  # dark in the middle of the read: cannot be trimmed
+            records.append(_rec("".join(seq), tile=f"11{t:02d}", x=str(i), y=str(i)))
+    path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+    write_fastq_gz(path, records)
+    tables = build_tables(scan_files([path], "python"))
+    tables.flags = flags = build_flags(tables)
+    tile, trim = removal_costs(tables, flags)
+    n_bases = 40 + 400 + 160
+    assert tile["action"] == "Exclude the 1 flagged tile(s)"
+    assert tile["what"] == "lane 1: 1101"
+    assert tile["lost"] == pytest.approx(0.1)
+    # tile 1101 holds its own 40 Ns plus a tenth of the dark-cycle Ns
+    assert tile["n_removed"] == pytest.approx((40 + 40 + 16) / n_bases)
+    assert trim["action"] == "Trim R1 after cycle 18"
+    assert trim["lost"] == 0 and trim["n_removed"] == pytest.approx(400 / n_bases)
+    page = write_report([], tables, tmp_path).read_text()
+    assert "What removing them would cost" in page and "--exclude-tiles" in page

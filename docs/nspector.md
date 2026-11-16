@@ -88,6 +88,7 @@ Flags appear:
 - in `nspector_flags.parquet`;
 - at the top of the report: a short written verdict, the share of all N bases that sit on a flagged lane, tile, cell or dark cycle (high: the Ns come from the flagged events; low: they are spread over the run), and a flag table where consecutive cycles are one row (`45–52`) and tiles hit at the same cycles share a row, with the largest rate and the number of flags merged (`events`);
 - as orange outlines on the tile map and the tile × cycle heatmap;
+- under the flag table, as **What removing them would cost**: the reads given up and the share of all N bases removed by excluding the flagged tiles at demultiplexing, and by trimming dark cycles that run to the end of a read. Dark cycles inside a read cannot be left out by the demultiplexer and stay in the reads as N;
 - in a status column of the worst-tiles table;
 - in MultiQC, as an `N status` column (worst flag on the sample or its lanes) and a flags table.
 
