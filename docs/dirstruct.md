@@ -34,7 +34,7 @@ The command `biomate dirstruct create` allows you to create a directory structur
 
 To create a directory structure, the command is `biomate dirstruct create --source-file <SOURCE_FILE> --output-path <OUTPUT_PATH>`, where `<SOURCE_FILE>` is the path to the file containing the information on the directory structure, and `<OUTPUT_PATH>` is the path where it will be created. If the output path is not specified, the structure will be created in the current working directory.
 
-> _**Note:** The `create` command will not delete any additional files or directories already present in the output path. It will only create the directories and files specified in the input file. If a file already exists at a specified path, it will be overwritten without warning._
+> _**Note:** The `create` command only adds what is missing. It never deletes, overwrites or touches anything already present in the output path, so you can either create the structure first and then replace some placeholders with real files, or place real files first and let `create` fill in the rest. If a path exists with the wrong type (e.g. a file where the input lists a directory), or a parent component is a file, that entry is skipped with a warning and the rest of the structure is still created._
 
 The `create` command will only _touch_ the generated files, meaning it will create empty files with the specified names. If you want to populate the files with content, you will need to do that separately after the structure has been created.
 
