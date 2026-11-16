@@ -41,6 +41,27 @@ class CustomParser(argparse.ArgumentParser):
         self.exit(2, f"error: {message}\n")
 
 
+def _add_verbosity_flags(subparsers: argparse._SubParsersAction) -> None:
+    """Accept --verbose/--quiet after any (nested) sub-command too."""
+    for sub in subparsers.choices.values():
+        # SUPPRESS: when omitted here, keep the value set before the sub-command
+        sub.add_argument(
+            "--verbose",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help="Enable verbose output (debug level logging)",
+        )
+        sub.add_argument(
+            "--quiet",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help="Suppress output (error level logging only)",
+        )
+        for action in sub._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                _add_verbosity_flags(action)
+
+
 def main():
     """Main function."""
     parser = CustomParser(
@@ -76,6 +97,7 @@ def main():
     strainer.strainer.init_parser(subparsers)
     waif.waif.init_parser(subparsers)
     web_interface.init_parser(subparsers)
+    _add_verbosity_flags(subparsers)
 
     args = parser.parse_args()
 
@@ -88,5 +110,9 @@ def main():
     if not hasattr(args, "parse") or not hasattr(args, "run"):
         parser.print_help()
     else:
-        args = args.parse(args)
+        try:
+            args = args.parse(args)
+        except argparse.ArgumentTypeError as e:
+            # invalid input: show usage and the message, not a traceback
+            parser.error(str(e))
         args.run(args)

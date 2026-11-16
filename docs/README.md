@@ -2,7 +2,7 @@
 
 BioMate represents a collection of scripts and utility tools for everyday processing of biological data, conveniently gathered into a single Python package.
 
-To check the package information and available sub-commands, you can run `biomate --help`.
+Install it as a command-line tool with `uv tool install git+https://github.com/fagostini/BioMate`. To check the package information and available sub-commands, you can run `biomate --help`.
 
 ## Available tools
 
@@ -16,7 +16,7 @@ To check the package information and available sub-commands, you can run `biomat
 
 ## General options
 
-In addition to the `--version` option, which prints the current version of the BioMate package, the following options can be provided before any sub-command (_e.g._ `biomate <OPTION> <SUBCOMMAND>`), and they will be propagated to the sub-command execution:
+In addition to the `--version` option, which prints the current version of the BioMate package, the following options can be provided either before or after the sub-command (_e.g._ `biomate <OPTION> <SUBCOMMAND>` or `biomate <SUBCOMMAND> ... <OPTION>`):
 
 - `--verbose`: Increase verbosity of the output by setting the logging level to `DEBUG`. This will print additional information about the execution of the sub-command.
 - `--quiet`: Decrease verbosity of the output by setting the logging level to `ERROR`. This will suppress most of the output, only printing errors.
