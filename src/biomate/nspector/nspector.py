@@ -1,11 +1,13 @@
 """Nspector main script."""
 
+from __future__ import annotations
+
 import argparse
 import logging
 import pathlib
 import time
+from typing import TYPE_CHECKING
 
-import altair as alt
 import polars
 from rich.progress import (
     BarColumn,
@@ -17,7 +19,6 @@ from rich.progress import (
 )
 
 from biomate.nspector.flags import build_flags
-from biomate.nspector.report import write_multiqc, write_report
 from biomate.nspector.runmetrics import join_tile_interop, read_tile_metrics
 from biomate.nspector.scan import (
     FileScan,
@@ -29,6 +30,9 @@ from biomate.nspector.scan import (
 )
 from biomate.nspector.tables import build_tables, tile_layout
 from biomate.setup import setup_logging
+
+if TYPE_CHECKING:
+    import altair as alt
 
 
 def validate_args(args: argparse.Namespace) -> argparse.Namespace:
@@ -198,6 +202,9 @@ def _scan_frame(scan: FileScan, field: str, columns: list[str]) -> polars.DataFr
 
 def plot_n_per_sequence(scan: FileScan, output_path: pathlib.Path) -> None:
     """Plot the distribution of N counts per sequence."""
+    # altair is imported lazily: it costs ~1 s and would slow down every `biomate` call
+    import altair as alt
+
     chart = (
         _scan_frame(scan, "n_per_read", ["lane", "n_count", "n_sequences"])
         .group_by("n_count")
@@ -216,6 +223,8 @@ def plot_n_per_sequence(scan: FileScan, output_path: pathlib.Path) -> None:
 
 def plot_n_per_cycle_and_tile(scan: FileScan, output_path: pathlib.Path) -> None:
     """Plot the distribution of N-containing sequences across cycles and tiles."""
+    import altair as alt
+
     max_cycle = scan.max_len
     tiles = _scan_frame(
         scan, "tiles", ["lane", "tile", "total", "n", "n_bases", "lowq", "bases"]
@@ -273,6 +282,8 @@ def _tile_chart(source: polars.DataFrame, bin_size: int) -> alt.VConcatChart:
     ``source`` must already be sorted by (x_bin, y_bin) so the rendering is
     deterministic.
     """
+    import altair as alt
+
     base = alt.Chart(source).transform_calculate(
         x0=f"datum.x_bin * {bin_size}",
         x1=f"(datum.x_bin + 1) * {bin_size}",
@@ -329,6 +340,8 @@ def plot_individual_tiles(
 
 def write_pngs(scan: FileScan, output: pathlib.Path, bin_size: int) -> None:
     """Write the static PNG charts for one input file."""
+    import altair as alt
+
     # aggregated inputs are bounded by tiles x cycles; Altair's 5000-row cap is too low
     with alt.data_transformers.disable_max_rows():
         plot_n_per_sequence(scan, output / f"{scan.stem}_n_count_distribution.png")
@@ -453,6 +466,9 @@ def _run(args: argparse.Namespace, progress: Progress) -> None:
         )
     logging.info(f"Tables built and written in {time.perf_counter() - phase:.1f} s.")
     progress.advance(outputs)
+
+    # report pulls in altair; import only when it is needed
+    from biomate.nspector.report import write_multiqc, write_report
 
     if write_html:
         phase = time.perf_counter()

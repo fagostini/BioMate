@@ -12,7 +12,20 @@ For detailed tool documentation, see [docs/README.md](docs/README.md).
 
 > _**Note:** Running the demultiplexing test recipes additionally requires the Illumina [BCL-convert](https://support.illumina.com/sequencing/sequencing_software/bcl-convert/downloads.html) executable, which is not bundled with this repository because its redistribution is prohibited. Download it from the [Illumina website](https://support.illumina.com/sequencing/sequencing_software/bcl-convert/downloads.html) and place it in the `assets/` directory. See [docs/README.md](docs/README.md#external-dependencies) for details._
 
-### Recommended: Using uv
+### Install as a command-line tool
+
+To only use `biomate` (no development setup), install it as an isolated tool:
+
+```bash
+uv tool install git+https://github.com/fagostini/BioMate
+
+# With InterOp support (nspector --run-folder)
+uv tool install "biomate[interop] @ git+https://github.com/fagostini/BioMate"
+
+biomate --help
+```
+
+### Development setup with uv
 
 ```bash
 # Clone repository
