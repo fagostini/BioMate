@@ -12,6 +12,7 @@ from multiprocessing import Pool
 import dnaio
 import regex as re
 
+from biomate.headers import count_header_indexes
 from biomate.setup import setup_logging
 
 try:
@@ -188,27 +189,6 @@ def write_results(
             output_file.write(f"{key} {counts} {counts / total_records:.2%}\n")
 
 
-def extract_header_indexes(path: pathlib.Path) -> tuple[Counter, int]:
-    """Count the indexes in the read headers (``... 1:N:0:ACGT+TTTT``).
-
-    Returns the index counter and the total number of records.
-    """
-    indexes: Counter = Counter()
-    total_records = 0
-    no_index = 0
-    with dnaio.open(path) as reader:
-        for record in reader:
-            total_records += 1
-            parts = record.name.split(" ", 1)
-            if len(parts) < 2 or ":" not in parts[1]:
-                no_index += 1
-                continue
-            indexes[parts[1].split(":")[-1]] += 1
-    if no_index:
-        logging.warning(f"{no_index} records in {path} have no index in the header")
-    return indexes, total_records
-
-
 _BASES = "ACGTN"
 
 
@@ -277,7 +257,12 @@ def _run_discovery(
     """Count and group the header indexes of one input file."""
     if args.error_type != "s":
         logging.warning("Index discovery groups by substitutions only")
-    counts, total_records = extract_header_indexes(path)
+    try:
+        counts = count_header_indexes(path)
+    except ValueError as e:
+        logging.warning(e)
+        counts = Counter()
+    total_records = sum(counts.values())
     if not counts:
         logging.warning("   No indexes found.")
         return

@@ -6,10 +6,10 @@ import pathlib
 from collections import Counter
 from multiprocessing import Pool
 
-import dnaio
 import polars
 import regex
 
+from biomate.headers import count_header_indexes
 from biomate.samplesheet import read_section
 from biomate.setup import setup_logging
 
@@ -137,22 +137,14 @@ def extract_indexes_from_undetermined_file(
             f"Invalid lane format in file name: {undetermined_file_path.name}. Expected format: *_*_LXXX_*"
         )
 
-    indexes = Counter()
-    with dnaio.open(undetermined_file_path) as reader:
-        for record in reader:
-            # Expected format: name parts separated by space, index in second part after last colon
-            name_parts = record.name.split(" ")
-            if len(name_parts) < 2:
-                raise ValueError(
-                    f"Invalid read name format in {undetermined_file_path.name}: {record.name}"
-                )
-
-            # Extract index from second part (format: control:barcode)
-            idx = name_parts[1].split(":")[-1]
-
-            # Skip indexes with poly-G artifacts (likely sequencing errors)
-            if POLY_G_ARTIFACT not in idx:
-                indexes.update({idx})
+    # Skip indexes with poly-G artifacts (likely sequencing errors)
+    indexes = Counter(
+        {
+            idx: count
+            for idx, count in count_header_indexes(undetermined_file_path).items()
+            if POLY_G_ARTIFACT not in idx
+        }
+    )
 
     return [
         {

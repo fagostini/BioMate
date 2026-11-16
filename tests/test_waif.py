@@ -11,8 +11,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-import biomate.waif.waif as waif
-from biomate.waif.waif import (
+import biomate.headers as headers
+from biomate.headers import (
     BoundedReader,
     _build_member_index,
     _count_for_file,
@@ -22,6 +22,8 @@ from biomate.waif.waif import (
     _find_member_offsets,
     _load_member_index,
     _member_index_for,
+)
+from biomate.waif.waif import (
     get_shared_lanes_from_samplesheet,
     main,
     validate_args,
@@ -548,7 +550,7 @@ class TestCounters:
         m2 = gzip.compress(_fastq_text(50, 100).encode())
         f = tmp_path / "aligned.fastq.gz"
         f.write_bytes(m1 + m2)
-        monkeypatch.setattr(waif, "_INFLATE_CHUNK", len(m1))
+        monkeypatch.setattr(headers, "_INFLATE_CHUNK", len(m1))
         got = dict(_count_threaded(f))
         assert got == _reference_counts(_fastq_text(50, 0) + _fastq_text(50, 100))
 
@@ -562,7 +564,7 @@ class TestCounters:
         p2 = _fastq_text(100, 1000)
         f = tmp_path / "bigmember.fastq.gz"
         f.write_bytes(gzip.compress(p1.encode()) + gzip.compress(p2.encode()))
-        monkeypatch.setattr(waif, "_INFLATE_CHUNK", 64)
+        monkeypatch.setattr(headers, "_INFLATE_CHUNK", 64)
         got = dict(_count_threaded(f))
         assert got == _reference_counts(p1 + p2)
 
@@ -645,7 +647,7 @@ class TestMemberIndex:
         """_count_for_file must route a large line-aligned multi-member file
         to the index (forked) path; a second call hits the stored
         index."""
-        monkeypatch.setattr(waif, "THREADED_MIN_SIZE", 0)
+        monkeypatch.setattr(headers, "THREADED_MIN_SIZE", 0)
         f, expected = _aligned_multi_member(
             tmp_path, "aligned.fastq.gz", [_fastq_text(40, 10 * k) for k in range(3)]
         )
@@ -658,7 +660,7 @@ class TestMemberIndex:
             calls.append(1)
             return real(ff, index, budget)
 
-        monkeypatch.setattr(waif, "_count_from_index", spy)
+        monkeypatch.setattr(headers, "_count_from_index", spy)
         got = dict(_count_for_file(f, budget=3, cache_dir=cache_dir))
         assert got == expected
         assert calls, "expected the index (parallel) path to be taken"
@@ -672,7 +674,7 @@ class TestMemberIndex:
     ) -> None:
         """A file whose member boundary falls mid-header must NOT use the
         index path; it must fall back to the (correct) serial count."""
-        monkeypatch.setattr(waif, "THREADED_MIN_SIZE", 0)
+        monkeypatch.setattr(headers, "THREADED_MIN_SIZE", 0)
         f, expected = _misaligned_two_member(
             tmp_path, "misaligned.fastq.gz", _fastq_text(60, 0)
         )
@@ -882,7 +884,7 @@ def _write_records(path: Path, n: int, qual: str = "IIII") -> None:
             fh.write(f"@M:1:FC:1:1101:{i}:1 1:N:0:ACGT+TGCA\nACGT\n+\n{qual}\n")
 
 
-@pytest.mark.parametrize("counter", [waif._count_serial, waif._count_threaded])
+@pytest.mark.parametrize("counter", [headers._count_serial, headers._count_threaded])
 def test_quality_line_starting_with_at_is_not_a_header(tmp_path, counter):
     """A quality string starting with '@' (Q31) is not counted as a read."""
     f = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
@@ -894,7 +896,7 @@ def test_bounded_range_ignores_at_quality_lines(tmp_path):
     """The member-index path counts headers only, too."""
     f = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
     _write_records(f, 3, qual="@III")
-    counts = waif._count_bounded_range(f, 0, f.stat().st_size)
+    counts = headers._count_bounded_range(f, 0, f.stat().st_size)
     assert dict(counts) == {b"ACGT+TGCA": 3}
 
 
@@ -905,7 +907,7 @@ def test_truncated_gzip_raises_instead_of_undercounting(tmp_path):
     cut = tmp_path / "Undetermined_S0_L001_R1_001.fastq.gz"
     cut.write_bytes(whole.read_bytes()[: whole.stat().st_size // 2])
     with pytest.raises(EOFError):
-        waif._count_threaded(cut)
+        headers._count_threaded(cut)
     with pytest.raises(EOFError):
         _find_member_offsets(cut)
 
@@ -927,5 +929,5 @@ def test_threaded_count_with_capped_inflate(tmp_path, monkeypatch):
                 for i in range(start, start + 500)
             )
             fh.write(gzip.compress(body.encode()))
-    monkeypatch.setattr(waif, "_INFLATE_CHUNK", 64)
-    assert waif._count_threaded(f) == waif._count_serial(f) == {"ACGT+TGCA": 1000}
+    monkeypatch.setattr(headers, "_INFLATE_CHUNK", 64)
+    assert headers._count_threaded(f) == headers._count_serial(f) == {"ACGT+TGCA": 1000}
