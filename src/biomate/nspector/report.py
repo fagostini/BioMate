@@ -24,6 +24,7 @@ from biomate.nspector.flags import (
     removal_costs,
     sample_status,
     status_name,
+    verdict,
 )
 from biomate.nspector.scan import UNDETERMINED, FileScan
 from biomate.nspector.tables import KEYS, NspectorTables
@@ -45,7 +46,7 @@ SIZE_WARNING_BYTES = 20 * 1024 * 1024
 SCHEME = "viridis"
 # outline colour for flagged tiles/cells; stands out against both ends of viridis
 FLAG_COLOR = "#ff7f0e"
-# flags listed in the report header; nspector_flags.parquet keeps all of them
+# flag rows shown at once in the report; the rest are folded under them
 MAX_FLAG_ROWS = 50
 
 # Vega expression: the value plotted for the active metric.
@@ -1525,58 +1526,6 @@ def project_summary(tables: NspectorTables) -> polars.DataFrame:
     )
 
 
-def _some(items: list[str], limit: int = 5) -> str:
-    """Join ``items`` with commas, naming at most ``limit`` of them."""
-    more = len(items) - limit
-    return ", ".join(items[:limit]) + (f" and {more} more" if more > 0 else "")
-
-
-def verdict(flags: polars.DataFrame, share: float | None) -> str:
-    """Sum up the collapsed flags (``collapse_flags``) in a few plain sentences."""
-    if not flags.height:
-        return "No anomalies: no lane, tile, cycle or sample reaches the warn rate."
-
-    def of(kind: str) -> list[dict]:
-        return flags.filter(polars.col("kind") == kind).to_dicts()
-
-    def where(row: dict) -> str:
-        return f"lane {row['lane']} {row['read']}"
-
-    def fails(rows: list[dict]) -> str:
-        count = sum(r["status"] == "FAIL" for r in rows)
-        return f" ({count} FAIL)" if count else ""
-
-    parts = []
-    if rows := of("lane"):
-        names = _some([f"{where(r)} ({r['status']})" for r in rows])
-        parts.append(f"Whole lane elevated: {names}.")
-    dark: dict[str, list[str]] = {}
-    for row in of("dark_cycle"):
-        dark.setdefault(where(row), []).append(row["cycles"])
-    parts += [f"Dark cycles on {k}: {_some(v)}." for k, v in dark.items()]
-    if rows := of("tile"):
-        worst = max(rows, key=lambda r: r["rate"])
-        parts.append(
-            f"{len(rows)} flagged tile(s){fails(rows)}; the worst is "
-            f"{worst['tile']} on {where(worst)}, at {worst['rate']:.2%} per cycle."
-        )
-    if rows := of("tile_cycle"):
-        events = sum(r["events"] for r in rows)
-        worst = max(r["rate"] for r in rows)
-        parts.append(
-            f"{events} tile × cycle event(s) at {len(rows)} cycle position(s), "
-            f"up to {worst:.0%} of a tile's reads."
-        )
-    if rows := of("sample"):
-        names = dict.fromkeys(f"{r['project']} / {r['sample']}" for r in rows)
-        parts.append(f"Outlier sample(s): {_some(list(names))}.")
-    if share is not None:
-        parts.append(
-            f"Flagged lanes, tiles and cycles hold {share:.0%} of all N bases."
-        )
-    return " ".join(parts)
-
-
 # number formats of the HTML summary tables
 TABLE_FORMATS = {
     "N rate": ".3%",
@@ -1790,22 +1739,23 @@ def write_report(
     share = flagged_share(tables, flags)
     if flags.height:
         n_fail = int((flags["status"] == "FAIL").sum())
-        more = (
-            f"; showing the first {MAX_FLAG_ROWS} rows, all in nspector_flags.parquet"
-            if listed.height > MAX_FLAG_ROWS
-            else ""
-        )
         # project and sample only show up with sample flags, tile with tile flags
         used = [c for c in listed.columns if listed[c].null_count() < listed.height]
+        formats = {"rate": ".3%", "z": ".1f"}
+        rest = listed.slice(MAX_FLAG_ROWS).select(used)
         flags_html = (
             f'<p class="meta">{flags.height} flag(s): {n_fail} FAIL, '
             f"{flags.height - n_fail} WARN. Consecutive cycles, and tiles hit at "
-            f"the same cycles, are listed as one row with the largest rate{more}.</p>"
+            "the same cycles, are listed as one row with the largest rate.</p>"
             '<div class="scroll">'
-            + _table(
-                listed.head(MAX_FLAG_ROWS).select(used), {"rate": ".3%", "z": ".1f"}
-            )
+            + _table(listed.head(MAX_FLAG_ROWS).select(used), formats)
             + "</div>"
+            + (
+                f"<details><summary>Show the other {rest.height} row(s)</summary>"
+                f'<div class="scroll">{_table(rest, formats)}</div></details>'
+                if rest.height
+                else ""
+            )
         )
     else:
         flags_html = (
@@ -1976,10 +1926,7 @@ def write_multiqc(tables: NspectorTables, output: pathlib.Path) -> list[pathlib.
             "pconfig": {"id": "nspector_flags_table", "title": "nspector: flags"},
             "data": {
                 f"{i + 1:04d} {r['read']} L{r['lane']:03d}": {
-                    k: v
-                    for k, v in r.items()
-                    # JSON has no inf (z is inf when the lane's MAD is 0)
-                    if v is not None and not (isinstance(v, float) and math.isinf(v))
+                    k: v for k, v in r.items() if v is not None
                 }
                 for i, r in enumerate(flags.iter_rows(named=True))
             },

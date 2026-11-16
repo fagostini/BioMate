@@ -8,7 +8,8 @@ and a lane-wide dark cycle is reported once rather than on every tile.
 Flag kinds:
 
 * ``dark_cycle``: at least ``DARK_TILE_FRACTION`` of a lane's tiles are at or
-  above ``warn_rate`` at that cycle.
+  above ``warn_rate`` at that cycle. Not raised when ``WHOLE_READ_FRACTION`` of
+  the read's cycles qualify: that is bad tiles or a bad lane.
 * ``tile``: the tile's mean per-cycle rate (dark cycles left out) is at or
   above ``warn_rate``.
 * ``lane``: at least ``LANE_TILE_FRACTION`` of a lane's tiles (two or more)
@@ -38,6 +39,9 @@ Z_THRESHOLD = 5.0
 # are no longer outliers and only a dark-cycle flag can report them
 DARK_TILE_FRACTION = 0.5
 LANE_TILE_FRACTION = 0.8
+# a read with this share of its cycles dark has bad tiles or a bad lane, not
+# cycle events
+WHOLE_READ_FRACTION = 0.8
 # MAD of a normal distribution is 0.6745 sigma; 1.4826 = 1 / 0.6745
 MAD_SCALE = 1.4826
 
@@ -65,13 +69,18 @@ def _status(fail_rate: float) -> polars.Expr:
     )
 
 
-def _robust_z(group: list[str]) -> polars.Expr:
-    """(rate - median) / (1.4826 * MAD) within ``group``; inf when MAD is 0."""
+def _robust_z(group: list[str], warn_rate: float) -> polars.Expr:
+    """(rate - median) / max(1.4826 * MAD, warn_rate / Z_THRESHOLD) within ``group``.
+
+    The floor on the scale means a z of ``Z_THRESHOLD`` needs a rate at least
+    ``warn_rate`` above the group's median. Without it a group with almost no
+    spread (a few near-equal samples, or tiles all at 0) scores any small
+    difference as a huge outlier, or as inf.
+    """
     median = polars.col("rate").median().over(group)
     mad = (polars.col("rate") - median).abs().median().over(group)
-    # 0/0 (rate at the median of a zero-spread group) is NaN, which polars
-    # orders above every number: a tile at the median is not an outlier
-    return ((polars.col("rate") - median) / (MAD_SCALE * mad)).fill_nan(0.0)
+    scale = polars.max_horizontal(MAD_SCALE * mad, polars.lit(warn_rate / Z_THRESHOLD))
+    return (polars.col("rate") - median) / scale
 
 
 def _not_covered(
@@ -154,11 +163,24 @@ def build_flags(
         )
     )
 
+    # dark on most of the read: leave it to the tile and lane flags, which then
+    # count every cycle, instead of listing nearly all cycles as dark
+    whole = (
+        dark.group_by("read", "lane")
+        .agg(polars.len().alias("dark"))
+        .join(
+            dense.group_by("read", "lane").agg(polars.col("cycle").n_unique()),
+            on=["read", "lane"],
+        )
+        .filter(polars.col("dark") >= WHOLE_READ_FRACTION * polars.col("cycle"))
+    )
+    dark = dark.join(whole, on=["read", "lane"], how="anti")
+
     tile_rates = (
         dense.join(dark, on=lane_cycle, how="anti")
         .group_by("read", "lane", "tile")
         .agg(polars.col("rate").mean())
-        .with_columns(_robust_z(["read", "lane"]).alias("z"))
+        .with_columns(_robust_z(["read", "lane"], warn_rate).alias("z"))
     )
     lanes = (
         tile_rates.group_by("read", "lane")
@@ -191,7 +213,7 @@ def build_flags(
     )
     tiles = _not_covered(all_tiles, lanes, ["read", "lane"])
 
-    cells = dense.with_columns(_robust_z(lane_cycle).alias("z")).filter(
+    cells = dense.with_columns(_robust_z(lane_cycle, warn_rate).alias("z")).filter(
         (polars.col("z") >= Z_THRESHOLD) & (polars.col("rate") >= warn_rate)
     )
     cells = cells.join(dark, on=lane_cycle, how="anti").with_columns(_status(fail_rate))
@@ -206,7 +228,7 @@ def build_flags(
     samples = (
         tables.sample_lane.filter(polars.col("project") != UNDETERMINED)
         .with_columns(polars.col("n_base_rate").alias("rate"))
-        .with_columns(_robust_z(["read", "lane"]).alias("z"))
+        .with_columns(_robust_z(["read", "lane"], warn_rate).alias("z"))
         .filter((polars.col("z") >= Z_THRESHOLD) & (polars.col("rate") >= warn_rate))
         .with_columns(
             polars.lit("sample").alias("kind"),
@@ -444,3 +466,92 @@ def removal_costs(tables: NspectorTables, flags: polars.DataFrame) -> list[dict]
             }
         )
     return costs
+
+
+def _some(items: list[str], limit: int = 5) -> str:
+    """Join ``items`` with commas, naming at most ``limit`` of them."""
+    more = len(items) - limit
+    return ", ".join(items[:limit]) + (f" and {more} more" if more > 0 else "")
+
+
+def verdict(flags: polars.DataFrame, share: float | None) -> str:
+    """Sum up the collapsed flags (``collapse_flags``) in a few plain sentences."""
+    if not flags.height:
+        return "No anomalies: no lane, tile, cycle or sample reaches the warn rate."
+
+    def of(kind: str) -> list[dict]:
+        return flags.filter(polars.col("kind") == kind).to_dicts()
+
+    def where(row: dict) -> str:
+        return f"lane {row['lane']} {row['read']}"
+
+    def fails(rows: list[dict]) -> str:
+        count = sum(r["status"] == "FAIL" for r in rows)
+        return f" ({count} FAIL)" if count else ""
+
+    parts = []
+    if rows := of("lane"):
+        names = _some([f"{where(r)} ({r['status']})" for r in rows])
+        parts.append(f"Whole lane elevated: {names}.")
+    dark: dict[str, list[str]] = {}
+    for row in of("dark_cycle"):
+        dark.setdefault(where(row), []).append(row["cycles"])
+    parts += [f"Dark cycles on {k}: {_some(v)}." for k, v in dark.items()]
+    if rows := of("tile"):
+        worst = max(rows, key=lambda r: r["rate"])
+        parts.append(
+            f"{len(rows)} flagged tile(s){fails(rows)}; the worst is "
+            f"{worst['tile']} on {where(worst)}, at {worst['rate']:.2%} per cycle."
+        )
+    if rows := of("tile_cycle"):
+        events = sum(r["events"] for r in rows)
+        worst = max(r["rate"] for r in rows)
+        parts.append(
+            f"{events} tile × cycle event(s) at {len(rows)} cycle position(s), "
+            f"up to {worst:.0%} of a tile's reads."
+        )
+    if rows := of("sample"):
+        names = dict.fromkeys(f"{r['project']} / {r['sample']}" for r in rows)
+        parts.append(f"Outlier sample(s): {_some(list(names))}.")
+    if share is not None:
+        parts.append(
+            f"Flagged lanes, tiles and cycles hold {share:.0%} of all N bases."
+        )
+    return " ".join(parts)
+
+
+def summary(
+    tables: NspectorTables, flags: polars.DataFrame, params: dict | None = None
+) -> dict:
+    """The run in one JSON-ready dict: status, verdict, counts, rates and costs.
+
+    ``status`` is the worst flag (PASS without flags). Written as
+    ``nspector_summary.json`` for pipelines and LIMS.
+    """
+    lanes = tables.sample_lane
+    counts = dict(flags["status"].value_counts().iter_rows())
+    share = flagged_share(tables, flags)
+    rates = [
+        (polars.col("n").sum() / polars.col("total").sum()).alias("n_rate"),
+        (polars.col("n_bases").sum() / polars.col("bases").sum()).alias("n_per_base"),
+    ]
+    return {
+        "status": "FAIL"
+        if counts.get("FAIL")
+        else "WARN"
+        if counts.get("WARN")
+        else "PASS",
+        "verdict": verdict(collapse_flags(flags), share),
+        "flags": {status: counts.get(status, 0) for status in ("FAIL", "WARN")},
+        "flags_by_kind": dict(flags["kind"].value_counts().sort("kind").iter_rows()),
+        "flagged_n_share": share,
+        "reads": int(lanes["total"].sum()),
+        "reads_with_n": int(lanes["n"].sum()),
+        **lanes.select(rates).row(0, named=True),
+        "by_read": {
+            row["read"]: {"n_rate": row["n_rate"], "n_per_base": row["n_per_base"]}
+            for row in lanes.group_by("read").agg(rates).sort("read").to_dicts()
+        },
+        "removal_costs": removal_costs(tables, flags),
+        "parameters": params or {},
+    }

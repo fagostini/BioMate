@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import pathlib
 import time
@@ -18,7 +19,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from biomate.nspector.flags import build_flags
+from biomate.nspector.flags import build_flags, summary
 from biomate.nspector.runmetrics import (
     join_tile_interop,
     read_cycle_metrics,
@@ -38,6 +39,10 @@ from biomate.setup import setup_logging
 
 if TYPE_CHECKING:
     import altair as alt
+
+
+# exit code of --fail-on: outputs were written, the run is flagged
+FLAGGED_EXIT_CODE = 3
 
 
 def validate_args(args: argparse.Namespace) -> argparse.Namespace:
@@ -191,6 +196,13 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         "--no-multiqc",
         action="store_true",
         help="Do not write MultiQC custom-content files.",
+    )
+    parser.add_argument(
+        "--fail-on",
+        choices=["WARN", "FAIL"],
+        default=None,
+        help=f"Exit with code {FLAGGED_EXIT_CODE} after writing every output when the "
+        "worst anomaly flag is at least this status (default: always exit 0).",
     )
     parser.set_defaults(parse=validate_args, run=main)
 
@@ -397,11 +409,16 @@ def main(args: argparse.Namespace) -> None:
     setup_logging(args)
     logging.info("Running nspector module...")
     with _progress(getattr(args, "quiet", False)) as progress:
-        _run(args, progress)
+        status = _run(args, progress)
     logging.info("Nspector module finished.")
+    fail_on = getattr(args, "fail_on", None)
+    if fail_on and status in (("FAIL",) if fail_on == "FAIL" else ("WARN", "FAIL")):
+        logging.error(f"Run status is {status} (--fail-on {fail_on}).")
+        raise SystemExit(FLAGGED_EXIT_CODE)
 
 
-def _run(args: argparse.Namespace, progress: Progress) -> None:
+def _run(args: argparse.Namespace, progress: Progress) -> str | None:
+    """Scan, write every output and return the run status (None without input)."""
     bin_size = args.spatial_bin_size
     sizes = {p: p.stat().st_size for p in args.input}
     scanning = progress.add_task(
@@ -430,7 +447,7 @@ def _run(args: argparse.Namespace, progress: Progress) -> None:
     )
     if not scans:
         logging.warning("No usable input files; nothing to report.")
-        return
+        return None
 
     for scan in scans:
         logging.debug(
@@ -470,6 +487,17 @@ def _run(args: argparse.Namespace, progress: Progress) -> None:
         if cycles.height:
             tables.cycle_interop = cycles
     tables.write_parquet(args.output)
+    params = {
+        "--warn-rate": getattr(args, "warn_rate", 0.01),
+        "--fail-rate": getattr(args, "fail_rate", 0.05),
+        "--min-qual": getattr(args, "min_qual", 20),
+        "--spatial-bin-size": bin_size,
+        "--spatial-cycle-window": getattr(args, "spatial_cycle_window", 10),
+    }
+    run_summary = summary(tables, tables.flags, params)
+    (args.output / "nspector_summary.json").write_text(
+        json.dumps(run_summary, indent=1) + "\n"
+    )
     if tables.flags.height:
         counts = tables.flags["status"].value_counts().sort("status")
         logging.warning(
@@ -485,18 +513,7 @@ def _run(args: argparse.Namespace, progress: Progress) -> None:
 
     if write_html:
         phase = time.perf_counter()
-        path = write_report(
-            scans,
-            tables,
-            args.output,
-            {
-                "--warn-rate": getattr(args, "warn_rate", 0.01),
-                "--fail-rate": getattr(args, "fail_rate", 0.05),
-                "--min-qual": getattr(args, "min_qual", 20),
-                "--spatial-bin-size": bin_size,
-                "--spatial-cycle-window": getattr(args, "spatial_cycle_window", 10),
-            },
-        )
+        path = write_report(scans, tables, args.output, params)
         logging.info(
             f"Interactive report written to {path} in {time.perf_counter() - phase:.1f} s."
         )
@@ -510,3 +527,4 @@ def _run(args: argparse.Namespace, progress: Progress) -> None:
         logging.debug(f"Creating PNG charts for file: {scan.path}")
         write_pngs(scan, args.output, bin_size)
         progress.advance(outputs)
+    return run_summary["status"]
