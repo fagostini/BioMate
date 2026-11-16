@@ -31,8 +31,5 @@ COPY . /app
 WORKDIR /app
 RUN pip install .
 
-# Expose the web interface port
-EXPOSE 8080
-
-# Run the web interface
-ENTRYPOINT [""]
+# Web interface port (see docker-compose.yml)
+EXPOSE 8765

@@ -12,7 +12,6 @@ SECURITY NOTES:
   - XSRF protection via tokens
   - Security headers (X-Content-Type-Options, X-Frame-Options, etc.)
   - Input validation and command injection prevention
-  - Rate limiting support
 - For public network deployment, requires:
   - HTTPS/TLS configuration
   - Reverse proxy with authentication (nginx, Apache, etc.)
@@ -26,7 +25,6 @@ from __future__ import annotations
 import argparse
 import os
 import secrets
-import shlex
 import ssl
 import subprocess
 from pathlib import Path
@@ -64,9 +62,8 @@ MODULES: List[Dict[str, Any]] = [
         ),
         "description": (
             "The blabber tool generates random DNA sequences with configurable "
-            "length, number, alphabet, and output format. It supports sequence "
-            "masks defining the structure of reads and indexes (e.g. R1;I1;I2;R2), "
-            "and can mimic real Illumina output by using a SampleSheet.csv file. "
+            "length, number, alphabet, and output format. It "
+            "can mimic real Illumina output by using a SampleSheet.csv file. "
             "Optionally taints output with ~10% cross-project sequences to simulate "
             "index hopping."
         ),
@@ -86,32 +83,6 @@ MODULES: List[Dict[str, Any]] = [
                 "help": "Length of each generated sequence",
                 "form_name": "seq_length",
                 "cli_name": "seq-length",
-            },
-            {
-                "label": "Sequence Mask",
-                "param_type": "text",
-                "default": "",
-                "is_path": False,
-                "help": "Structure mask (format: R1;I1;I2;R2). Leave empty to auto-detect from sample sheet.",
-                "form_name": "seq_mask",
-                "cli_name": "seq-mask",
-            },
-            {
-                "label": "Index 1 Sequence",
-                "param_type": "text",
-                "default": "",
-                "is_path": False,
-                "help": "Custom Index 1 sequence (overrides any value in sample sheet)",
-                "form_name": "index1",
-                "cli_name": "index1",
-            },
-            {
-                "label": "Index 2 Sequence",
-                "param_type": "text",
-                "default": "",
-                "help": "Custom Index 2 sequence",
-                "form_name": "index2",
-                "cli_name": "index2",
             },
             {
                 "label": "Nucleotide Alphabet",
@@ -344,7 +315,7 @@ MODULES: List[Dict[str, Any]] = [
                 "options": ["index_regex", "index_file"],
                 "help": "How to specify index patterns",
                 "form_name": "match_type",
-                "cli_name": "match-type",
+                "cli_name": None,  # form-only: picks which index field is shown
             },
             {
                 "label": "Index Regex Pattern",
@@ -619,26 +590,11 @@ def validate_module_name(module_name: str) -> bool:
     return module_name in allowed_modules
 
 
-def validate_command_args(args: List[str]) -> bool:
-    """Validate command arguments to prevent injection attacks.
-
-    Ensures arguments don't contain shell metacharacters that would bypass
-    subprocess.run's protection.
-    """
-    # Dangerous patterns that could indicate shell injection attempts
-    dangerous_patterns = [";", "|", "&", "$", "`", "\n", "\r", "&&", "||"]
-
-    for arg in args:
-        for pattern in dangerous_patterns:
-            if pattern in arg:
-                return False
-    return True
-
-
 def run_biomate(module_name: str, args: List[str]) -> Dict[str, Any]:
     """Run a biomate subcommand and return stdout / stderr / returncode.
 
-    Validates module name and arguments to prevent injection attacks.
+    The command runs as an argument list, without a shell, so argument values
+    need no quoting or filtering; only the module name is validated.
     """
     # Validate module name
     if not validate_module_name(module_name):
@@ -649,35 +605,16 @@ def run_biomate(module_name: str, args: List[str]) -> Dict[str, Any]:
             "stderr": f"Invalid module name: {module_name}",
         }
 
-    # Validate arguments
-    if not validate_command_args(args):
-        return {
-            "success": False,
-            "returncode": -1,
-            "stdout": "",
-            "stderr": "Invalid arguments detected. Command injection prevented.",
-        }
-
     cmd = ["biomate", module_name] + args
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
+        # No timeout: a full flowcell legitimately runs for longer than any
+        # fixed limit, and killing it leaves partial outputs behind
+        proc = subprocess.run(cmd, capture_output=True, text=True)
         return {
             "success": proc.returncode == 0,
             "returncode": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "returncode": -1,
-            "stdout": "",
-            "stderr": "Command timed out after 10 minutes.",
         }
     except Exception as e:
         return {
@@ -695,7 +632,12 @@ def flatten_parameters(params: List[Dict], values: Dict[str, str]) -> List[str]:
         form_key = p.get("form_name", p.get("name", ""))
         cli_key = p.get("cli_name", form_key)
         val = values.get(form_key)
-        if val is None:
+        if val is None or cli_key is None:  # cli_name None: form-only field
+            continue
+
+        # Hidden rows are still submitted by the browser: skip them
+        show_when = p.get("show_when")
+        if show_when and values.get(show_when["parameter"]) != show_when["value"]:
             continue
 
         if cli_key == "_subcommand" and not val.startswith("-"):
@@ -709,20 +651,23 @@ def flatten_parameters(params: List[Dict], values: Dict[str, str]) -> List[str]:
 
         if p.get("param_type") == "select":
             if val:
-                cli_args.append(f"--{cli_key}")
-                cli_args.append(str(val))
+                cli_args.append(f"--{cli_key}={val}")
             continue
 
         # text / number / unspecified
         default = p.get("default", "")
         if not val and default:
             val = default
+        # "--key=value" keeps a value starting with "-" from being read as a flag
         if val and p.get("multiple"):
             cli_args.append(f"--{cli_key}")
-            cli_args += [shlex.quote(v.strip()) for v in val.split(",") if v.strip()]
+            cli_args += [
+                v.strip()
+                for v in val.split(",")
+                if v.strip() and not v.strip().startswith("-")
+            ]
         elif val:
-            cli_args.append(f"--{cli_key}")
-            cli_args.append(shlex.quote(str(val)))
+            cli_args.append(f"--{cli_key}={val}")
 
     return cli_args
 
@@ -760,7 +705,7 @@ def _module_list() -> list:
         for p in m["parameters"]:
             if "is_path" not in p:
                 text = " ".join(
-                    p.get(k, "") for k in ("label", "cli_name", "form_name", "help")
+                    p.get(k) or "" for k in ("label", "cli_name", "form_name", "help")
                 ).lower()
                 params.append(
                     ParamDict(
@@ -818,6 +763,12 @@ def register_report(module_name: str, values: Dict[str, str]) -> str | None:
 class SecurityHeadersMixin(tornado.web.RequestHandler):
     """Mixin to add security headers to all responses."""
 
+    def prepare(self):
+        """Reject requests whose Host is not the local server (DNS rebinding)."""
+        allowed = self.settings.get("allowed_hosts")
+        if allowed and self.request.host_name not in allowed:
+            raise tornado.web.HTTPError(403, "Host not allowed")
+
     def set_default_headers(self):
         """Set security-related HTTP headers."""
         # Prevent MIME type sniffing
@@ -826,10 +777,6 @@ class SecurityHeadersMixin(tornado.web.RequestHandler):
         self.set_header("X-Frame-Options", "DENY")
         # Enable XSS protection in older browsers
         self.set_header("X-XSS-Protection", "1; mode=block")
-        # Strict Transport Security (if using HTTPS)
-        self.set_header(
-            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
-        )
         # Content Security Policy - strict by default
         self.set_header(
             "Content-Security-Policy",
@@ -870,6 +817,7 @@ class ModuleHandler(SecurityHeadersMixin):
                 "param_type": p.get("param_type", "text"),
                 "default": p.get("default", ""),
                 "is_boolean": p.get("param_type") == "boolean",
+                "show_when": p.get("show_when"),
             }
         self.write(
             t.generate(
@@ -880,10 +828,11 @@ class ModuleHandler(SecurityHeadersMixin):
                 gs_version="0.3.0",
                 modules=all_modules,
                 param_overrides={},
+                xsrf_form_html=self.xsrf_form_html,
             )
         )
 
-    def post(self, module_name: str):
+    async def post(self, module_name: str):
         """Run the requested tool with the submitted form and show the result."""
         module = self._find_module(module_name)
         if not module:
@@ -906,7 +855,10 @@ class ModuleHandler(SecurityHeadersMixin):
         cli_args = flatten_parameters(module["parameters"], values)
 
         # Run the tool
-        result = run_biomate(module_name, cli_args)
+        # In a worker thread, so the server keeps answering during a long run
+        result = await tornado.ioloop.IOLoop.current().run_in_executor(
+            None, run_biomate, module_name, cli_args
+        )
         report_url = register_report(module_name, values) if result["success"] else None
 
         loader = get_loader()
@@ -932,6 +884,7 @@ class ModuleHandler(SecurityHeadersMixin):
                 "param_type": p.get("param_type", "text"),
                 "default": p.get("default", ""),
                 "is_boolean": p.get("param_type") == "boolean",
+                "show_when": p.get("show_when"),
             }
 
         self.write(
@@ -943,6 +896,7 @@ class ModuleHandler(SecurityHeadersMixin):
                 gs_version="0.3.0",
                 modules=all_modules,
                 param_overrides=param_overrides,
+                xsrf_form_html=self.xsrf_form_html,
             )
         )
 
@@ -974,8 +928,15 @@ class ReportHandler(SecurityHeadersMixin):
 # ---------------------------------------------------------------------------
 
 
-def make_app(host: str = "localhost", port: int = 8080) -> tornado.web.Application:
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+def make_app(host: str = "localhost") -> tornado.web.Application:
     """Create and return the Tornado application with security settings."""
+    # Bound to loopback: accept only loopback Host headers, so that a web page
+    # rebinding its DNS name to 127.0.0.1 cannot drive the tools. A server bound
+    # elsewhere is reached under names we cannot know, so it is not checked.
+    allowed_hosts = _LOOPBACK_HOSTS if host in _LOOPBACK_HOSTS else None
     return tornado.web.Application(
         [
             (r"/", MainHandler),
@@ -986,6 +947,7 @@ def make_app(host: str = "localhost", port: int = 8080) -> tornado.web.Applicati
         static_path=str(_STATIC_DIR),
         debug=False,  # Disable debug mode for security
         xsrf_cookies=True,  # Enable XSRF protection
+        allowed_hosts=allowed_hosts,
         max_body_size=200 * 1024 * 1024,
     )
 
@@ -1027,7 +989,7 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         default=None,
         help="Path to SSL private key file (required for HTTPS)",
     )
-    parser.set_defaults(parse=main, run=main)
+    parser.set_defaults(parse=lambda args: args, run=main)
 
     return parser
 
@@ -1036,7 +998,7 @@ def main(args: argparse.Namespace) -> None:
     """Start the web server."""
 
     # Warn if binding to public interfaces
-    if args.host not in ("localhost", "127.0.0.1", "::1"):
+    if args.host not in _LOOPBACK_HOSTS:
         print("\n" + "=" * 70)
         print("⚠️  SECURITY WARNING")
         print("=" * 70)
@@ -1046,12 +1008,12 @@ def main(args: argparse.Namespace) -> None:
         print("\nRequired security measures for public access:")
         print("  1. HTTPS/TLS (use --ssl-cert and --ssl-key)")
         print("  2. Authentication (API keys or JWT tokens)")
-        print("  3. Input validation and rate limiting (already partially implemented)")
+        print("  3. Rate limiting (not implemented)")
         print("  4. Place behind a reverse proxy (nginx with auth)")
         print("\nFor local-only access, use: biomate web-interface --host 127.0.0.1")
         print("=" * 70 + "\n")
 
-    app = make_app(host=args.host, port=args.port)
+    app = make_app(host=args.host)
 
     certfile = args.ssl_cert or os.environ.get("SSL_CERT")
     keyfile = args.ssl_key or os.environ.get("SSL_KEY")
@@ -1076,7 +1038,3 @@ def main(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         print("\nShutting down...")
         http_server.stop()
-
-
-if __name__ == "__main__":
-    main()

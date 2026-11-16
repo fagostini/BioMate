@@ -18,6 +18,7 @@ from fastavro import parse_schema
 from fastavro import writer as avro_writer
 
 
+from biomate.samplesheet import read_section
 from biomate.setup import setup_logging
 
 TILE_WIDTH = 320  # 5120
@@ -103,7 +104,8 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
 
 def clean_directory(directory: pathlib.Path) -> None:
     """Recursively delete all files and subdirectories in the given directory."""
-    if directory.is_file():
+    # Unlink symlinks, never descend into them: their target is not ours to delete
+    if directory.is_symlink() or directory.is_file():
         directory.unlink()
     else:
         for item in directory.iterdir():
@@ -113,6 +115,11 @@ def clean_directory(directory: pathlib.Path) -> None:
 
 def validate_args(args) -> argparse.Namespace:
     """Validate the command line arguments."""
+    # Checked first, so that an unsupported run never reaches the --force cleanup
+    if args.instrument != "NovaSeqXPlus":
+        raise argparse.ArgumentTypeError(
+            "Only the 'NovaSeqXPlus' instrument is currently supported."
+        )
     if not args.input_path.is_dir():
         raise argparse.ArgumentTypeError(
             f"Input path {args.input_path} is not a valid directory."
@@ -140,9 +147,12 @@ def validate_args(args) -> argparse.Namespace:
         else:
             logging.warning("Cleaning up the output directory before proceeding...")
             clean_directory(args.output_path.joinpath("Data"))
-            interop_dir = args.interop_dir or args.output_path.joinpath("InterOp")
-            if interop_dir.is_dir():
-                clean_directory(interop_dir)
+            if args.interop_dir:
+                # A custom InterOp directory may hold files that are not ours:
+                # remove only the one fastrewind writes
+                args.interop_dir.joinpath("IndexMetricsOut.bin").unlink(missing_ok=True)
+            elif args.output_path.joinpath("InterOp").is_dir():
+                clean_directory(args.output_path.joinpath("InterOp"))
     else:
         logging.debug("The output directory does not exist! It will be created...")
     return args
@@ -201,50 +211,12 @@ def parse_sequence_mask(mask_string: str) -> dict:
     return mask_dict
 
 
-def extract_data_from_samplesheet(
-    sample_sheet: pathlib.Path, target_section: str = "[BCLConvert_Data]"
-) -> polars.DataFrame:
-    """
-    Parse the sample sheet file and return the Data section as DataTable.
-    """
-    # Read the sample sheet file and stores all lines in a list
-    with open(sample_sheet) as input_file:
-        lines = input_file.readlines()
-
-    # Find the line where the 'BCLConvert_Data'
-    skip_lines = [i for i, line in enumerate(lines) if line.startswith(target_section)]
-    if not skip_lines:
-        logging.error("No valid SampleSheet found! Data section not found in the file.")
-        exit(1)
-    else:
-        skip_lines = skip_lines[0] + 1
-
-    # Write the lines to a temporary file, skipping the header lines
-    tmp = tempfile.NamedTemporaryFile()
-    with open(tmp.name, "w") as f:
-        for line in lines[skip_lines:]:
-            # Stop writing when entering a new section
-            if line.startswith("["):
-                break
-            _ = f.write(line)
-
-    # Read the temporary file into a DataFrame
-    data = (
-        polars.read_csv(tmp.name)
-        if target_section == "[BCLConvert_Data]"
-        else polars.read_csv(tmp.name, has_header=False)
-    )
-    tmp.close()
-
-    return data
-
-
 def generate_masks_table(sample_sheet: pathlib.Path) -> dict:
     """
     Parse the sample sheet file, extract and process the masks for later use.
     """
     # Read the sample sheet file and stores all lines in a list
-    data = extract_data_from_samplesheet(sample_sheet)
+    data = read_section(sample_sheet)
 
     # Exit if the design is not present among the data columns
     if "OverrideCycles" not in data.columns and "Recipe" not in data.columns:
@@ -405,7 +377,7 @@ def build_index_lookup(sample_sheet: pathlib.Path, masks_table: dict) -> dict:
     in the sample sheet, per lane; (lane, index1, index2) is expected to be
     unique within a lane.
     """
-    data = extract_data_from_samplesheet(sample_sheet)
+    data = read_section(sample_sheet)
     if "index" not in data.columns or "index2" not in data.columns:
         return {}
     lookup = {}
@@ -429,9 +401,25 @@ def build_index_lookup(sample_sheet: pathlib.Path, masks_table: dict) -> dict:
     return lookup
 
 
-def synthesize_undetermined_recipe(
-    recipe: dict | None, cycles_dict: dict
-) -> dict:
+def fit_read_to_recipe(record: dnaio.SequenceRecord, length: int, label: str) -> None:
+    """N-pad a read to the cycles its recipe assigns to it, in place.
+
+    A shorter read (e.g. adapter-trimmed) would otherwise shift every later
+    cycle, index included. A longer one cannot be written and raises.
+    """
+    missing = length - len(record.sequence)
+    if not length or not missing:  # length 0: recipe unknown (fallback recipe)
+        return
+    if missing < 0:
+        raise ValueError(
+            f"Read '{record.name}' has {len(record.sequence)} {label} bases, "
+            f"but the sample sheet allows {length} cycles."
+        )
+    record.sequence += "N" * missing
+    record.qualities += "#" * missing
+
+
+def synthesize_undetermined_recipe(recipe: dict | None, cycles_dict: dict) -> dict:
     """Build the recipe used to write an undetermined read into the BCL.
 
     The geometry (N-padded read lengths) is taken from the original sample's
@@ -471,7 +459,7 @@ def get_cycles(sample_sheet: pathlib.Path) -> "tuple[int, dict[str, int]]":
     """
     Parse the sample sheet file and return the total number of cycles.
     """
-    data = extract_data_from_samplesheet(sample_sheet, "[Reads]")
+    data = read_section(sample_sheet, ("[Reads]",), has_header=False)
 
     total_cycles = int(data.get_column("column_2").sum())
 
@@ -691,6 +679,7 @@ def parse_fastq_groups(
                 else:
                     count_index_cluster(split_name[4])
                     read_recipe = sample_recipe
+                fit_read_to_recipe(r1, read_recipe["R1"], "R1")
                 # Assume the index is at the end
                 indexes = f"{read_recipe['I1']}"
                 r1.sequence += indexes
@@ -735,6 +724,8 @@ def parse_fastq_groups(
                 else:
                     count_index_cluster(split_name[4])
                     read_recipe = sample_recipe
+                fit_read_to_recipe(r1, read_recipe["R1"], "R1")
+                fit_read_to_recipe(r2, read_recipe["R2"], "R2")
                 # Redefine the indexes to include 'N's, if any
                 umi1, umi2 = umis if len(umis) == 2 else [""] + umis
                 indexes = f"{read_recipe['I1']}{read_recipe['I2']}"
@@ -829,15 +820,6 @@ def write_filter(filter_path: pathlib.Path, cluster_filter: list) -> None:
     with open(filter_path, "wb") as f_out:
         f_out.write(struct.pack("<III", 0, 3, len(cluster_filter)))
         f_out.write(bytes(cluster_filter))  # bit 0 is pass or failed filter
-
-
-def write_control(control_path: pathlib.Path, cluster_count: int) -> None:
-    """Write the control file."""
-    control_path.parent.mkdir(exist_ok=True, parents=True)
-    with open(control_path, "wb") as f_out:
-        f_out.write(struct.pack("<III", 0, 3, cluster_count))
-        # two bytes for each cluster
-        f_out.write(bytes([0, 0] * cluster_count))
 
 
 def encode_loc_bytes(x_pos, y_pos) -> bytes:
@@ -1038,11 +1020,16 @@ def encode_cluster_bits(
     phred_offset: int = 33,
 ) -> str:
     """Encode the bits corresponding to a base and its quality."""
-    # Little endian means that the quality should go first and the base last
-    return quality_map.get(
-        ord(str(record.qualities)) - phred_offset,
-        "00",
-    ) + sequence_map.get(record.sequence, "00")
+    # A no-call is an all-zero nibble, whatever its quality
+    if record.sequence not in sequence_map:
+        return "0000"
+    # Little endian means that the quality should go first and the base last.
+    # Qualities between two bins fall into the nearest lower one
+    quality = ord(str(record.qualities)) - phred_offset
+    return (
+        quality_map[max((q for q in quality_map if q <= quality), default=0)]
+        + sequence_map[record.sequence]
+    )
 
 
 def preprocess_and_write_bcls(
@@ -1380,15 +1367,6 @@ def main(args: argparse.Namespace) -> None:
     setup_logging(args)
     logging.info("Running fastrewind module...")
 
-    if args.instrument != "NovaSeqXPlus":
-        logging.warning(
-            "Unfortunately, only the 'NovaSeqXPlus' instrument is currently supported."
-        )
-        logging.warning(
-            "Please, re-run the command with the corresponding option, or use the default."
-        )
-        exit(1)
-
     sample_sheet = args.sample_sheet or args.input_path.joinpath("SampleSheet.csv")
 
     masks_table = generate_masks_table(sample_sheet)
@@ -1414,14 +1392,12 @@ def main(args: argparse.Namespace) -> None:
     # Get one read name to extract the run details.
     # Some generated/undetermined files can be empty, so scan until a read is found.
     sample_read = None
-    sample_file = None
     for lane_files in lanes_dict.values():
         for sample_files in lane_files.values():
             for candidate_file in sorted(sample_files):
                 with dnaio.open(candidate_file) as reader:
                     for read in reader:
                         sample_read = read.name
-                        sample_file = candidate_file
                         break
                 if sample_read is not None:
                     break
@@ -1445,7 +1421,7 @@ def main(args: argparse.Namespace) -> None:
         logging.info(f"Processing lane '{lane}'")
         # Create a dictionary of numpy arrays to store the filter information
         lanes_filter_dict[lane] = {
-            k: numpy.zeros((TILE_WIDTH * 10 + 1, TILE_HEIGHT * 10 + 1))
+            k: numpy.zeros((TILE_WIDTH * 10 + 1, TILE_HEIGHT * 10 + 1), dtype=bool)
             for k in [
                 "".join(t)
                 for t in product(
@@ -1487,8 +1463,18 @@ def main(args: argparse.Namespace) -> None:
 
                 for k, v in tiles_and_locs.items():
                     logging.debug(f"Populating filter arrays with tile {k}")
-                    for coords in v:
-                        lanes_filter_dict[lane][k][coords] = 1
+                    # Tile names and coordinates must fit the simulated flowcell
+                    # geometry: only blabber-generated FASTQ files are supported
+                    try:
+                        for coords in v:
+                            lanes_filter_dict[lane][k][coords] = 1
+                    except (KeyError, IndexError) as e:
+                        raise ValueError(
+                            f"FASTQ group '{name}' has a tile or cluster position "
+                            f"(tile {k}) outside the supported flowcell layout. "
+                            "FastRewind only supports FASTQ files generated by "
+                            "'biomate blabber'."
+                        ) from e
                     unique_locs_by_tile.setdefault(k, set()).update(v)
 
             logging.info("Writing (c)BCL files...")

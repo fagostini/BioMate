@@ -13,6 +13,7 @@ import argparse
 import gzip
 import hashlib
 import io
+import itertools
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ import pathlib
 
 import polars
 
+from biomate.samplesheet import read_section
 from biomate.setup import setup_logging
 
 STATS_FILE_NAME = "Stats.json"
@@ -147,35 +149,16 @@ def get_shared_lanes_from_samplesheet(
     empty project are ignored.
     """
     projects_by_lane: defaultdict[str, set[str]] = defaultdict(set)
-    spreadsheet_version = None
-    with open(samplesheet, "r") as f:
-        for line in f:
-            line = line.strip()
-            if spreadsheet_version:
-                if line:
-                    parts = line.split(",")
-                    if spreadsheet_version == 1:
-                        lane, index1, index2, project = (
-                            parts[1],
-                            parts[5],
-                            parts[6],
-                            parts[11] if len(parts) > 11 else "",
-                        )
-                    else:
-                        lane, index1, index2, project = (
-                            parts[0],
-                            parts[3],
-                            parts[4],
-                            parts[5] if len(parts) > 5 else "",
-                        )
-                    if (index1 or index2) and project:
-                        projects_by_lane[lane].add(project)
-            elif line.startswith("Lane,"):
-                spreadsheet_version = 2
-            elif line.startswith("FCID,"):
-                spreadsheet_version = 1
-            else:
-                continue
+    data = read_section(samplesheet, infer_schema=False, bare_header=("Lane", "FCID"))
+    columns = ["Lane", "index", "index2", "Sample_Project"]
+    data = data.with_columns(
+        polars.lit(None, dtype=polars.String).alias(col)
+        for col in columns
+        if col not in data.columns
+    )
+    for lane, index1, index2, project in data.select(columns).iter_rows():
+        if (index1 or index2) and project:
+            projects_by_lane[lane].add(project)
 
     return sorted(
         int(lane) for lane, projects in projects_by_lane.items() if len(projects) > 1
@@ -185,9 +168,9 @@ def get_shared_lanes_from_samplesheet(
 def _count_header_lines(lines: Iterable[str]) -> Counter[str]:
     """Count the index pairs of the header lines of a FASTQ stream."""
     counts: Counter[str] = Counter()
-    for line in lines:
-        if line.startswith("@"):
-            counts[line.rsplit(":", 1)[-1].rstrip()] += 1
+    # Every 4th line is a header: a quality line may also start with "@" (Q31)
+    for line in itertools.islice(lines, 0, None, 4):
+        counts[line.rsplit(":", 1)[-1].rstrip()] += 1
     return counts
 
 
@@ -257,15 +240,24 @@ def _inflate_stream(f: pathlib.Path, q: queue.Queue, chunk: int | None = None) -
         with open(f, "rb") as fh:
             comp = fh.read(size)
             while comp:
-                out = d.decompress(comp)
+                # Cap every inflate call: a highly compressible chunk would
+                # otherwise expand to gigabytes in one bytes object
+                out = d.decompress(comp, _INFLATE_CHUNK)
                 if out:
                     q.put(out)
+                while not d.eof and (d.unconsumed_tail or len(out) == _INFLATE_CHUNK):
+                    out = d.decompress(d.unconsumed_tail, _INFLATE_CHUNK)
+                    if out:
+                        q.put(out)
                 if d.eof:
+                    # Read before flush(): with a capped inflate the leftover is
+                    # also in unconsumed_tail, and flush() appends it again
+                    unused = d.unused_data
                     tail = d.flush()
                     if tail:
                         q.put(tail)
-                    if d.unused_data:
-                        comp = d.unused_data
+                    if unused:
+                        comp = unused
                         d = zlib.decompressobj(47)
                         continue
                     comp = fh.read(size)
@@ -274,6 +266,8 @@ def _inflate_stream(f: pathlib.Path, q: queue.Queue, chunk: int | None = None) -
                     d = zlib.decompressobj(47)
                     continue
                 comp = fh.read(size)
+            if not d.eof and fh.tell():
+                raise EOFError(f"Compressed file '{f}' ended before the end of stream")
     except BaseException as e:  # noqa: BLE001 - re-raised by the caller
         q.put(e)
     finally:
@@ -282,7 +276,8 @@ def _inflate_stream(f: pathlib.Path, q: queue.Queue, chunk: int | None = None) -
 
 def _count_threaded(f: pathlib.Path) -> Counter[str]:
     """Count with zlib inflate (producer thread) overlapped with counting."""
-    q: queue.Queue = queue.Queue()
+    # Bounded: the producer waits instead of piling up decompressed data
+    q: queue.Queue = queue.Queue(maxsize=4)
     reader = _QueueReader(q)
     th = threading.Thread(target=_inflate_stream, args=(f, q), daemon=True)
     th.start()
@@ -291,19 +286,6 @@ def _count_threaded(f: pathlib.Path) -> Counter[str]:
     if reader.error is not None:
         raise reader.error
     return counts
-
-
-def _count_undetermined(f: pathlib.Path, force_threaded: bool = False) -> Counter[str]:
-    """Count the index pairs found in the headers of a gzipped FASTQ file.
-
-    Small files use one fused streaming pass. For larger files the zlib
-    inflate C call (which releases the GIL) runs in a producer thread,
-    overlapped with the counting pass: ~15% faster than the fused pass in
-    benchmarks (91MB file, 675MB decompressed: 2.04s -> 1.73s).
-    """
-    if force_threaded or f.stat().st_size >= THREADED_MIN_SIZE:
-        return _count_threaded(f)
-    return _count_serial(f)
 
 
 def _member_index_for(f: pathlib.Path, cache_dir: pathlib.Path) -> pathlib.Path:
@@ -333,9 +315,9 @@ def _find_member_offsets(f: pathlib.Path) -> tuple[list[int], bool]:
 
     ``offsets[k]`` is where member ``k`` begins and ``offsets[-1]`` is the end
     of the file, so member ``k`` spans ``offsets[k]:offsets[k + 1]``. The
-    boolean is True only when every member boundary falls on a FASTQ line
-    boundary (each non-final member's decompressed content is empty or ends on
-    a newline); only then can a byte range be split at member boundaries and
+    boolean is True only when every member boundary falls on a FASTQ record
+    boundary (the decompressed content up to each non-final member's end is
+    empty or a whole number of 4-line records); only then can a byte range be split at member boundaries and
     counted line by line. One sequential decompress pass; nothing is retained.
     A misaligned boundary aborts early, so a bad file is rejected in seconds.
     """
@@ -345,6 +327,7 @@ def _find_member_offsets(f: pathlib.Path) -> tuple[list[int], bool]:
     pending = b""
     comp_read = 0
     last_byte: int | None = None  # last decompressed byte of the current member
+    newlines = 0  # decompressed line count so far
     with open(f, "rb") as fh:
         while True:
             if not pending:
@@ -356,18 +339,22 @@ def _find_member_offsets(f: pathlib.Path) -> tuple[list[int], bool]:
             out = d.decompress(pending)
             if out:
                 last_byte = out[-1]
+                newlines += out.count(b"\n")
             leftover = d.unused_data
             if d.eof:
                 tail = d.flush()
                 if tail:
                     last_byte = tail[-1]
+                    newlines += tail.count(b"\n")
                 end = comp_read - len(leftover)
                 offsets.append(end)
-                if end < size and last_byte not in (None, 10):
+                if end < size and (last_byte not in (None, 10) or newlines % 4):
                     return offsets, False
                 d = zlib.decompressobj(47)
                 last_byte = None
             pending = leftover
+    if offsets[-1] != size:
+        raise EOFError(f"Compressed file '{f}' ended before the end of stream")
     return offsets, True
 
 
@@ -459,9 +446,9 @@ def _count_bounded_range(path: pathlib.Path, start: int, end: int) -> Counter[by
     """
     counts: Counter[bytes] = Counter()
     with gzip.GzipFile(fileobj=BoundedReader(path, start, end), mode="rb") as fh:
-        for line in fh:
-            if line.startswith(b"@"):
-                counts[line.rsplit(b":", 1)[-1].rstrip()] += 1
+        # The range starts on a record boundary, so every 4th line is a header
+        for line in itertools.islice(fh, 0, None, 4):
+            counts[line.rsplit(b":", 1)[-1].rstrip()] += 1
     return counts
 
 

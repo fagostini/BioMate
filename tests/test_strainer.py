@@ -17,6 +17,7 @@ from tests.conftest import (
 from biomate.strainer.strainer import (
     extract_indexes_from_sample_sheet,
     extract_indexes_from_undetermined_file,
+    main,
     search_for_unexpected_indexes,
     validate_args,
 )
@@ -396,3 +397,38 @@ class TestValidateArgs:
         args.sample_sheet = tmp_path / "nonexistent.csv"
         with pytest.raises(argparse.ArgumentTypeError, match="[Ss]ample"):
             validate_args(args)
+
+
+# ---------------------------------------------------------------------------
+# main — end to end
+# ---------------------------------------------------------------------------
+
+
+def test_main_reports_only_cross_lane_index(tmp_path):
+    """main runs end to end; an index-less row does not match every barcode."""
+    run = tmp_path / "FC"
+    run.mkdir()
+    # Extra no-index row on lane 3: must not flag the unrelated barcode below
+    (run / "SampleSheet.csv").write_text(
+        DUAL_INDEX_SS + "3,S4,Sample4,,,ProjectC,Y151\n"
+    )
+    write_fastq_gz(
+        run / "Undetermined_S0_L002_R1_001.fastq.gz",
+        [
+            (illumina_header(lane="2", index="GAACTGAGCG+CGCTCCACGA"), "ACGT", "####"),
+            (illumina_header(lane="2", index="TTTTTTTTTT+AAAAAAAAAA"), "ACGT", "####"),
+        ],
+    )
+    main(
+        argparse.Namespace(
+            input_path=run,
+            output_path=tmp_path,
+            sample_sheet=None,
+            threads=1,
+            verbose=False,
+            quiet=True,
+        )
+    )
+    out = polars.read_csv(tmp_path / "FC_unexpected_indexes.csv")
+    assert out.get_column("Undetermined_Index").to_list() == ["GAACTGAGCG+CGCTCCACGA"]
+    assert out.get_column("Sample_Project").to_list() == ["ProjectA"]
