@@ -312,24 +312,32 @@ def flagged_share(tables: NspectorTables, flags: polars.DataFrame) -> float | No
     return int(explained) / total
 
 
-def collapse_flags(flags: polars.DataFrame) -> polars.DataFrame:
-    """Flags for display: each run of consecutive cycles becomes one row.
+# tiles named in one row of the collapsed flag table before "and N more"
+MAX_TILES_NAMED = 6
 
-    ``cycles`` is ``"31"`` or ``"45–52"``; ``rate`` and ``z`` are the largest of
-    the run and ``status`` its worst. FAIL first, like ``build_flags``.
+
+def collapse_flags(flags: polars.DataFrame) -> polars.DataFrame:
+    """Flags for display: one row per run of cycles, tiles side by side.
+
+    A run of consecutive cycles becomes one row (``cycles`` is ``"31"`` or
+    ``"45–52"``), and the ``tile_cycle`` flags of a lane with the same cycles
+    become one row naming their tiles (``tile`` is text). ``events`` counts
+    the flags in the row; ``rate`` and ``z`` are their largest and ``status``
+    their worst. FAIL first, like ``build_flags``.
     """
-    keys = ["kind", "project", "sample", "read", "lane", "tile"]
+    keys = ["kind", "project", "sample", "read", "lane"]
     first, last = polars.col("_from"), polars.col("_to")
-    return (
-        flags.sort(*keys, "cycle")
+    tiles = polars.col("tile").drop_nulls().unique().sort().cast(polars.Utf8)
+    runs = (
+        flags.sort(*keys, "tile", "cycle")
         # consecutive cycles share cycle - position
         .with_columns(
             (
                 polars.col("cycle").cast(polars.Int64)
-                - polars.int_range(polars.len()).over(keys)
+                - polars.int_range(polars.len()).over(*keys, "tile")
             ).alias("_run")
         )
-        .group_by(*keys, "_run")
+        .group_by(*keys, "tile", "_run")
         .agg(
             polars.col("status").eq("FAIL").any().alias("_fail"),
             polars.col("cycle").min().alias("_from"),
@@ -337,6 +345,26 @@ def collapse_flags(flags: polars.DataFrame) -> polars.DataFrame:
             polars.col("rate").max(),
             polars.col("z").max(),
             polars.col("detail").first(),
+            polars.len().alias("events"),
+        )
+        # only tile x cycle cells are merged across tiles
+        .with_columns(
+            polars.when(polars.col("kind") == "tile_cycle")
+            .then(None)
+            .otherwise("tile")
+            .alias("_own_tile")
+        )
+    )
+    return (
+        runs.group_by(*keys, "_from", "_to", "_own_tile")
+        .agg(
+            polars.col("_fail").any(),
+            tiles.head(MAX_TILES_NAMED).str.join(", ").alias("tile"),
+            (tiles.len().cast(polars.Int64) - MAX_TILES_NAMED).alias("_more"),
+            polars.col("rate").max(),
+            polars.col("z").max(),
+            polars.col("detail").first(),
+            polars.col("events").sum(),
         )
         .with_columns(
             polars.when("_fail")
@@ -347,11 +375,16 @@ def collapse_flags(flags: polars.DataFrame) -> polars.DataFrame:
             .then(first.cast(polars.Utf8))
             .otherwise(polars.format("{}–{}", first, last))
             .alias("cycles"),
+            polars.when(polars.col("_more") > 0)
+            .then(polars.format("{} and {} more", "tile", "_more"))
+            # no tile at all (dark cycle, lane, sample) is null, not ""
+            .otherwise(polars.col("tile").replace("", None))
+            .alias("tile"),
         )
         .sort(
-            ["_fail", "kind", "read", "lane", "tile", "_from"],
+            ["_fail", "kind", "read", "lane", "_from", "tile"],
             descending=[True, False, False, False, False, False],
             nulls_last=True,
         )
-        .select("status", *keys, "cycles", "rate", "z", "detail")
+        .select("status", *keys, "tile", "cycles", "events", "rate", "z", "detail")
     )

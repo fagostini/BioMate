@@ -990,3 +990,26 @@ def test_spatial_sum_matches_per_file_counters(run_files, engine):
     assert all(scan.spatial == [] for scan in scans)
     got = build_tables(scans, bin_size=25, spatial_sum=spatial_sum)
     assert got.spatial.height and got.spatial.equals(expected.spatial)
+
+
+def test_collapsed_flags_name_the_tiles_of_one_cycle(tmp_path):
+    """Two tiles dark at the same cycle are one row naming both."""
+    from biomate.nspector.flags import collapse_flags
+    from biomate.nspector.report import verdict
+
+    records = []
+    for t in range(1, 11):
+        for i in range(20):
+            # 120 cycles: one dark cycle keeps the tile's mean under the warn rate
+            seq = list("ACGT" * 30)
+            if t <= 2:
+                seq[11] = "N"
+            records.append(_rec("".join(seq), tile=f"11{t:02d}", x=str(i), y=str(i)))
+    path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+    write_fastq_gz(path, records)
+    listed = collapse_flags(build_flags(build_tables(scan_files([path], "python"))))
+    cells = listed.filter(polars.col("kind") == "tile_cycle")
+    assert cells.select("tile", "cycles", "events", "status").rows() == [
+        ("1101, 1102", "12", 2, "FAIL")
+    ]
+    assert "2 tile × cycle event(s) at 1 cycle position(s)" in verdict(listed, None)

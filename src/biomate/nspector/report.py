@@ -1554,7 +1554,12 @@ def verdict(flags: polars.DataFrame, share: float | None) -> str:
             f"{worst['tile']} on {where(worst)}, at {worst['rate']:.2%} per cycle."
         )
     if rows := of("tile_cycle"):
-        parts.append(f"{len(rows)} short tile × cycle event(s){fails(rows)}.")
+        events = sum(r["events"] for r in rows)
+        worst = max(r["rate"] for r in rows)
+        parts.append(
+            f"{events} tile × cycle event(s) at {len(rows)} cycle position(s), "
+            f"up to {worst:.0%} of a tile's reads."
+        )
     if rows := of("sample"):
         names = dict.fromkeys(f"{r['project']} / {r['sample']}" for r in rows)
         parts.append(f"Outlier sample(s): {_some(list(names))}.")
@@ -1787,8 +1792,8 @@ def write_report(
         used = [c for c in listed.columns if listed[c].null_count() < listed.height]
         flags_html = (
             f'<p class="meta">{flags.height} flag(s): {n_fail} FAIL, '
-            f"{flags.height - n_fail} WARN. Consecutive cycles are listed as one "
-            f"row, with the largest rate{more}.</p>"
+            f"{flags.height - n_fail} WARN. Consecutive cycles, and tiles hit at "
+            f"the same cycles, are listed as one row with the largest rate{more}.</p>"
             '<div class="scroll">'
             + _table(
                 listed.head(MAX_FLAG_ROWS).select(used), {"rate": ".3%", "z": ".1f"}
