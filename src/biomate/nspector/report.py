@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import datetime
+import gzip
 import html
 import json
 import logging
@@ -1680,8 +1682,15 @@ _PAGE = """<!DOCTYPE html>
   <section id="inputs"><h2>Inputs</h2><div class="scroll">{inputs}</div></section>
   <p class="meta" style="margin:24px 0">Full tables: <code>nspector_*.parquet</code> in this directory.</p>
 </main>
+<script type="application/octet-stream" id="spec">{spec}</script>
 <script type="text/javascript">
-  const spec = {spec};
+  // the chart spec with its data: gzip, base64 (a tenth of the plain JSON)
+  let spec;
+  async function loadSpec() {{
+    const bytes = Uint8Array.from(atob(document.getElementById('spec').textContent), (c) => c.charCodeAt(0));
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    spec = JSON.parse(await new Response(stream).text());
+  }}
   const themes = {{
     "dark": {{"background": "#14161a", "view": {{"fill": "#1e2128"}}, "axis": {{"domainColor": "#6b7280", "gridColor": "#2c313a", "tickColor": "#6b7280", "labelColor": "#c9ced6", "titleColor": "#e6e8ec"}}, "legend": {{"labelColor": "#c9ced6", "titleColor": "#e6e8ec"}}, "title": {{"color": "#e6e8ec"}}}},
     "light": {{"background": "#ffffff", "view": {{"fill": "#f3f3f3"}}, "title": {{"color": "#1d2330"}}}}
@@ -1714,7 +1723,12 @@ _PAGE = """<!DOCTYPE html>
     render(theme, keep);
   }}
 
-  render(document.documentElement.dataset.theme);
+  loadSpec()
+    .then(() => render(document.documentElement.dataset.theme))
+    .catch((error) => {{
+      console.error(error);
+      document.getElementById('vis').textContent = 'The charts could not be loaded: this browser cannot unpack the report data (it needs DecompressionStream; use a current Chrome, Edge, Firefox or Safari).';
+    }});
 </script>
 </body>
 </html>
@@ -1755,8 +1769,8 @@ def write_report(
             f"The report embeds {len(spec) / 2**20:.0f} MB of data and may be slow "
             "to open. Consider a larger --spatial-bin-size."
         )
-    # keep "</script>" in string data from closing the script element
-    spec = spec.replace("</", "<\\/")
+    # mtime=0: the same tables give the same file
+    spec = base64.b64encode(gzip.compress(spec.encode(), mtime=0)).decode("ascii")
 
     inputs, worst_tiles, worst_cycles = summary_tables(scans, tables)
     flags = _flags(tables)
