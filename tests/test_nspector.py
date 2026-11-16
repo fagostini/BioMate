@@ -879,14 +879,32 @@ def test_project_summary_and_header(tmp_path):
         assert section in spec
 
 
-def test_robust_z_is_zero_at_the_median_of_a_zero_spread_group():
-    """A tile at the median of a zero-MAD group scores 0, not NaN (>= any z)."""
+def test_robust_z_needs_a_real_difference_in_a_zero_spread_group():
+    """With no spread the scale is warn_rate / 5: z is finite, 5 at median + warn."""
     from biomate.nspector.flags import _robust_z
 
-    df = polars.DataFrame({"g": ["a"] * 3, "rate": [0.02, 0.02, 0.0]})
-    z = df.select(_robust_z(["g"]).alias("z")).get_column("z").to_list()
-    assert z[:2] == [0.0, 0.0]
-    assert z[2] == float("-inf")
+    df = polars.DataFrame({"g": ["a"] * 4, "rate": [0.02, 0.02, 0.02, 0.03]})
+    z = df.select(_robust_z(["g"], 0.01).alias("z")).get_column("z").to_list()
+    assert z[:3] == [0.0, 0.0, 0.0]
+    assert z[3] == pytest.approx(5.0)
+    # a difference under the warn rate is not an outlier, however small the spread
+    df = polars.DataFrame({"g": ["a"] * 3, "rate": [0.020, 0.020, 0.025]})
+    z = df.select(_robust_z(["g"], 0.01).alias("z")).get_column("z").to_list()
+    assert z[2] == pytest.approx(2.5)
+
+
+def test_read_dark_on_every_cycle_is_a_lane_flag(tmp_path):
+    """Every tile above the warn rate at every cycle: one lane flag, no dark cycles."""
+    records = []
+    for t in range(1, 6):
+        for i in range(40):
+            seq = list("ACGT" * 5)
+            seq[i % 20] = "N"  # 2 of 40 reads at each cycle, on every tile
+            records.append(_rec("".join(seq), tile=f"110{t}", x=str(i), y=str(i)))
+    path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+    write_fastq_gz(path, records)
+    flags = build_flags(build_tables(scan_files([path], "python")))
+    assert flags.select("kind", "status").rows() == [("lane", "FAIL")]
 
 
 def test_sample_flag_and_flagged_share(tmp_path):
@@ -1044,3 +1062,36 @@ def test_removal_costs(tmp_path):
     assert trim["lost"] == 0 and trim["n_removed"] == pytest.approx(400 / n_bases)
     page = write_report([], tables, tmp_path).read_text()
     assert "What removing them would cost" in page and "--exclude-tiles" in page
+
+
+def test_summary_json_and_fail_on(run_files, tmp_path):
+    """nspector_summary.json is written; --fail-on exits 3 at or above its status."""
+    args = argparse.Namespace(
+        input=run_files,
+        output=tmp_path / "out",
+        engine="python",
+        threads=1,
+        spatial_bin_size=25,
+        no_html=True,
+        no_multiqc=True,
+        quiet=True,
+        verbose=0,
+        # tile 1102 on lane 1 is dark at cycles 7 and 8 in every read: half the
+        # lane's reads, so the dark cycles are WARN
+        warn_rate=0.9,
+        fail_rate=0.95,
+    )
+    (tmp_path / "out").mkdir()
+    nspector.main(args)
+    summary = json.loads((tmp_path / "out" / "nspector_summary.json").read_text())
+    assert summary["status"] == "WARN" and summary["flags"] == {"FAIL": 0, "WARN": 2}
+    assert summary["flags_by_kind"] == {"dark_cycle": 2}
+    assert summary["verdict"].startswith("Dark cycles on lane 1 R1: 7–8.")
+    assert summary["reads"] == 32 and summary["parameters"]["--warn-rate"] == 0.9
+    assert set(summary["by_read"]) == {"R1"}
+    args.fail_on = "FAIL"
+    nspector.main(args)  # a WARN run passes --fail-on FAIL
+    args.fail_on = "WARN"
+    with pytest.raises(SystemExit) as exit_info:
+        nspector.main(args)
+    assert exit_info.value.code == nspector.FLAGGED_EXIT_CODE == 3

@@ -37,6 +37,7 @@ biomate nspector \
 - `--min-qual`: Phred score below which a called (non-N) base counts as low quality (default: `20`). See [Low-quality companion](#low-quality-companion).
 - `--warn-rate`, `--fail-rate`: thresholds for the [anomaly flags](#anomaly-flags) (defaults: `0.01` and `0.05`).
 - `--run-folder`: an Illumina run folder. Nspector reads per-tile cluster density, %PF, %≥Q30, % occupied and phasing rates from its `InterOp/` files and plots them against the N rate; it also plots the intensity, spot width (focus), PhiX error rate and no-call rate at each cycle under the N per cycle chart. Metrics the instrument did not write are left out. Needs the optional extra: `pip install 'biomate[interop]'`.
+- `--fail-on WARN|FAIL`: exit with code 3, after every output is written, when the worst anomaly flag is at least this status. Without it the exit code is 0 whatever the flags, so a pipeline can gate on the run status.
 - `--raw`: also write every N-containing read (lane, tile, X, Y, N cycles) as Parquet parts under `<stem>_n_sequences/`. This output grows with the number of reads and always uses the Python engine.
 - `--png`: also write the static PNG charts for each input file.
 - `--no-html`: skip the HTML report.
@@ -74,10 +75,10 @@ Flags are computed from the tables after the scan, so they cost no extra reading
 
 | Kind | Raised when |
 | --- | --- |
-| `dark_cycle` | At least half of a lane's tiles are at or above `--warn-rate` at that cycle. Above half, the typical tile is dark, so single cells no longer stand out; below it, the affected cells are reported as `tile_cycle`. |
+| `dark_cycle` | At least half of a lane's tiles are at or above `--warn-rate` at that cycle. Above half, the typical tile is dark, so single cells no longer stand out; below it, the affected cells are reported as `tile_cycle`. Not raised when 80% of the read's cycles qualify: that is bad tiles or a bad lane, and the `tile` and `lane` flags report it. |
 | `tile` | The tile's mean per-cycle N rate, leaving out dark cycles, is at or above `--warn-rate`. |
 | `lane` | At least 80% of a lane's tiles (two or more) qualify for a `tile` flag. Reported once; tiles and cells on that lane are listed only when they are worse than the lane flag. |
-| `tile_cycle` | One tile at one cycle is at or above `--warn-rate` and is a robust outlier among the lane's tiles at that cycle: `(rate - median) / (1.4826 × MAD) ≥ 5`. Cells already explained by a dark cycle, or by a tile flag at least as severe, are not listed again. |
+| `tile_cycle` | One tile at one cycle is at or above `--warn-rate` and is a robust outlier among the lane's tiles at that cycle: `(rate - median) / max(1.4826 × MAD, warn rate / 5) ≥ 5`. The floor on the divisor means an outlier is at least one warn rate above the lane's median, however small the spread. Cells already explained by a dark cycle, or by a tile flag at least as severe, are not listed again. |
 | `sample` | One sample's N per sequenced base is at or above `--warn-rate` and is a robust outlier among the lane's samples (same score, `≥ 5`). Undetermined reads are left out. This is the only kind that names a project and a sample; it does not affect the other samples on the lane. |
 
 A flag is `FAIL` when its rate is at or above `--fail-rate`, otherwise `WARN`.
@@ -90,6 +91,7 @@ Flags appear:
 - as orange outlines on the tile map and the tile × cycle heatmap;
 - under the flag table, as **What removing them would cost**: the reads given up and the share of all N bases removed by excluding the flagged tiles at demultiplexing, and by trimming dark cycles that run to the end of a read. Dark cycles inside a read cannot be left out by the demultiplexer and stay in the reads as N;
 - in a status column of the worst-tiles table;
+- in `nspector_summary.json`, with the run status (worst flag), the written verdict, flag counts, N rates per read, the removal costs and the parameters used;
 - in MultiQC, as an `N status` column (worst flag on the sample or its lanes) and a flags table.
 
 ### Project, sample, lane and read
@@ -239,6 +241,7 @@ nspector_results/
 ├── nspector_spatial.parquet
 ├── nspector_n_shape.parquet
 ├── nspector_flags.parquet
+├── nspector_summary.json                 # status, verdict, counts, rates, removal costs
 ├── nspector_tile_interop.parquet         # only with --run-folder
 ├── nspector_cycle_interop.parquet        # only with --run-folder
 ├── SampleA_S1_L001_R1_001_n_sequences/   # only with --raw
