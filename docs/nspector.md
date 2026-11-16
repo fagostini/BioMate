@@ -216,6 +216,8 @@ Nspector writes MultiQC custom content to `<output>/multiqc/`:
 - `nspector_cycle_rate_mqc.json`: a line graph of % reads with N per cycle.
 - `nspector_general_stats_mqc.tsv`: % reads with N, the N base count, % reads with a low-Q base and the worst flag status per sample, added to the General Statistics table.
 - `nspector_flags_mqc.json`: a table of every flag (only written when there are flags).
+- `nspector_read_loss_mqc.json`: a line graph of the reads lost when filtering on N bases per read, one line per read.
+- `nspector_verdict_mqc.html`: the written verdict and what removing the flagged tiles and cycles would cost.
 
 ```bash
 multiqc nspector_results/multiqc

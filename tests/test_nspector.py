@@ -346,8 +346,19 @@ class TestReport:
         assert names == {
             "nspector_tile_rate_mqc.json",
             "nspector_cycle_rate_mqc.json",
+            "nspector_read_loss_mqc.json",
+            "nspector_verdict_mqc.html",
             "nspector_general_stats_mqc.tsv",
         }
+        loss = json.loads(
+            (tmp_path / "multiqc" / "nspector_read_loss_mqc.json").read_text()
+        )
+        # 8 reads per sample and lane: on lane 1 each sample has 1 read with 1 N
+        # and 4 with 2 Ns, on lane 2 1 read with 1 N: 12 of 32 reads have an N
+        assert loss["data"]["R1"] == {"0": 37.5, "1": 25.0}
+        verdict_html = (tmp_path / "multiqc" / "nspector_verdict_mqc.html").read_text()
+        assert verdict_html.startswith("<!--\nid: 'nspector_verdict'")
+        assert "No anomalies" in verdict_html
         heatmap = json.loads(
             (tmp_path / "multiqc" / "nspector_tile_rate_mqc.json").read_text()
         )
