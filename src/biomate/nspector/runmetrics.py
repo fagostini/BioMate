@@ -207,11 +207,14 @@ def read_cycle_metrics(run_folder: pathlib.Path) -> polars.DataFrame:
 def join_tile_interop(
     tables: NspectorTables, metrics: polars.DataFrame
 ) -> polars.DataFrame:
-    """Join InterOp tile metrics to the per read/lane/tile N rate (all samples)."""
+    """Join InterOp tile metrics to the per read/lane/tile N rates (all samples)."""
     rates = (
         tables.tile_summary.group_by("read", "lane", "tile")
-        .agg(polars.col("n", "total").sum())
-        .with_columns((polars.col("n") / polars.col("total")).alias("n_rate"))
+        .agg(polars.col("n", "total", "n_bases", "bases").sum())
+        .with_columns(
+            (polars.col("n") / polars.col("total")).alias("n_rate"),
+            (polars.col("n_bases") / polars.col("bases")).alias("n_base_rate"),
+        )
     )
     return rates.join(
         metrics.cast(

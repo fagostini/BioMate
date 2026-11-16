@@ -611,9 +611,15 @@ class TestFlags:
             flags["status"].to_list(), key=lambda s: s != "FAIL"
         )
 
-    def test_high_thresholds_give_no_flags(self, run_files):
+    def test_high_thresholds_keep_only_fully_dark_cycles(self, run_files):
         tables = build_tables(scan_files(run_files, "python"))
-        assert build_flags(tables, warn_rate=0.9, fail_rate=0.95).height == 0
+        flags = build_flags(tables, warn_rate=0.9, fail_rate=0.95)
+        # tile 1102 on lane 1 has an N at cycles 7 and 8 in every read: one of
+        # the lane's two tiles, so half of them
+        assert flags.select("kind", "lane", "cycle").rows() == [
+            ("dark_cycle", 1, 7),
+            ("dark_cycle", 1, 8),
+        ]
 
     def test_sample_status(self, flagged):
         flags = build_flags(flagged)
@@ -907,7 +913,7 @@ def test_new_charts_in_spec(tmp_path):
     for text in (
         "Reads lost when filtering",
         "Tiles by surface and swath",
-        "Undetermined share vs N rate",
+        "Undetermined share vs N per base",
         "reads scanned (yield)",
     ):
         assert text in spec
@@ -945,3 +951,20 @@ def test_lane_flag_and_collapsed_cycles(tmp_path):
         assert part in page
     # summary tables come before the charts
     assert page.index('id="worst"') < page.index('id="vis"')
+
+
+def test_dark_cycle_on_most_but_not_all_tiles(tmp_path):
+    """A cycle dark on 6 of 10 tiles is one dark-cycle flag, not six cells."""
+    records = []
+    for t in range(1, 11):
+        for i in range(20):
+            seq = list("ACGT" * 5)
+            if t <= 6:
+                seq[9] = "N"
+            records.append(_rec("".join(seq), tile=f"11{t:02d}", x=str(i), y=str(i)))
+    path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+    write_fastq_gz(path, records)
+    flags = build_flags(build_tables(scan_files([path], "python")))
+    assert flags.select("kind", "cycle", "status").rows() == [
+        ("dark_cycle", 10, "FAIL")
+    ]
