@@ -21,6 +21,7 @@ from biomate.nspector.flags import (
     collapse_flags,
     flag_rank,
     flagged_share,
+    removal_costs,
     sample_status,
     status_name,
 )
@@ -1037,6 +1038,12 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         .transform_filter(SELECTION_FILTER)
         .transform_filter(pick_sample)
     )
+    # one label per count is unreadable for long reads: label every 10th
+    count_axis = (
+        alt.Axis(labelExpr="datum.value % 10 == 0 ? datum.label : ''", labelAngle=0)
+        if int(tables.n_per_read["n_count"].max() or 0) > 40
+        else alt.Axis()
+    )
     n_per_read = (
         alt.Chart(tables.n_per_read)
         .transform_filter(SELECTION_FILTER)
@@ -1044,7 +1051,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         .transform_aggregate(n_reads="sum(n_reads)", groupby=["n_count", "read"])
         .mark_bar()
         .encode(
-            x=alt.X("n_count:O", title="N bases in read"),
+            x=alt.X("n_count:O", title="N bases in read", axis=count_axis),
             xOffset="read:N",
             y=alt.Y(
                 "n_reads:Q",
@@ -1261,7 +1268,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         )
         .mark_bar()
         .encode(
-            x=alt.X("longest_run:O", title="Longest N run in read"),
+            x=alt.X("longest_run:O", title="Longest N run in read", axis=count_axis),
             xOffset="read:N",
             y=alt.Y(
                 "n_reads:Q",
@@ -1666,7 +1673,7 @@ _PAGE = """<!DOCTYPE html>
   <section id="projects"><h2>Projects</h2><div class="scroll">{projects}</div></section>
 </header>
 <main>
-  <section id="flags"><h2>Anomaly flags</h2>{flags}</section>
+  <section id="flags"><h2>Anomaly flags</h2>{flags}{costs}</section>
   <div class="grid" id="worst">
     <section><h2>Tiles with the highest N rate</h2><div class="scroll">{worst_tiles}</div></section>
     <section><h2>Cycles with the highest N rate</h2><div class="scroll">{worst_cycles}</div></section>
@@ -1804,6 +1811,28 @@ def write_report(
         flags_html = (
             "<p class='meta'>No lane, tile, cell, dark-cycle or sample flags.</p>"
         )
+    costs = removal_costs(tables, flags)
+    costs_html = ""
+    if costs:
+        costs_html = (
+            "<h2>What removing them would cost</h2>"
+            '<div class="scroll">'
+            + _table(
+                polars.DataFrame(costs).rename(
+                    {
+                        "lost": "reads or called bases lost",
+                        "n_removed": "N bases removed",
+                    }
+                ),
+                {"reads or called bases lost": ".2%", "N bases removed": ".2%"},
+            )
+            + '</div><p class="meta">Tiles are excluded at demultiplexing '
+            "(BCL Convert <code>--exclude-tiles</code>, bcl2fastq "
+            "<code>--tiles</code>) and drop their clusters from every read. Only "
+            "dark cycles that run to the end of a read can be trimmed "
+            "(<code>OverrideCycles</code>, <code>--use-bases-mask</code>); dark "
+            "cycles inside a read stay in the reads as N.</p>"
+        )
     by_read = (
         tables.sample_lane.group_by("read")
         .agg((polars.col("n").sum() / polars.col("total").sum()).alias("rate"))
@@ -1825,6 +1854,7 @@ def write_report(
     page = _PAGE.format(
         vegaembed=_vegaembed_bundle(),
         flags=flags_html,
+        costs=costs_html,
         spec=spec,
         generated=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
         n_files=len(scans),

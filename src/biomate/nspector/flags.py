@@ -388,3 +388,59 @@ def collapse_flags(flags: polars.DataFrame) -> polars.DataFrame:
         )
         .select("status", *keys, "tile", "cycles", "events", "rate", "z", "detail")
     )
+
+
+def removal_costs(tables: NspectorTables, flags: polars.DataFrame) -> list[dict]:
+    """What removing the flagged tiles and trailing dark cycles would cost.
+
+    One dict per action with ``action``, ``what``, ``lost`` (fraction of the
+    reads or bases given up) and ``n_removed`` (fraction of all N bases that
+    go with them). Excluding a tile drops its clusters in every read. Only
+    dark cycles that run to the end of a read can be trimmed: demultiplexers
+    cannot leave out cycles in the middle of a read.
+    """
+    costs = []
+    total_n = int(tables.sample_lane["n_bases"].sum())
+    if not total_n:
+        return costs
+
+    bad = flags.filter(polars.col("kind") == "tile").select("lane", "tile").unique()
+    if bad.height:
+        tiles = tables.tile_summary.join(bad, on=["lane", "tile"], how="semi")
+        names = (
+            bad.sort("lane", "tile")
+            .group_by("lane", maintain_order=True)
+            .agg(polars.col("tile").cast(polars.Utf8).str.join(", "))
+        )
+        costs.append(
+            {
+                "action": f"Exclude the {bad.height} flagged tile(s)",
+                "what": "; ".join(f"lane {lane}: {t}" for lane, t in names.iter_rows()),
+                "lost": tiles["total"].sum() / tables.tile_summary["total"].sum(),
+                "n_removed": tiles["n_bases"].sum() / total_n,
+            }
+        )
+
+    dark = flags.filter(polars.col("kind") == "dark_cycle")
+    lengths = tables.sample_cycle.group_by("read").agg(polars.col("cycle").max())
+    for read, length in lengths.sort("read").iter_rows():
+        cycles = set(dark.filter(polars.col("read") == read)["cycle"].to_list())
+        first = length + 1
+        while first - 1 in cycles:
+            first -= 1
+        if first > length:
+            continue
+        tail = tables.sample_cycle.filter(
+            (polars.col("read") == read) & (polars.col("cycle") >= first)
+        )
+        bases = tables.sample_lane.filter(polars.col("read") == read)["bases"].sum()
+        costs.append(
+            {
+                "action": f"Trim {read} after cycle {first - 1}",
+                "what": f"dark cycles {first}–{length} run to the end of the read",
+                # sample_cycle.n counts the reads with an N at the cycle: N bases
+                "lost": (tail["total"].sum() - tail["n"].sum()) / bases,
+                "n_removed": tail["n"].sum() / total_n,
+            }
+        )
+    return costs
