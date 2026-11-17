@@ -34,7 +34,7 @@ from biomate.nspector.scan import (
     resolve_engine,
     scan_files,
 )
-from biomate.nspector.tables import build_tables, tile_layout
+from biomate.nspector.tables import QUALITY_SUMS, build_tables, tile_layout
 from biomate.setup import setup_logging
 
 if TYPE_CHECKING:
@@ -245,7 +245,9 @@ def plot_n_per_cycle_and_tile(scan: FileScan, output_path: pathlib.Path) -> None
 
     max_cycle = scan.max_len
     tiles = _scan_frame(
-        scan, "tiles", ["lane", "tile", "total", "n", "n_bases", "lowq", "bases"]
+        scan,
+        "tiles",
+        ["lane", "tile", "total", "n", "n_bases", "lowq", "bases", *QUALITY_SUMS],
     )
     grid = tiles.select(polars.col("tile").unique().sort()).join(
         polars.DataFrame({"cycles": polars.arange(1, max_cycle + 1, eager=True)}),

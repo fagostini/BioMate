@@ -138,8 +138,12 @@ class FileScan:
     Counter lists are sorted and hold only non-zero entries; their size depends
     on lanes x tiles x cycles, never on the number of reads:
 
-    * ``tiles``: (lane, tile, total, reads_with_n, n_bases, lowq_reads, bases),
-      ``bases`` being the sum of read lengths
+    * ``tiles``: (lane, tile, total, reads_with_n, n_bases, lowq_reads, bases,
+      polyg_reads, qual_sum, flank_qual_sum, flank_bases), ``bases`` being the
+      sum of read lengths, ``polyg_reads`` the reads ending in at least
+      ``POLYG_MIN_RUN`` G, ``qual_sum`` the Phred sum of the called (non-N)
+      bases and ``flank_*`` the Phred sum and count of the called bases next
+      to an N (a base between two Ns counts once per side)
     * ``tile_cycle``: (lane, tile, cycle, reads_with_n, reads_with_lowq),
       1-based cycles, rows where either count is non-zero
     * ``n_per_read``: (lane, n_count, reads)
@@ -147,6 +151,7 @@ class FileScan:
       (cycle - 1) // cycle_window, n_bases)
     * ``n_shape``: (lane, longest_n_run, first_n_region, all_n, reads), see
       :func:`first_n_region`
+    * ``polyg_start``: (lane, cycle where the poly-G tail starts, reads)
 
     Low-quality ("lowq") counts only called bases (not N) whose Phred score
     is below ``min_qual``.
@@ -158,9 +163,7 @@ class FileScan:
     project: str = ""
     format_error: int | None = None
     max_len: int = 0
-    tiles: list[tuple[int, int, int, int, int, int, int]] = dataclasses.field(
-        default_factory=list
-    )
+    tiles: list[tuple[int, ...]] = dataclasses.field(default_factory=list)
     tile_cycle: list[tuple[int, int, int, int, int]] = dataclasses.field(
         default_factory=list
     )
@@ -171,6 +174,7 @@ class FileScan:
     n_shape: list[tuple[int, int, int, int, int]] = dataclasses.field(
         default_factory=list
     )
+    polyg_start: list[tuple[int, int, int]] = dataclasses.field(default_factory=list)
 
     @property
     def stem(self) -> str:
@@ -345,6 +349,11 @@ class LowQCounter:
         )
 
 
+# shortest 3' G run counted as a poly-G tail (as fastp's default): on 2-colour
+# instruments a cluster that gives no signal is called G, not N
+POLYG_MIN_RUN = 10
+
+
 def scan_file_python(
     path: pathlib.Path,
     threads: int = 0,
@@ -362,6 +371,7 @@ def scan_file_python(
     n_per_read: Counter[tuple[int, int]] = Counter()
     spatial: Counter[tuple[int, int, int, int, int]] = Counter()
     n_shape: Counter[tuple[int, int, int, int]] = Counter()
+    polyg_start: Counter[tuple[int, int]] = Counter()
 
     with dnaio.open(path, open_threads=threads) as reader:
         for idx, record in enumerate(reader):
@@ -373,13 +383,31 @@ def scan_file_python(
             sequence = record.sequence
             if len(sequence) > scan.max_len:
                 scan.max_len = len(sequence)
-            acc = tiles.setdefault((lane, tile), [0, 0, 0, 0])
+            # total, reads with N, N bases, bases, poly-G reads, Phred sum of
+            # called bases, Phred sum and count of called bases next to an N
+            acc = tiles.setdefault((lane, tile), [0, 0, 0, 0, 0, 0, 0, 0])
             acc[0] += 1
             acc[3] += len(sequence)
             lowq.add(lane, tile, sequence, record.qualities)
+            phred = record.qualities.encode("ascii")
+            acc[5] += sum(phred) - 33 * len(phred)
+            polyg = len(sequence) - len(sequence.rstrip("G"))
+            if polyg >= POLYG_MIN_RUN:
+                acc[4] += 1
+                polyg_start[(lane, len(sequence) - polyg + 1)] += 1
             if "N" not in sequence:
                 continue
             cycles = [i + 1 for i, c in enumerate(sequence) if c == "N"]
+            last = len(sequence) - 1
+            for cycle in cycles:
+                i = cycle - 1
+                acc[5] -= phred[i] - 33  # qual_sum counts called bases only
+                if i > 0 and sequence[i - 1] != "N":
+                    acc[6] += phred[i - 1] - 33
+                    acc[7] += 1
+                if i < last and sequence[i + 1] != "N":
+                    acc[6] += phred[i + 1] - 33
+                    acc[7] += 1
             acc[1] += 1
             acc[2] += len(cycles)
             for cycle in cycles:
@@ -398,7 +426,7 @@ def scan_file_python(
         raw.flush()
     lowq_cycle = lowq.finish()
     scan.tiles = sorted(
-        (lane, tile, *acc[:3], lowq.reads[(lane, tile)], acc[3])
+        (lane, tile, *acc[:3], lowq.reads[(lane, tile)], *acc[3:])
         for (lane, tile), acc in tiles.items()
     )
     scan.tile_cycle = sorted(
@@ -408,12 +436,13 @@ def scan_file_python(
     scan.n_per_read = sorted((*k, v) for k, v in n_per_read.items())
     scan.spatial = sorted((*k, v) for k, v in spatial.items())
     scan.n_shape = sorted((*k, v) for k, v in n_shape.items())
+    scan.polyg_start = sorted((*k, v) for k, v in polyg_start.items())
     return scan
 
 
 def _from_kernel(path: pathlib.Path, result: tuple) -> FileScan:
     """Convert one ``biomate_kernels.scan_n_content`` tuple to a FileScan."""
-    fmt_err, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape = result
+    fmt_err, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape, polyg = result
     sample, read = parse_fastq_name(path)
     return FileScan(
         path=path,
@@ -427,6 +456,7 @@ def _from_kernel(path: pathlib.Path, result: tuple) -> FileScan:
         n_per_read=[tuple(t) for t in n_per_read],
         spatial=[tuple(t) for t in spatial],
         n_shape=[tuple(t) for t in n_shape],
+        polyg_start=[tuple(t) for t in polyg],
     )
 
 

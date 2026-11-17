@@ -520,6 +520,28 @@ def verdict(flags: polars.DataFrame, share: float | None) -> str:
     return " ".join(parts)
 
 
+def read_quality(tables: NspectorTables) -> polars.DataFrame:
+    """Per read: share of reads with a poly-G tail, mean Phred of the called
+    bases and mean Phred of the called bases next to an N (null without Ns).
+    """
+    total = polars.col("total").sum()
+    return (
+        tables.sample_lane.group_by("read")
+        .agg(
+            (polars.col("polyg").sum() / total).alias("polyg_rate"),
+            (
+                polars.col("qual_sum").sum()
+                / (polars.col("bases").sum() - polars.col("n_bases").sum())
+            ).alias("mean_q"),
+            (
+                polars.col("flank_qual_sum").sum() / polars.col("flank_bases").sum()
+            ).alias("flank_q"),
+        )
+        .fill_nan(None)
+        .sort("read")
+    )
+
+
 def summary(
     tables: NspectorTables, flags: polars.DataFrame, params: dict | None = None
 ) -> dict:
@@ -548,9 +570,14 @@ def summary(
         "reads": int(lanes["total"].sum()),
         "reads_with_n": int(lanes["n"].sum()),
         **lanes.select(rates).row(0, named=True),
+        "polyg_rate": int(lanes["polyg"].sum()) / max(int(lanes["total"].sum()), 1),
         "by_read": {
-            row["read"]: {"n_rate": row["n_rate"], "n_per_base": row["n_per_base"]}
-            for row in lanes.group_by("read").agg(rates).sort("read").to_dicts()
+            row.pop("read"): row
+            for row in lanes.group_by("read")
+            .agg(rates)
+            .join(read_quality(tables), on="read")
+            .sort("read")
+            .to_dicts()
         },
         "removal_costs": removal_costs(tables, flags),
         "parameters": params or {},
