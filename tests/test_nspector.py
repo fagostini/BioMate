@@ -749,10 +749,12 @@ class TestRunMetrics:
             ("R1", 1, 3, pytest.approx(0.3)),
         ]
         assert cycles["intensity"].to_list() == [10.0, 10.0, 10.0]
+        assert cycles["tile"].unique().to_list() == [1101]
         tables = build_tables(scan_files(run_files, "python"))
         tables.cycle_interop = cycles
         spec = json.dumps(build_chart(tables).to_dict())
         assert "InterOp per cycle" in spec and "P90 intensity" in spec
+        assert '"param": "pick_tile", "empty": false' in spec
 
     def test_run_folder_needs_interop_dir(self, tmp_path):
         fq = tmp_path / "x.fastq.gz"
