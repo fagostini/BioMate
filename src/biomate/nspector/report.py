@@ -1577,7 +1577,10 @@ _PAGE = """<!DOCTYPE html>
   table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }}
   th, td {{ text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }}
   tbody tr:nth-child(even) {{ background: var(--panel); }}
-  th {{ color: var(--muted); font-weight: 600; font-size: 12px; }}
+  th {{ color: var(--muted); font-weight: 600; font-size: 12px; cursor: pointer; user-select: none; }}
+  th[aria-sort="ascending"]::after {{ content: " ▲"; }}
+  th[aria-sort="descending"]::after {{ content: " ▼"; }}
+  .filter {{ font: inherit; padding: 4px 8px; margin: 0 0 8px; width: min(360px, 100%); border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); }}
   .help {{ background: var(--panel); border-left: 3px solid var(--accent); padding: 8px 14px; border-radius: 4px; margin-top: 20px; }}
   .help summary {{ cursor: pointer; font-weight: 600; }}
   .verdict {{ font-size: 15px; margin: 0 0 12px; }}
@@ -1660,7 +1663,7 @@ _PAGE = """<!DOCTYPE html>
   </details>
   <div id="controls"></div>
   <div id="vis"></div>
-  <section id="inputs"><h2>Inputs</h2><div class="scroll">{inputs}</div></section>
+  <section id="inputs"><h2>Inputs</h2><input type="search" class="filter" id="inputs-filter" placeholder="Filter by file, project or sample" aria-label="Filter the input files"><div class="scroll">{inputs}</div></section>
   <p class="meta" style="margin:24px 0">Full tables: <code>nspector_*.parquet</code> in this directory.</p>
 </main>
 <script type="application/octet-stream" id="spec">{spec}</script>
@@ -1717,6 +1720,36 @@ _PAGE = """<!DOCTYPE html>
     const keep = view ? Object.fromEntries(controls.map((name) => [name, view.signal(name)])) : null;
     render(theme, keep);
   }}
+
+  // click a column header to sort its table; numbers (with , and %) sort as numbers
+  function cellValue(row, index) {{
+    const text = row.cells[index].textContent.trim();
+    const number = Number(text.replace(/[,%]/g, ''));
+    return text !== '' && !Number.isNaN(number) ? number : text;
+  }}
+  document.querySelectorAll('table').forEach((table) => {{
+    table.querySelectorAll('th').forEach((th, index) => th.addEventListener('click', () => {{
+      const order = th.getAttribute('aria-sort') === 'descending' ? 'ascending' : 'descending';
+      table.querySelectorAll('th').forEach((other) => other.removeAttribute('aria-sort'));
+      th.setAttribute('aria-sort', order);
+      const body = table.tBodies[0];
+      const sign = order === 'ascending' ? 1 : -1;
+      const rows = [...body.rows].sort((a, b) => {{
+        const x = cellValue(a, index), y = cellValue(b, index);
+        // empty cells last, whatever the order
+        if (x === '' || y === '') return x === '' ? (y === '' ? 0 : 1) : -1;
+        if (typeof x === typeof y) return sign * (x < y ? -1 : x > y ? 1 : 0);
+        return sign * (typeof x === 'number' ? -1 : 1);
+      }});
+      body.append(...rows);
+    }}));
+  }});
+  document.getElementById('inputs-filter').addEventListener('input', (event) => {{
+    const needle = event.target.value.toLowerCase();
+    document.querySelectorAll('#inputs tbody tr').forEach((row) => {{
+      row.hidden = needle !== '' && !row.textContent.toLowerCase().includes(needle);
+    }});
+  }});
 
   loadSpec()
     .then(() => render(document.documentElement.dataset.theme))
