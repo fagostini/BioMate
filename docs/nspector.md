@@ -145,7 +145,7 @@ The **Project**, **Lane**, **Read**, **Metric** and **Show WARN flags** controls
 
 The tile-level views (tile map, tile × cycle and spatial) sum the samples of the selected projects. Tile defects are physical, so they affect every sample on that lane; flags are always computed on the whole flowcell.
 
-Above the charts, the page lists the flags, the tiles and the cycles with the highest N rate; the input files with their read counts are under the charts. The header prints the BioMate version and the thresholds used (`--warn-rate`, `--fail-rate`, `--min-qual`, spatial bin size and cycle window), and the N rate per read.
+Above the charts, the page lists the flags, the tiles and the cycles with the highest N rate; the input files with their read counts are under the charts. Click a column header to sort a table (again to reverse it); the box above the input files filters them by file, project or sample name. The header prints the BioMate version and the thresholds used (`--warn-rate`, `--fail-rate`, `--min-qual`, spatial bin size and cycle window), and the N rate per read.
 
 The embedded data depends on lanes, tiles and cycles, not on the number of reads. Two budgets keep it bounded:
 

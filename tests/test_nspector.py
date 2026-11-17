@@ -1048,6 +1048,7 @@ def test_collapsed_flags_name_the_tiles_of_one_cycle(tmp_path):
     page = write_report([], tables, tmp_path).read_text()
     assert 'class="jump" tabindex="0" data-read="R1" data-lane="1"' in page
     assert 'data-tiles="1101 1102" onclick="jumpToFlag(this)"' in page
+    assert 'id="inputs-filter"' in page and "aria-sort" in page
 
 
 def test_removal_costs(tmp_path):
