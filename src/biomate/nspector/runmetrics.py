@@ -25,10 +25,11 @@ INTEROP_SCHEMA = {
     "pct_prephasing": polars.Float64,
 }
 
-# per read/lane/cycle means over the lane's tiles
+# per read/lane/tile/cycle; the report averages the tiles of a lane
 CYCLE_SCHEMA = {
     "read": polars.Utf8,
     "lane": polars.UInt8,
+    "tile": polars.UInt32,
     "cycle": polars.UInt16,
     "intensity": polars.Float64,
     "fwhm": polars.Float64,
@@ -154,7 +155,7 @@ def read_tile_metrics(run_folder: pathlib.Path) -> polars.DataFrame:
 
 
 def cycle_frame(run) -> polars.DataFrame:
-    """Per read/lane/cycle InterOp means over tiles, from loaded ``run`` metrics.
+    """Per read/lane/tile/cycle InterOp metrics from loaded ``run`` metrics.
 
     ``intensity`` and ``fwhm`` (spot width, larger = out of focus) average
     the channels; ``cycle`` counts within the read. Index reads are left out.
@@ -181,6 +182,7 @@ def cycle_frame(run) -> polars.DataFrame:
             )
             .alias("read"),
             polars.col("Lane").alias("lane"),
+            polars.col("Tile").alias("tile"),
             polars.col("Cycle Within Read").alias("cycle"),
             mean_of("P90/").alias("intensity"),
             mean_of("Fwhm/").alias("fwhm"),
@@ -188,11 +190,12 @@ def cycle_frame(run) -> polars.DataFrame:
             mean_of("% No Calls").alias("pct_no_call"),
         )
         .drop_nulls("read")
-        .group_by("read", "lane", "cycle")
+        # one row per tile and cycle already; the mean only merges duplicates
+        .group_by("read", "lane", "tile", "cycle")
         .mean()
         .cast(CYCLE_SCHEMA)
         .select(list(CYCLE_SCHEMA))
-        .sort("read", "lane", "cycle")
+        .sort("read", "lane", "tile", "cycle")
     )
 
 

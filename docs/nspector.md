@@ -139,7 +139,7 @@ The **Project**, **Lane**, **Read**, **Metric** and **Show WARN flags** controls
 | N per base per tile, R1 vs R2 (with both reads) | One point per tile. On the diagonal: a defect on the tile. Off the diagonal: a problem during one read. | Follows the project and lane; click a point to select that tile. |
 | Undetermined share vs N per base (with Undetermined reads) | One point per tile and read: the share of its reads not assigned to a sample against its N per base. | Click a point to select that tile. |
 | Tile × cycle | Heatmap of every tile at every cycle. Cells with no N and no low-Q base are left empty. Flagged cells and dark cycles are outlined in orange. | Highlights the selected tile. |
-| InterOp per cycle (with `--run-folder`) | P90 intensity, spot width (FWHM), PhiX error rate and no-call rate at each cycle, averaged over the lane's tiles. An N spike with an intensity drop points to fluidics or reagents; with a FWHM jump, to focus. | Follows the lane and read. |
+| InterOp per cycle (with `--run-folder`) | P90 intensity, spot width (FWHM), PhiX error rate and no-call rate at each cycle, averaged over the lane's tiles, with the clicked tiles (tile map, flag row or scatter) drawn in orange. An N spike with an intensity drop points to fluidics or reagents; with a FWHM jump, to focus. | Follows the lane and read. |
 | N per base vs InterOp (with `--run-folder`) | One point per tile: N per base against %PF, cluster density, %≥Q30, % occupied or a phasing rate, coloured by lane. | Click a point to select that tile everywhere. |
 | Spatial N density | N bases binned over the X/Y coordinates of the selected tile (or of all tiles in the selection), with marginal histograms. | Follows the tile selection, and the cycle range dragged on N per cycle (by windows of `--spatial-cycle-window` cycles). |
 
@@ -169,7 +169,7 @@ Each table is written as `nspector_<table>.parquet`:
 | `n_shape` | project, sample, read, lane, `longest_run`, `first_n`, `all_n` | `n_reads` |
 | `flags` | one row per flag | `status`, `kind`, `project`, `sample` (only for `sample` flags), `read`, `lane`, `tile`, `cycle`, `rate`, `z`, `detail` |
 | `tile_interop` (with `--run-folder`) | read, lane, tile (summed over samples) | `n`, `total`, `n_bases`, `bases`, `n_rate`, `n_base_rate`, `density_k`, `pct_pf`, `pct_q30`, `pct_occupied`, `pct_phasing`, `pct_prephasing` |
-| `cycle_interop` (with `--run-folder`) | read, lane, cycle (within the read; mean over the lane's tiles) | `intensity`, `fwhm`, `error_rate`, `pct_no_call` |
+| `cycle_interop` (with `--run-folder`) | read, lane, tile, cycle (within the read) | `intensity`, `fwhm`, `error_rate`, `pct_no_call` |
 
 In these tables:
 

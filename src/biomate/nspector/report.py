@@ -190,7 +190,7 @@ CAPTIONS = {
     ),
     "cycle_interop": (
         "What the instrument recorded at each cycle, averaged over the lane's "
-        "tiles; R1 in the base colour, R2 lighter, one dash pattern per lane. Compare with N per cycle above: "
+        "tiles, with the tiles clicked on the tile map or a flag row in orange; R1 in the base colour, R2 lighter, one dash pattern per lane. Compare with N per cycle above: "
         "an N spike where the intensity drops points to fluidics or reagents, "
         "where the spot width (FWHM) jumps to a focus problem, and with neither to "
         "the base calling itself. The error rate needs a PhiX spike-in."
@@ -1231,29 +1231,51 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
     if tables.cycle_interop is not None and (
         offered := _with_data(tables.cycle_interop, CYCLE_INTEROP_LABELS)
     ):
-        cycle_interop = alt.vconcat(
-            *[
+
+        def interop_panel(column: str, label: str) -> alt.LayerChart:
+            base = (
                 alt.Chart(tables.cycle_interop)
                 .transform_filter(LANE_FILTER)
                 .transform_filter(f"isValid(datum.{column})")
+            )
+            tooltip = [
+                "read:N",
+                "lane:O",
+                "cycle:Q",
+                alt.Tooltip("value:Q", title=label, format=".4g"),
+            ]
+            x = alt.X("cycle:Q", title="Cycle", axis=cycle_ticks)
+            lane_mean = (
+                base.transform_aggregate(
+                    value=f"mean({column})", groupby=["read", "lane", "cycle"]
+                )
                 .mark_line()
                 .encode(
-                    x=alt.X("cycle:Q", title="Cycle", axis=cycle_ticks),
-                    y=alt.Y(f"{column}:Q", title=label).scale(zero=False),
+                    x=x,
+                    y=alt.Y("value:Q", title=label).scale(zero=False),
                     color=read_color,
                     strokeDash=alt.StrokeDash("lane:N", title="Lane"),
-                    tooltip=[
-                        "read:N",
-                        "lane:O",
-                        "cycle:Q",
-                        alt.Tooltip(f"{column}:Q", title=label, format=".4g"),
-                    ],
+                    tooltip=tooltip,
                 )
-                .properties(width=FULL_WIDTH, height=90)
-                for column, label in offered.items()
-            ],
+            )
+            # the tiles clicked on the tile map, a flag row or a scatter
+            picked = (
+                base.transform_filter({"param": "pick_tile", "empty": False})
+                .transform_aggregate(
+                    value=f"mean({column})", groupby=["read", "lane", "cycle"]
+                )
+                .mark_line(color=FLAG_COLOR, strokeWidth=1.5)
+                .encode(x=x, y="value:Q", detail="read:N", tooltip=tooltip)
+            )
+            return alt.layer(lane_mean, picked).properties(width=FULL_WIDTH, height=90)
+
+        cycle_interop = alt.vconcat(
+            *[interop_panel(column, label) for column, label in offered.items()],
             spacing=8,
-        ).properties(title="InterOp per cycle (mean over the lane's tiles)")
+        ).properties(
+            title="InterOp per cycle: mean over the lane's tiles, clicked tiles "
+            "in orange"
+        )
         # same cycle axis in every panel, whatever cycles a metric covers
         cycle_interop = cycle_interop.resolve_scale(x="shared")
 
