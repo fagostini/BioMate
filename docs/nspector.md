@@ -30,7 +30,7 @@ biomate nspector \
 
 - `--input`: one or more FASTQ files (`.fastq`, `.fq`, optionally gzipped) and/or directories to search recursively. A file found twice is scanned once. Required.
 - `--output`: output directory, created if missing (default: `./output`).
-- `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` stops with an error when `biomate_kernels` is missing. Both engines produce identical results.
+- `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` stops with an error when `biomate_kernels` is missing. Both engines produce identical results; the Rust one is about 20× faster. `biomate_kernels` is not installed with BioMate: see [Rust engine](https://github.com/fagostini/BioMate#rust-engine-optional) to build it.
 - `--threads`: Rust engine: files scanned in parallel (default `0` = one per available core). Python engine: extra decompression threads per file. The Rust engine also decompresses each gzip file on its own thread, ahead of parsing, and reads multi-member gzip (as written by BCL Convert).
 - `--spatial-bin-size`: width of the spatial bins in read-name X/Y coordinate units (default: `2000`). Raise it if the report gets large.
 - `--spatial-cycle-window`: spatial bins are counted per window of this many cycles (default: `10`), so the spatial map can follow a cycle range dragged on the N per cycle chart.

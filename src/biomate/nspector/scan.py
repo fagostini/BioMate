@@ -508,9 +508,12 @@ def kernel_problem() -> str | None:
 @functools.cache
 def _warn_outdated_kernel(problem: str) -> None:
     # once per run: resolve_engine is called by validate_args and scan_files
-    logging.warning(
+    # a missing kernel is normal (containers, plain installs): info, not warning
+    log = logging.info if biomate_kernels is None else logging.warning
+    log(
         f"biomate_kernels is {problem}; scanning with the slower Python engine. "
-        "Rebuild it (cd rust/biomate_kernels && maturin develop --release)."
+        "Build it with: cd rust/biomate_kernels && maturin develop --release "
+        "(see 'Rust engine' in the BioMate README)."
     )
 
 
@@ -525,13 +528,13 @@ def resolve_engine(engine: str) -> str:
     if engine == "auto":
         if problem is None:
             return "rust"
-        if biomate_kernels is not None:
-            _warn_outdated_kernel(problem)
+        _warn_outdated_kernel(problem)
         return "python"
     if engine == "rust" and problem is not None:
         raise RuntimeError(
             f"--engine rust needs biomate_kernels, which is {problem}. Build it "
-            "(cd rust/biomate_kernels && maturin develop --release) or use "
+            "(cd rust/biomate_kernels && maturin develop --release; see 'Rust "
+            "engine' in the BioMate README) or use "
             "--engine auto/python."
         )
     return engine

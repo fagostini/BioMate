@@ -461,6 +461,16 @@ class TestValidateArgs:
         with pytest.raises(RuntimeError, match="another BioMate version"):
             nspector_scan.resolve_engine("rust")
 
+    def test_missing_kernel_logs_python_fallback_once(self, monkeypatch, caplog):
+        monkeypatch.setattr(nspector_scan, "biomate_kernels", None)
+        nspector_scan._warn_outdated_kernel.cache_clear()
+        with caplog.at_level("INFO"):
+            assert nspector_scan.resolve_engine("auto") == "python"
+            assert nspector_scan.resolve_engine("auto") == "python"
+        noted = [r for r in caplog.records if "slower Python engine" in r.message]
+        assert len(noted) == 1 and noted[0].levelname == "INFO"
+        assert "Rust engine" in noted[0].message
+
     def test_kernel_reports_the_scan_format_this_code_reads(self):
         kernels = pytest.importorskip("biomate_kernels")
         assert kernels.SCAN_FORMAT == nspector_scan.KERNEL_SCAN_FORMAT

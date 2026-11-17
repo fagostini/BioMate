@@ -57,6 +57,34 @@ biomate --help
 pytest tests/
 ```
 
+### Rust engine (optional)
+
+`nspector` and `index --engine rust` can use `biomate_kernels`, a compiled Rust extension in `rust/biomate_kernels/`. It is not on PyPI and is not built by `uv sync`, `pip install` or the Docker and Singularity images. Without it, `nspector --engine auto` (the default) uses the Python engine, which gives identical results but is about 20× slower on large runs (one hour against three minutes for 277 M reads).
+
+Requirements:
+- a Rust toolchain (`cargo`, `rustc`), e.g. from [rustup](https://rustup.rs/)
+- [maturin](https://www.maturin.rs/) `>=1.5,<2.0`, installed in the same environment as `biomate`
+- a clone of this repository (the kernel is built from source)
+
+Build it into the environment that runs `biomate`:
+
+```bash
+uv pip install "maturin>=1.5,<2.0"
+cd rust/biomate_kernels
+VIRTUAL_ENV=../../.venv maturin develop --release
+```
+
+- Always pass `--release`. A debug build is many times slower.
+- In a conda shell, maturin refuses to build when both `CONDA_PREFIX` and `VIRTUAL_ENV` are set. Prefix the command with `env -u CONDA_PREFIX`.
+- `uv sync` removes packages the lock file does not list, including this one. Use `uv sync --inexact` to keep it, or rebuild after each sync.
+- Rebuild after pulling changes to `rust/biomate_kernels/`. When the installed kernel is from another BioMate version, `nspector --engine auto` warns and uses Python, and `--engine rust` stops with an error.
+
+Check the install:
+
+```bash
+uv run python -c "import biomate_kernels; print(biomate_kernels.SCAN_FORMAT)"
+```
+
 ## Dependency Management
 
 BioMate uses a **single source of truth** for dependency management:
