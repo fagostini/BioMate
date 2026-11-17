@@ -810,5 +810,8 @@ mod tests {
 fn biomate_kernels(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_class::<IndexPattern>()?;
     m.add_function(wrap_pyfunction!(scan_n_content, m)?)?;
+    // layout of the scan_n_content result; nspector refuses another one
+    // (2: tiles with poly-G and quality sums, plus polyg_start)
+    m.add("SCAN_FORMAT", 2)?;
     Ok(())
 }

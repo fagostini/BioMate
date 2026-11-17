@@ -449,6 +449,22 @@ class TestValidateArgs:
         with pytest.raises(argparse.ArgumentTypeError, match="biomate_kernels"):
             validate_args(args)
 
+    def test_outdated_kernel_falls_back_or_raises(self, tmp_path, monkeypatch, caplog):
+        """A kernel from another version: auto scans in Python, rust refuses."""
+        monkeypatch.setattr(nspector_scan, "biomate_kernels", argparse.Namespace())
+        nspector_scan._warn_outdated_kernel.cache_clear()
+        with caplog.at_level("WARNING"):
+            assert nspector_scan.resolve_engine("auto") == "python"
+            assert nspector_scan.resolve_engine("auto") == "python"
+        warned = [r for r in caplog.records if "slower Python engine" in r.message]
+        assert len(warned) == 1 and "scan format 1" in warned[0].message
+        with pytest.raises(RuntimeError, match="another BioMate version"):
+            nspector_scan.resolve_engine("rust")
+
+    def test_kernel_reports_the_scan_format_this_code_reads(self):
+        kernels = pytest.importorskip("biomate_kernels")
+        assert kernels.SCAN_FORMAT == nspector_scan.KERNEL_SCAN_FORMAT
+
     def test_spatial_bin_size_must_be_positive(self, tmp_path):
         args = self._make_args(tmp_path, spatial_bin_size=0)
         with pytest.raises(argparse.ArgumentTypeError, match="spatial-bin-size"):

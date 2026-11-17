@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 import os
 import pathlib
@@ -460,15 +461,52 @@ def _from_kernel(path: pathlib.Path, result: tuple) -> FileScan:
     )
 
 
+# layout of the biomate_kernels.scan_n_content result this code reads; the
+# kernel exports its own as SCAN_FORMAT (builds before it had none: 1)
+KERNEL_SCAN_FORMAT = 2
+
+
+def kernel_problem() -> str | None:
+    """Why the Rust kernel cannot be used for nspector, or None when it can."""
+    if biomate_kernels is None:
+        return "not installed in this environment"
+    found = getattr(biomate_kernels, "SCAN_FORMAT", 1)
+    if found != KERNEL_SCAN_FORMAT:
+        return (
+            f"built from another BioMate version (scan format {found}, this "
+            f"version reads {KERNEL_SCAN_FORMAT})"
+        )
+    return None
+
+
+@functools.cache
+def _warn_outdated_kernel(problem: str) -> None:
+    # once per run: resolve_engine is called by validate_args and scan_files
+    logging.warning(
+        f"biomate_kernels is {problem}; scanning with the slower Python engine. "
+        "Rebuild it (cd rust/biomate_kernels && maturin develop --release)."
+    )
+
+
 def resolve_engine(engine: str) -> str:
-    """Map ``auto`` to ``rust`` when biomate_kernels imports, else ``python``."""
+    """Map ``auto`` to ``rust`` when a matching biomate_kernels imports, else ``python``.
+
+    An installed kernel built from another BioMate version returns counters in
+    another layout: ``auto`` then falls back to Python with a warning, and
+    ``rust`` raises.
+    """
+    problem = kernel_problem()
     if engine == "auto":
-        return "rust" if biomate_kernels is not None else "python"
-    if engine == "rust" and biomate_kernels is None:
+        if problem is None:
+            return "rust"
+        if biomate_kernels is not None:
+            _warn_outdated_kernel(problem)
+        return "python"
+    if engine == "rust" and problem is not None:
         raise RuntimeError(
-            "--engine rust needs biomate_kernels, which is not installed in this "
-            "environment. Build it (cd rust/biomate_kernels && maturin develop "
-            "--release) or use --engine auto/python."
+            f"--engine rust needs biomate_kernels, which is {problem}. Build it "
+            "(cd rust/biomate_kernels && maturin develop --release) or use "
+            "--engine auto/python."
         )
     return engine
 
