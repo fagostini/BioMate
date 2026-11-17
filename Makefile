@@ -77,6 +77,21 @@ sync: check-uv
 	@$(UV) sync --all-extras --all-groups
 
 
+.PHONY: kernels
+## Build the optional Rust kernels (biomate_kernels) into .venv; needs cargo
+kernels: check-uv
+	@[[ -x .venv/bin/python ]] || { echo "Error: no .venv found; run 'make sync' first."; exit 1; }
+	@command -v cargo >/dev/null 2>&1 || { \
+		echo "Error: 'cargo' not found in PATH."; \
+		echo "Install a Rust toolchain (https://rustup.rs/) and retry."; \
+		exit 1; \
+	}
+	@$(UV) pip install --quiet "maturin>=1.5,<2.0"
+	@cd rust/biomate_kernels && env -u CONDA_PREFIX VIRTUAL_ENV=$(PROJECT_DIR)/.venv \
+		$(PROJECT_DIR)/.venv/bin/maturin develop --release
+	@$(PROJECT_DIR)/.venv/bin/python -c "import biomate_kernels; print('biomate_kernels installed, scan format', biomate_kernels.SCAN_FORMAT)"
+
+
 uv.lock: check-uv
 	@$(UV) lock
 

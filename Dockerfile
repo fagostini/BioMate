@@ -1,6 +1,19 @@
 # BioMate Docker Image
 # Based on singularity.def configuration
 
+# Build the optional Rust kernels (biomate_kernels: nspector and index --engine rust)
+FROM ubuntu:24.04 AS kernels
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y curl ca-certificates build-essential python3 python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+ENV PATH="/root/.cargo/bin:$PATH"
+RUN python3 -m venv /opt/maturin && /opt/maturin/bin/pip install "maturin>=1.5,<2.0"
+COPY rust/biomate_kernels /src/biomate_kernels
+WORKDIR /src/biomate_kernels
+RUN /opt/maturin/bin/maturin build --release --out /wheels
+
 FROM ubuntu:24.04
 
 # Avoid interactive prompts during installation
@@ -30,6 +43,8 @@ RUN pip install build
 COPY . /app
 WORKDIR /app
 RUN pip install .
+COPY --from=kernels /wheels /tmp/wheels
+RUN pip install /tmp/wheels/*.whl && rm -r /tmp/wheels
 
 # Web interface port (see docker-compose.yml)
 EXPOSE 8765

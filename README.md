@@ -59,14 +59,20 @@ pytest tests/
 
 ### Rust engine (optional)
 
-`nspector` and `index --engine rust` can use `biomate_kernels`, a compiled Rust extension in `rust/biomate_kernels/`. It is not on PyPI and is not built by `uv sync`, `pip install` or the Docker and Singularity images. Without it, `nspector --engine auto` (the default) uses the Python engine, which gives identical results but is about 20× slower on large runs (one hour against three minutes for 277 M reads).
+`nspector` and `index --engine rust` can use `biomate_kernels`, a compiled Rust extension in `rust/biomate_kernels/`. It is not on PyPI and is not built by `uv sync` or `pip install`. The Docker and Singularity images build and include it. Without it, `nspector --engine auto` (the default) uses the Python engine, which gives identical results but is about 20× slower on large runs (one hour against three minutes for 277 M reads).
 
 Requirements:
 - a Rust toolchain (`cargo`, `rustc`), e.g. from [rustup](https://rustup.rs/)
 - [maturin](https://www.maturin.rs/) `>=1.5,<2.0`, installed in the same environment as `biomate`
 - a clone of this repository (the kernel is built from source)
 
-Build it into the environment that runs `biomate`:
+In a development setup (`make sync` done, `cargo` on `PATH`), build it into `.venv` and check it:
+
+```bash
+make kernels
+```
+
+To build it into another environment that runs `biomate` by hand:
 
 ```bash
 uv pip install "maturin>=1.5,<2.0"
