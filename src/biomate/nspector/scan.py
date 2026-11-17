@@ -286,7 +286,10 @@ class RawWriter:
 
 
 class LowQCounter:
-    """Count called (non-N) bases below ``min_qual`` per tile and cycle.
+    """Count called (non-N) bases below ``min_qual`` per tile and cycle, and
+    sum per tile the Phred scores of the called bases (``qual_sum``) and of
+    the called bases next to an N (``flank_sum``, ``flank_bases``; a base
+    between two Ns counts once per side).
 
     Reads are buffered per (lane, tile, length) and compared in numpy
     batches; a per-base Python loop made the Python engine ~13x slower.
@@ -303,11 +306,14 @@ class LowQCounter:
         )
         self.cycles: dict[tuple[int, int], numpy.ndarray] = {}
         self.reads: Counter[tuple[int, int]] = Counter()
+        self.qual_sum: Counter[tuple[int, int]] = Counter()
+        self.flank_sum: Counter[tuple[int, int]] = Counter()
+        self.flank_bases: Counter[tuple[int, int]] = Counter()
         self.buffered = 0
 
     def add(self, lane: int, tile: int, sequence: str, qualities: str) -> None:
         """Buffer one read, counting the buffer when it is full."""
-        if self.threshold <= 33 or not sequence:
+        if not sequence:
             return
         key = (lane, tile, len(sequence))
         seqs, quals = self.buffers[key]
@@ -322,7 +328,27 @@ class LowQCounter:
         seqs, quals = self.buffers.pop(key)
         seq = numpy.frombuffer("".join(seqs).encode("ascii"), numpy.uint8)
         qual = numpy.frombuffer("".join(quals).encode("ascii"), numpy.uint8)
-        low = ((qual < self.threshold) & (seq != ord("N"))).reshape(-1, length)
+        is_n = (seq == ord("N")).reshape(-1, length)
+        called = ~is_n
+        q = qual.reshape(-1, length)
+        # sums of uint8 in int64, never a full int64 copy: this runs on every read
+        n_called = int(called.sum())
+        self.qual_sum[(lane, tile)] += (
+            int(q.sum(dtype=numpy.int64)) - int(q[is_n].sum(dtype=numpy.int64))
+        ) - 33 * n_called
+        # called bases followed by an N, and called bases after an N
+        before = called[:, :-1] & is_n[:, 1:]
+        after = is_n[:, :-1] & called[:, 1:]
+        sides = int(before.sum()) + int(after.sum())
+        self.flank_sum[(lane, tile)] += (
+            int(q[:, :-1][before].sum(dtype=numpy.int64))
+            + int(q[:, 1:][after].sum(dtype=numpy.int64))
+            - 33 * sides
+        )
+        self.flank_bases[(lane, tile)] += sides
+        if self.threshold <= 33:
+            return  # min_qual 0: nothing is low quality
+        low = (q < self.threshold) & called
         counts = self.cycles.get((lane, tile))
         if counts is None or len(counts) < length:
             grown = numpy.zeros(length, numpy.int64)
@@ -384,14 +410,12 @@ def scan_file_python(
             sequence = record.sequence
             if len(sequence) > scan.max_len:
                 scan.max_len = len(sequence)
-            # total, reads with N, N bases, bases, poly-G reads, Phred sum of
-            # called bases, Phred sum and count of called bases next to an N
-            acc = tiles.setdefault((lane, tile), [0, 0, 0, 0, 0, 0, 0, 0])
+            # total, reads with N, N bases, bases, poly-G reads; the quality
+            # sums are counted by lowq, in numpy batches
+            acc = tiles.setdefault((lane, tile), [0, 0, 0, 0, 0])
             acc[0] += 1
             acc[3] += len(sequence)
             lowq.add(lane, tile, sequence, record.qualities)
-            phred = record.qualities.encode("ascii")
-            acc[5] += sum(phred) - 33 * len(phred)
             polyg = len(sequence) - len(sequence.rstrip("G"))
             if polyg >= POLYG_MIN_RUN:
                 acc[4] += 1
@@ -399,16 +423,6 @@ def scan_file_python(
             if "N" not in sequence:
                 continue
             cycles = [i + 1 for i, c in enumerate(sequence) if c == "N"]
-            last = len(sequence) - 1
-            for cycle in cycles:
-                i = cycle - 1
-                acc[5] -= phred[i] - 33  # qual_sum counts called bases only
-                if i > 0 and sequence[i - 1] != "N":
-                    acc[6] += phred[i - 1] - 33
-                    acc[7] += 1
-                if i < last and sequence[i + 1] != "N":
-                    acc[6] += phred[i + 1] - 33
-                    acc[7] += 1
             acc[1] += 1
             acc[2] += len(cycles)
             for cycle in cycles:
@@ -427,7 +441,17 @@ def scan_file_python(
         raw.flush()
     lowq_cycle = lowq.finish()
     scan.tiles = sorted(
-        (lane, tile, *acc[:3], lowq.reads[(lane, tile)], *acc[3:])
+        (
+            lane,
+            tile,
+            *acc[:3],
+            lowq.reads[(lane, tile)],
+            acc[3],
+            acc[4],
+            lowq.qual_sum[(lane, tile)],
+            lowq.flank_sum[(lane, tile)],
+            lowq.flank_bases[(lane, tile)],
+        )
         for (lane, tile), acc in tiles.items()
     )
     scan.tile_cycle = sorted(
@@ -462,7 +486,9 @@ def _from_kernel(path: pathlib.Path, result: tuple) -> FileScan:
 
 
 # layout of the biomate_kernels.scan_n_content result this code reads; the
-# kernel exports its own as SCAN_FORMAT (builds before it had none: 1)
+# kernel exports its own as SCAN_FORMAT (builds before it had none: 1).
+# Changing the result layout: bump this and SCAN_FORMAT in
+# rust/biomate_kernels/src/lib.rs together
 KERNEL_SCAN_FORMAT = 2
 
 
