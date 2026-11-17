@@ -133,8 +133,12 @@ class TestScan:
         scan = scan_file_python(path)
         assert scan.format_error is None
         assert scan.tile_cycle == [(1, 1101, 1, 1, 0), (1, 1101, 5, 1, 0)]
-        # last field: bases sequenced (sum of read lengths)
-        assert scan.tiles == [(1, 1101, 3, 2, 2, 0, 14), (1, 1102, 1, 0, 0, 0, 6)]
+        # bases sequenced (sum of read lengths), then poly-G reads, the Phred sum
+        # of the 12 called bases (Q40) and of the 2 called bases next to an N
+        assert scan.tiles == [
+            (1, 1101, 3, 2, 2, 0, 14, 0, 480, 80, 2),
+            (1, 1102, 1, 0, 0, 0, 6, 0, 240, 0, 0),
+        ]
         assert scan.max_len == 6
         assert scan.total_reads == 4
         assert (scan.sample, scan.read) == ("S", "R1")
@@ -153,7 +157,9 @@ class TestScan:
             ],
         )
         scan = scan_file_python(path, min_qual=20)
-        assert scan.tiles == [(1, 1101, 4, 3, 8, 1, 46)]
+        # called-base Phred sum 101 + 60 + 1280; next to an N: A(2) and G(40) in
+        # ANGTA, T(40) and A(40) around seq_a's run
+        assert scan.tiles == [(1, 1101, 4, 3, 8, 1, 46, 0, 1441, 122, 4)]
         lowq = {c: q for _, _, c, _, q in scan.tile_cycle if q}
         assert lowq == {1: 1, 4: 1}
         assert scan.n_shape == [
@@ -332,6 +338,13 @@ class TestReport:
         assert "vegaEmbed" in html
         assert not re.search(r"<script[^>]+src=", html)
         assert "<link" not in html
+        # the spec is embedded as gzip + base64 and unpacks to the chart
+        import base64
+        import gzip
+
+        packed = re.search(r'id="spec">([^<]+)</script>', html).group(1)
+        spec = json.loads(gzip.decompress(base64.b64decode(packed)))
+        assert spec["datasets"] and "vconcat" in spec
 
     def test_multiqc_files(self, built, tmp_path):
         paths = write_multiqc(built[1], tmp_path)
@@ -339,8 +352,19 @@ class TestReport:
         assert names == {
             "nspector_tile_rate_mqc.json",
             "nspector_cycle_rate_mqc.json",
+            "nspector_read_loss_mqc.json",
+            "nspector_verdict_mqc.html",
             "nspector_general_stats_mqc.tsv",
         }
+        loss = json.loads(
+            (tmp_path / "multiqc" / "nspector_read_loss_mqc.json").read_text()
+        )
+        # 8 reads per sample and lane: on lane 1 each sample has 1 read with 1 N
+        # and 4 with 2 Ns, on lane 2 1 read with 1 N: 12 of 32 reads have an N
+        assert loss["data"]["R1"] == {"0": 37.5, "1": 25.0}
+        verdict_html = (tmp_path / "multiqc" / "nspector_verdict_mqc.html").read_text()
+        assert verdict_html.startswith("<!--\nid: 'nspector_verdict'")
+        assert "No anomalies" in verdict_html
         heatmap = json.loads(
             (tmp_path / "multiqc" / "nspector_tile_rate_mqc.json").read_text()
         )
@@ -424,6 +448,32 @@ class TestValidateArgs:
         )
         with pytest.raises(argparse.ArgumentTypeError, match="biomate_kernels"):
             validate_args(args)
+
+    def test_outdated_kernel_falls_back_or_raises(self, tmp_path, monkeypatch, caplog):
+        """A kernel from another version: auto scans in Python, rust refuses."""
+        monkeypatch.setattr(nspector_scan, "biomate_kernels", argparse.Namespace())
+        nspector_scan._warn_outdated_kernel.cache_clear()
+        with caplog.at_level("WARNING"):
+            assert nspector_scan.resolve_engine("auto") == "python"
+            assert nspector_scan.resolve_engine("auto") == "python"
+        warned = [r for r in caplog.records if "slower Python engine" in r.message]
+        assert len(warned) == 1 and "scan format 1" in warned[0].message
+        with pytest.raises(RuntimeError, match="another BioMate version"):
+            nspector_scan.resolve_engine("rust")
+
+    def test_missing_kernel_logs_python_fallback_once(self, monkeypatch, caplog):
+        monkeypatch.setattr(nspector_scan, "biomate_kernels", None)
+        nspector_scan._warn_outdated_kernel.cache_clear()
+        with caplog.at_level("INFO"):
+            assert nspector_scan.resolve_engine("auto") == "python"
+            assert nspector_scan.resolve_engine("auto") == "python"
+        noted = [r for r in caplog.records if "slower Python engine" in r.message]
+        assert len(noted) == 1 and noted[0].levelname == "INFO"
+        assert "Rust engine" in noted[0].message
+
+    def test_kernel_reports_the_scan_format_this_code_reads(self):
+        kernels = pytest.importorskip("biomate_kernels")
+        assert kernels.SCAN_FORMAT == nspector_scan.KERNEL_SCAN_FORMAT
 
     def test_spatial_bin_size_must_be_positive(self, tmp_path):
         args = self._make_args(tmp_path, spatial_bin_size=0)
@@ -611,9 +661,15 @@ class TestFlags:
             flags["status"].to_list(), key=lambda s: s != "FAIL"
         )
 
-    def test_high_thresholds_give_no_flags(self, run_files):
+    def test_high_thresholds_keep_only_fully_dark_cycles(self, run_files):
         tables = build_tables(scan_files(run_files, "python"))
-        assert build_flags(tables, warn_rate=0.9, fail_rate=0.95).height == 0
+        flags = build_flags(tables, warn_rate=0.9, fail_rate=0.95)
+        # tile 1102 on lane 1 has an N at cycles 7 and 8 in every read: one of
+        # the lane's two tiles, so half of them
+        assert flags.select("kind", "lane", "cycle").rows() == [
+            ("dark_cycle", 1, 7),
+            ("dark_cycle", 1, 8),
+        ]
 
     def test_sample_status(self, flagged):
         flags = build_flags(flagged)
@@ -725,10 +781,12 @@ class TestRunMetrics:
             ("R1", 1, 3, pytest.approx(0.3)),
         ]
         assert cycles["intensity"].to_list() == [10.0, 10.0, 10.0]
+        assert cycles["tile"].unique().to_list() == [1101]
         tables = build_tables(scan_files(run_files, "python"))
         tables.cycle_interop = cycles
         spec = json.dumps(build_chart(tables).to_dict())
         assert "InterOp per cycle" in spec and "P90 intensity" in spec
+        assert '"param": "pick_tile", "empty": false' in spec
 
     def test_run_folder_needs_interop_dir(self, tmp_path):
         fq = tmp_path / "x.fastq.gz"
@@ -866,14 +924,32 @@ def test_project_summary_and_header(tmp_path):
         assert section in spec
 
 
-def test_robust_z_is_zero_at_the_median_of_a_zero_spread_group():
-    """A tile at the median of a zero-MAD group scores 0, not NaN (>= any z)."""
+def test_robust_z_needs_a_real_difference_in_a_zero_spread_group():
+    """With no spread the scale is warn_rate / 5: z is finite, 5 at median + warn."""
     from biomate.nspector.flags import _robust_z
 
-    df = polars.DataFrame({"g": ["a"] * 3, "rate": [0.02, 0.02, 0.0]})
-    z = df.select(_robust_z(["g"]).alias("z")).get_column("z").to_list()
-    assert z[:2] == [0.0, 0.0]
-    assert z[2] == float("-inf")
+    df = polars.DataFrame({"g": ["a"] * 4, "rate": [0.02, 0.02, 0.02, 0.03]})
+    z = df.select(_robust_z(["g"], 0.01).alias("z")).get_column("z").to_list()
+    assert z[:3] == [0.0, 0.0, 0.0]
+    assert z[3] == pytest.approx(5.0)
+    # a difference under the warn rate is not an outlier, however small the spread
+    df = polars.DataFrame({"g": ["a"] * 3, "rate": [0.020, 0.020, 0.025]})
+    z = df.select(_robust_z(["g"], 0.01).alias("z")).get_column("z").to_list()
+    assert z[2] == pytest.approx(2.5)
+
+
+def test_read_dark_on_every_cycle_is_a_lane_flag(tmp_path):
+    """Every tile above the warn rate at every cycle: one lane flag, no dark cycles."""
+    records = []
+    for t in range(1, 6):
+        for i in range(40):
+            seq = list("ACGT" * 5)
+            seq[i % 20] = "N"  # 2 of 40 reads at each cycle, on every tile
+            records.append(_rec("".join(seq), tile=f"110{t}", x=str(i), y=str(i)))
+    path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+    write_fastq_gz(path, records)
+    flags = build_flags(build_tables(scan_files([path], "python")))
+    assert flags.select("kind", "status").rows() == [("lane", "FAIL")]
 
 
 def test_sample_flag_and_flagged_share(tmp_path):
@@ -907,7 +983,7 @@ def test_new_charts_in_spec(tmp_path):
     for text in (
         "Reads lost when filtering",
         "Tiles by surface and swath",
-        "Undetermined share vs N rate",
+        "Undetermined share vs N per base",
         "reads scanned (yield)",
     ):
         assert text in spec
@@ -945,3 +1021,159 @@ def test_lane_flag_and_collapsed_cycles(tmp_path):
         assert part in page
     # summary tables come before the charts
     assert page.index('id="worst"') < page.index('id="vis"')
+
+
+def test_dark_cycle_on_most_but_not_all_tiles(tmp_path):
+    """A cycle dark on 6 of 10 tiles is one dark-cycle flag, not six cells."""
+    records = []
+    for t in range(1, 11):
+        for i in range(20):
+            seq = list("ACGT" * 5)
+            if t <= 6:
+                seq[9] = "N"
+            records.append(_rec("".join(seq), tile=f"11{t:02d}", x=str(i), y=str(i)))
+    path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+    write_fastq_gz(path, records)
+    flags = build_flags(build_tables(scan_files([path], "python")))
+    assert flags.select("kind", "cycle", "status").rows() == [
+        ("dark_cycle", 10, "FAIL")
+    ]
+
+
+@pytest.mark.parametrize("engine", ["python", "rust"])
+def test_spatial_sum_matches_per_file_counters(run_files, engine):
+    """Summing spatial counters as files finish gives the same table."""
+    from biomate.nspector.scan import SpatialSum
+
+    if engine == "rust":
+        pytest.importorskip("biomate_kernels")
+    expected = build_tables(scan_files(run_files, engine, bin_size=25), bin_size=25)
+    spatial_sum = SpatialSum()
+    scans = scan_files(run_files, engine, bin_size=25, spatial=spatial_sum)
+    assert all(scan.spatial == [] for scan in scans)
+    got = build_tables(scans, bin_size=25, spatial_sum=spatial_sum)
+    assert got.spatial.height and got.spatial.equals(expected.spatial)
+
+
+def test_collapsed_flags_name_the_tiles_of_one_cycle(tmp_path):
+    """Two tiles dark at the same cycle are one row naming both."""
+    from biomate.nspector.flags import collapse_flags
+    from biomate.nspector.report import verdict
+
+    records = []
+    for t in range(1, 11):
+        for i in range(20):
+            # 120 cycles: one dark cycle keeps the tile's mean under the warn rate
+            seq = list("ACGT" * 30)
+            if t <= 2:
+                seq[11] = "N"
+            records.append(_rec("".join(seq), tile=f"11{t:02d}", x=str(i), y=str(i)))
+    path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+    write_fastq_gz(path, records)
+    listed = collapse_flags(build_flags(build_tables(scan_files([path], "python"))))
+    cells = listed.filter(polars.col("kind") == "tile_cycle")
+    assert cells.select("tile", "cycles", "events", "status").rows() == [
+        ("1101, 1102", "12", 2, "FAIL")
+    ]
+    assert "2 tile × cycle event(s) at 1 cycle position(s)" in verdict(listed, None)
+    # the row carries what a click needs to show it in the charts
+    tables = build_tables(scan_files([path], "python"))
+    tables.flags = build_flags(tables)
+    page = write_report([], tables, tmp_path).read_text()
+    assert 'class="jump" tabindex="0" data-read="R1" data-lane="1"' in page
+    assert 'data-tiles="1101 1102" onclick="jumpToFlag(this)"' in page
+    assert 'id="inputs-filter"' in page and "aria-sort" in page
+
+
+def test_removal_costs(tmp_path):
+    """Costs of excluding a flagged tile and trimming trailing dark cycles."""
+    from biomate.nspector.flags import removal_costs
+
+    records = []
+    for t in range(1, 11):
+        for i in range(20):
+            seq = list("ACGT" * 5)
+            if t == 1 and i < 10:
+                seq[2:6] = "NNNN"  # tile 1101: 4 Ns in half its reads
+            seq[18:] = "NN"  # the last two cycles are dark everywhere
+            if i < 16:
+                seq[9] = "N"  # dark in the middle of the read: cannot be trimmed
+            records.append(_rec("".join(seq), tile=f"11{t:02d}", x=str(i), y=str(i)))
+    path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+    write_fastq_gz(path, records)
+    tables = build_tables(scan_files([path], "python"))
+    tables.flags = flags = build_flags(tables)
+    tile, trim = removal_costs(tables, flags)
+    n_bases = 40 + 400 + 160
+    assert tile["action"] == "Exclude the 1 flagged tile(s)"
+    assert tile["what"] == "lane 1: 1101"
+    assert tile["lost"] == pytest.approx(0.1)
+    # tile 1101 holds its own 40 Ns plus a tenth of the dark-cycle Ns
+    assert tile["n_removed"] == pytest.approx((40 + 40 + 16) / n_bases)
+    assert trim["action"] == "Trim R1 after cycle 18"
+    assert trim["lost"] == 0 and trim["n_removed"] == pytest.approx(400 / n_bases)
+    page = write_report([], tables, tmp_path).read_text()
+    assert "What removing them would cost" in page and "--exclude-tiles" in page
+
+
+def test_summary_json_and_fail_on(run_files, tmp_path):
+    """nspector_summary.json is written; --fail-on exits 3 at or above its status."""
+    args = argparse.Namespace(
+        input=run_files,
+        output=tmp_path / "out",
+        engine="python",
+        threads=1,
+        spatial_bin_size=25,
+        no_html=True,
+        no_multiqc=True,
+        quiet=True,
+        verbose=0,
+        # tile 1102 on lane 1 is dark at cycles 7 and 8 in every read: half the
+        # lane's reads, so the dark cycles are WARN
+        warn_rate=0.9,
+        fail_rate=0.95,
+    )
+    (tmp_path / "out").mkdir()
+    nspector.main(args)
+    summary = json.loads((tmp_path / "out" / "nspector_summary.json").read_text())
+    assert summary["status"] == "WARN" and summary["flags"] == {"FAIL": 0, "WARN": 2}
+    assert summary["flags_by_kind"] == {"dark_cycle": 2}
+    assert summary["verdict"].startswith("Dark cycles on lane 1 R1: 7–8.")
+    assert summary["reads"] == 32 and summary["parameters"]["--warn-rate"] == 0.9
+    assert set(summary["by_read"]) == {"R1"}
+    args.fail_on = "FAIL"
+    nspector.main(args)  # a WARN run passes --fail-on FAIL
+    args.fail_on = "WARN"
+    with pytest.raises(SystemExit) as exit_info:
+        nspector.main(args)
+    assert exit_info.value.code == nspector.FLAGGED_EXIT_CODE == 3
+
+
+def test_polyg_and_quality_reach_tables_report_and_summary(tmp_path):
+    """Poly-G tails and the quality next to N flow from the scan to every output."""
+    from biomate.nspector.flags import read_quality, summary
+
+    records = [
+        # a tail of 12 G from cycle 9
+        _rec("ACGTACGT" + "G" * 12, x="1", y="1"),
+        # the N sits between two Q10 ('+') bases
+        (illumina_header(x="2", y="2"), "ANAC", "+#+I"),
+        _rec("ACGTACGTACGTACGTACGT", x="3", y="3"),
+        _rec("ACGTACGTACGTACGTACGT", x="4", y="4"),
+    ]
+    path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+    write_fastq_gz(path, records)
+    tables = build_tables(scan_files([path], "python"))
+    assert tables.polyg_start.select("cycle", "n_reads").rows() == [(9, 1)]
+    quality = read_quality(tables).row(0, named=True)
+    assert quality["polyg_rate"] == 0.25
+    assert quality["flank_q"] == 10.0
+    # 63 called bases: 60 at Q40, two at Q10, one at Q40
+    assert quality["mean_q"] == pytest.approx((60 * 40 + 10 + 10 + 40) / 63)
+    tables.flags = build_flags(tables)
+    assert summary(tables, tables.flags)["by_read"]["R1"]["flank_q"] == 10.0
+    page = write_report([], tables, tmp_path).read_text()
+    assert "Quality next to N" in page and "reads with a poly-G tail" in page
+    write_multiqc(tables, tmp_path)
+    stats = (tmp_path / "multiqc" / "nspector_general_stats_mqc.tsv").read_text()
+    assert "pct_reads_polyg" in stats and "\t25.0000\t" in stats

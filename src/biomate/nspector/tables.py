@@ -12,7 +12,7 @@ import pathlib
 
 import polars
 
-from biomate.nspector.scan import FileScan
+from biomate.nspector.scan import FileScan, SpatialSum
 
 KEYS = ["project", "sample", "read", "lane"]
 
@@ -29,6 +29,10 @@ class NspectorTables:
     spatial: polars.DataFrame
     n_shape: polars.DataFrame
     bin_size: int
+    # reads whose poly-G tail starts at each cycle; empty for old callers
+    polyg_start: polars.DataFrame = dataclasses.field(
+        default_factory=lambda: polars.DataFrame(schema=POLYG_SCHEMA)
+    )
     # spatial counts are per window of this many cycles
     cycle_window: int = 10
     # filled by biomate.nspector.flags.build_flags after the tables are built
@@ -90,6 +94,16 @@ def _frame(scan: FileScan, rows: list[tuple], schema: dict) -> polars.DataFrame:
 
 
 LANE_TILE = {"lane": polars.UInt8, "tile": polars.UInt32}
+POLYG_SCHEMA = {
+    "project": polars.Utf8,
+    "sample": polars.Utf8,
+    "read": polars.Utf8,
+    "lane": polars.UInt8,
+    "cycle": polars.UInt16,
+    "n_reads": polars.UInt64,
+}
+# per tile and sample: the counters behind the poly-G and quality columns
+QUALITY_SUMS = ["polyg", "qual_sum", "flank_qual_sum", "flank_bases"]
 
 
 def _concat(scans: list[FileScan], field: str, schema: dict) -> polars.DataFrame:
@@ -103,6 +117,14 @@ def _rate(frame: polars.DataFrame) -> polars.DataFrame:
     ]
     if "bases" in frame.columns:
         rates.append((polars.col("n_bases") / polars.col("bases")).alias("n_base_rate"))
+    if "polyg" in frame.columns:
+        called = polars.col("bases") - polars.col("n_bases")
+        rates += [
+            (polars.col("polyg") / polars.col("total")).alias("polyg_rate"),
+            # mean Phred of the called bases, and of those next to an N
+            (polars.col("qual_sum") / called).alias("mean_q"),
+            (polars.col("flank_qual_sum") / polars.col("flank_bases")).alias("flank_q"),
+        ]
     return frame.with_columns(rates)
 
 
@@ -110,9 +132,15 @@ FIRST_N_REGIONS = ["first 10 cycles", "middle", "last 10 cycles"]
 
 
 def build_tables(
-    scans: list[FileScan], bin_size: int = 1000, cycle_window: int = 10
+    scans: list[FileScan],
+    bin_size: int = 1000,
+    cycle_window: int = 10,
+    spatial_sum: SpatialSum | None = None,
 ) -> NspectorTables:
     """Combine per-file scan counters into the tidy nspector tables.
+
+    ``spatial_sum`` holds the spatial counters already taken from the scans
+    (see ``scan_files``); counters still on the scans are added to it.
 
     * ``sample_lane``: reads with N per sample/read/lane.
     * ``sample_cycle``: reads with an N at each cycle, per sample/read/lane
@@ -130,6 +158,13 @@ def build_tables(
     sequenced base) is ``n_bases / bases``.
     * ``n_shape``: N-containing reads by longest N run, where the first N
       falls (``first_n``) and whether the read is all N, per sample/read/lane.
+    * ``polyg_start``: reads whose poly-G tail (3' run of at least
+      ``POLYG_MIN_RUN`` G) starts at each cycle, per sample/read/lane.
+
+    ``polyg_rate`` is the fraction of reads with a poly-G tail, ``mean_q`` the
+    mean Phred of the called (non-N) bases and ``flank_q`` that of the called
+    bases next to an N: close to ``mean_q`` means the Ns appear abruptly in
+    otherwise good signal, much lower means the signal decayed first.
 
     ``lowq`` columns count reads with a called (non-N) base below
     ``--min-qual``: per cycle at that cycle, per tile/sample anywhere.
@@ -144,6 +179,7 @@ def build_tables(
             "n_bases": polars.UInt64,
             "lowq": polars.UInt64,
             "bases": polars.UInt64,
+            **dict.fromkeys(QUALITY_SUMS, polars.UInt64),
         },
     )
     cycles = _concat(
@@ -175,7 +211,9 @@ def build_tables(
     sample_lane = (
         _rate(
             tiles.group_by(KEYS).agg(
-                polars.col("n", "n_bases", "lowq", "total", "bases").sum()
+                polars.col(
+                    "n", "n_bases", "lowq", "total", "bases", *QUALITY_SUMS
+                ).sum()
             )
         )
         .select(
@@ -188,6 +226,10 @@ def build_tables(
             "n_rate",
             "n_base_rate",
             "lowq_rate",
+            *QUALITY_SUMS,
+            "polyg_rate",
+            "mean_q",
+            "flank_q",
         )
         .sort(KEYS)
     )
@@ -223,7 +265,9 @@ def build_tables(
     tile_summary = (
         _rate(
             tiles.group_by(*KEYS, "tile").agg(
-                polars.col("n", "n_bases", "lowq", "total", "bases").sum()
+                polars.col(
+                    "n", "n_bases", "lowq", "total", "bases", *QUALITY_SUMS
+                ).sum()
             )
         )
         .with_columns(
@@ -248,6 +292,10 @@ def build_tables(
             "n_base_rate",
             "lowq_rate",
             "mean_n_per_affected_read",
+            *QUALITY_SUMS,
+            "polyg_rate",
+            "mean_q",
+            "flank_q",
         )
         .sort([*KEYS, "tile"])
     )
@@ -272,18 +320,11 @@ def build_tables(
         .sort([*KEYS, "n_count"])
     )
 
+    spatial_sum = spatial_sum or SpatialSum()
+    for scan in scans:
+        spatial_sum.add(scan)
     spatial = (
-        _concat(
-            scans,
-            "spatial",
-            {
-                **LANE_TILE,
-                "x_bin": polars.UInt32,
-                "y_bin": polars.UInt32,
-                "window": polars.UInt16,
-                "n_bases": polars.UInt64,
-            },
-        )
+        spatial_sum.frame()
         .with_columns(
             (polars.col("window") * cycle_window + 1).cast(polars.UInt16).alias("cycle")
         )
@@ -314,6 +355,29 @@ def build_tables(
         .sort([*KEYS, "longest_run", "first_n", "all_n"])
     )
 
+    polyg_start = (
+        polars.concat(
+            [
+                _frame(
+                    s,
+                    s.polyg_start,
+                    {
+                        "lane": polars.UInt8,
+                        "cycle": polars.UInt16,
+                        "n_reads": polars.UInt64,
+                    },
+                )
+                for s in scans
+            ]
+        )
+        .group_by(*KEYS, "cycle")
+        .agg(polars.col("n_reads").sum())
+        .select(list(POLYG_SCHEMA))
+        .sort([*KEYS, "cycle"])
+        if scans
+        else polars.DataFrame(schema=POLYG_SCHEMA)
+    )
+
     return NspectorTables(
         sample_lane=sample_lane,
         sample_cycle=sample_cycle,
@@ -322,6 +386,7 @@ def build_tables(
         n_per_read=n_per_read,
         spatial=spatial,
         n_shape=n_shape,
+        polyg_start=polyg_start,
         bin_size=bin_size,
         cycle_window=cycle_window,
     )

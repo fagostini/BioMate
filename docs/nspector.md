@@ -30,13 +30,14 @@ biomate nspector \
 
 - `--input`: one or more FASTQ files (`.fastq`, `.fq`, optionally gzipped) and/or directories to search recursively. A file found twice is scanned once. Required.
 - `--output`: output directory, created if missing (default: `./output`).
-- `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` stops with an error when `biomate_kernels` is missing. Both engines produce identical results.
+- `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` stops with an error when `biomate_kernels` is missing. Both engines produce identical results; the Rust one is about 20× faster. `biomate_kernels` is not installed with BioMate: see [Rust engine](https://github.com/fagostini/BioMate#rust-engine-optional) to build it.
 - `--threads`: Rust engine: files scanned in parallel (default `0` = one per available core). Python engine: extra decompression threads per file. The Rust engine also decompresses each gzip file on its own thread, ahead of parsing, and reads multi-member gzip (as written by BCL Convert).
 - `--spatial-bin-size`: width of the spatial bins in read-name X/Y coordinate units (default: `2000`). Raise it if the report gets large.
 - `--spatial-cycle-window`: spatial bins are counted per window of this many cycles (default: `10`), so the spatial map can follow a cycle range dragged on the N per cycle chart.
 - `--min-qual`: Phred score below which a called (non-N) base counts as low quality (default: `20`). See [Low-quality companion](#low-quality-companion).
 - `--warn-rate`, `--fail-rate`: thresholds for the [anomaly flags](#anomaly-flags) (defaults: `0.01` and `0.05`).
 - `--run-folder`: an Illumina run folder. Nspector reads per-tile cluster density, %PF, %≥Q30, % occupied and phasing rates from its `InterOp/` files and plots them against the N rate; it also plots the intensity, spot width (focus), PhiX error rate and no-call rate at each cycle under the N per cycle chart. Metrics the instrument did not write are left out. Needs the optional extra: `pip install 'biomate[interop]'`.
+- `--fail-on WARN|FAIL`: exit with code 3, after every output is written, when the worst anomaly flag is at least this status. Without it the exit code is 0 whatever the flags, so a pipeline can gate on the run status.
 - `--raw`: also write every N-containing read (lane, tile, X, Y, N cycles) as Parquet parts under `<stem>_n_sequences/`. This output grows with the number of reads and always uses the Python engine.
 - `--png`: also write the static PNG charts for each input file.
 - `--no-html`: skip the HTML report.
@@ -68,16 +69,26 @@ The two metrics separate two failure modes:
 For each read with an N, nspector records the longest run of consecutive Ns, whether the read is all N, and where the first N falls: the first 10 cycles, the middle, or the last 10 cycles (the start wins on reads of 20 cycles or fewer).
 Random Ns give runs of 1. Bubbles and dark cycles give long runs or all-N reads.
 
+### Poly-G tails and quality next to N
+
+On 2-colour instruments (NextSeq, NovaSeq) a cluster that gives no signal is called G with a good quality, not N, so a read that lost its signal can end in a run of G without any N. Nspector counts the reads ending in at least 10 G (as fastp does) and the cycle where that run starts. The report shows the share per read in the header and where the tails start under **N within reads**.
+
+For each N it also records the Phred score of the called base right before and after it. The **Quality next to N** table compares that with the mean of all called bases. Close values mean the Ns appear abruptly in otherwise good signal (a bubble, a dark cycle, an imaging dropout). A much lower score next to the Ns means the signal decayed before the base caller gave up.
+
+### Index reads
+
+Index FASTQ files (`_I1_001.fastq.gz`, `_I2_001.fastq.gz`, written by BCL Convert with `CreateFastqForIndexReads`) are scanned like any other read. Their flags name the read (`lane 1 I1`), and the Undetermined scatter plots them per read, so tiles losing index cycles show up as tiles with more undetermined reads.
+
 ## Anomaly flags
 
 Flags are computed from the tables after the scan, so they cost no extra reading. All thresholds use one scale: the fraction of reads with an N at a cycle.
 
 | Kind | Raised when |
 | --- | --- |
-| `dark_cycle` | At least 80% of a lane's tiles are at or above `--warn-rate` at that cycle. |
+| `dark_cycle` | At least half of a lane's tiles are at or above `--warn-rate` at that cycle. Above half, the typical tile is dark, so single cells no longer stand out; below it, the affected cells are reported as `tile_cycle`. Not raised when 80% of the read's cycles qualify: that is bad tiles or a bad lane, and the `tile` and `lane` flags report it. |
 | `tile` | The tile's mean per-cycle N rate, leaving out dark cycles, is at or above `--warn-rate`. |
 | `lane` | At least 80% of a lane's tiles (two or more) qualify for a `tile` flag. Reported once; tiles and cells on that lane are listed only when they are worse than the lane flag. |
-| `tile_cycle` | One tile at one cycle is at or above `--warn-rate` and is a robust outlier among the lane's tiles at that cycle: `(rate - median) / (1.4826 × MAD) ≥ 5`. Cells already explained by a dark cycle, or by a tile flag at least as severe, are not listed again. |
+| `tile_cycle` | One tile at one cycle is at or above `--warn-rate` and is a robust outlier among the lane's tiles at that cycle: `(rate - median) / max(1.4826 × MAD, warn rate / 5) ≥ 5`. The floor on the divisor means an outlier is at least one warn rate above the lane's median, however small the spread. Cells already explained by a dark cycle, or by a tile flag at least as severe, are not listed again. |
 | `sample` | One sample's N per sequenced base is at or above `--warn-rate` and is a robust outlier among the lane's samples (same score, `≥ 5`). Undetermined reads are left out. This is the only kind that names a project and a sample; it does not affect the other samples on the lane. |
 
 A flag is `FAIL` when its rate is at or above `--fail-rate`, otherwise `WARN`.
@@ -86,9 +97,11 @@ The defaults come from a NextSeq 2000 run, where healthy cycles had about 0.1–
 Flags appear:
 
 - in `nspector_flags.parquet`;
-- at the top of the report: a short written verdict, the share of all N bases that sit on a flagged lane, tile, cell or dark cycle (high: the Ns come from the flagged events; low: they are spread over the run), and a flag table where consecutive cycles are one row (`45–52`) with the largest rate of the run;
+- at the top of the report: a short written verdict, the share of all N bases that sit on a flagged lane, tile, cell or dark cycle (high: the Ns come from the flagged events; low: they are spread over the run), and a flag table where consecutive cycles are one row (`45–52`) and tiles hit at the same cycles share a row, with the largest rate and the number of flags merged (`events`). Clicking a row (or pressing Enter on it) sets the Lane and Read controls to the flag's and selects its tiles in the charts;
 - as orange outlines on the tile map and the tile × cycle heatmap;
+- under the flag table, as **What removing them would cost**: the reads given up and the share of all N bases removed by excluding the flagged tiles at demultiplexing, and by trimming dark cycles that run to the end of a read. Dark cycles inside a read cannot be left out by the demultiplexer and stay in the reads as N;
 - in a status column of the worst-tiles table;
+- in `nspector_summary.json`, with the run status (worst flag), the written verdict, flag counts, N rates per read, the removal costs and the parameters used;
 - in MultiQC, as an `N status` column (worst flag on the sample or its lanes) and a flags table.
 
 ### Project, sample, lane and read
@@ -133,16 +146,16 @@ The **Project**, **Lane**, **Read**, **Metric** and **Show WARN flags** controls
 | N vs low-Q per cycle | Fraction of reads with an N, and with a low-quality called base, along the read. | Follows the lane, read and sample selection. |
 | Longest N run, first N | Histogram of the longest N run per read, and where the first N falls. | Follows the lane, read and sample selection. |
 | Tiles by surface and swath | One point per tile at its tile-map value, one row per surface and swath, with the row median. The first and last segment of each swath are red. | Click a point to select that tile. |
-| N rate per tile, R1 vs R2 (with both reads) | One point per tile. On the diagonal: a defect on the tile. Off the diagonal: a problem during one read. | Follows the project and lane; click a point to select that tile. |
-| Undetermined share vs N rate (with Undetermined reads) | One point per tile and read: the share of its reads not assigned to a sample against its N rate. | Click a point to select that tile. |
+| N per base per tile, R1 vs R2 (with both reads) | One point per tile. On the diagonal: a defect on the tile. Off the diagonal: a problem during one read. | Follows the project and lane; click a point to select that tile. |
+| Undetermined share vs N per base (with Undetermined reads) | One point per tile and read: the share of its reads not assigned to a sample against its N per base. | Click a point to select that tile. |
 | Tile × cycle | Heatmap of every tile at every cycle. Cells with no N and no low-Q base are left empty. Flagged cells and dark cycles are outlined in orange. | Highlights the selected tile. |
-| InterOp per cycle (with `--run-folder`) | P90 intensity, spot width (FWHM), PhiX error rate and no-call rate at each cycle, averaged over the lane's tiles. An N spike with an intensity drop points to fluidics or reagents; with a FWHM jump, to focus. | Follows the lane and read. |
-| N rate vs InterOp (with `--run-folder`) | One point per tile: N rate against %PF, cluster density, %≥Q30, % occupied or a phasing rate, coloured by lane. | Click a point to select that tile everywhere. |
+| InterOp per cycle (with `--run-folder`) | P90 intensity, spot width (FWHM), PhiX error rate and no-call rate at each cycle, averaged over the lane's tiles, with the clicked tiles (tile map, flag row or scatter) drawn in orange. An N spike with an intensity drop points to fluidics or reagents; with a FWHM jump, to focus. | Follows the lane and read. |
+| N per base vs InterOp (with `--run-folder`) | One point per tile: N per base against %PF, cluster density, %≥Q30, % occupied or a phasing rate, coloured by lane. | Click a point to select that tile everywhere. |
 | Spatial N density | N bases binned over the X/Y coordinates of the selected tile (or of all tiles in the selection), with marginal histograms. | Follows the tile selection, and the cycle range dragged on N per cycle (by windows of `--spatial-cycle-window` cycles). |
 
 The tile-level views (tile map, tile × cycle and spatial) sum the samples of the selected projects. Tile defects are physical, so they affect every sample on that lane; flags are always computed on the whole flowcell.
 
-Above the charts, the page lists the flags, the tiles and the cycles with the highest N rate; the input files with their read counts are under the charts. The header prints the BioMate version and the thresholds used (`--warn-rate`, `--fail-rate`, `--min-qual`, spatial bin size and cycle window), and the N rate per read.
+Above the charts, the page lists the flags, the tiles and the cycles with the highest N rate; the input files with their read counts are under the charts. Click a column header to sort a table (again to reverse it); the box above the input files filters them by file, project or sample name. The header prints the BioMate version and the thresholds used (`--warn-rate`, `--fail-rate`, `--min-qual`, spatial bin size and cycle window), and the N rate per read.
 
 The embedded data depends on lanes, tiles and cycles, not on the number of reads. Two budgets keep it bounded:
 
@@ -157,16 +170,17 @@ Each table is written as `nspector_<table>.parquet`:
 
 | Table | Grain | Columns |
 | --- | --- | --- |
-| `sample_lane` | project, sample, read, lane | `n`, `n_bases`, `lowq`, `total`, `bases`, `n_rate`, `n_base_rate`, `lowq_rate` |
+| `sample_lane` | project, sample, read, lane | `n`, `n_bases`, `lowq`, `total`, `bases`, `n_rate`, `n_base_rate`, `lowq_rate`, `polyg`, `qual_sum`, `flank_qual_sum`, `flank_bases`, `polyg_rate`, `mean_q`, `flank_q` |
 | `sample_cycle` | project, sample, read, lane, cycle (dense) | `n`, `lowq`, `total`, `n_rate`, `lowq_rate` |
-| `tile_summary` | project, sample, read, lane, tile | `surface`, `swath`, `segment`, `n`, `n_bases`, `lowq`, `total`, `bases`, `n_rate`, `n_base_rate`, `lowq_rate`, `mean_n_per_affected_read` |
+| `tile_summary` | project, sample, read, lane, tile | `surface`, `swath`, `segment`, `n`, `n_bases`, `lowq`, `total`, `bases`, `n_rate`, `n_base_rate`, `lowq_rate`, `mean_n_per_affected_read`, `polyg`, `qual_sum`, `flank_qual_sum`, `flank_bases`, `polyg_rate`, `mean_q`, `flank_q` |
 | `tile_cycle` | project, read, lane, tile, cycle (summed over the project's samples; only cycles with an N or a low-Q base) | `n`, `lowq`, `total` (the project's reads on the tile), `n_rate`, `lowq_rate` |
 | `n_per_read` | project, sample, read, lane, number of N bases | `n_reads` |
 | `spatial` | project, read, lane, tile, `cycle` (first cycle of the window), `x_bin`, `y_bin` (summed over samples; bin = coordinate // `--spatial-bin-size`) | `n_bases` |
 | `n_shape` | project, sample, read, lane, `longest_run`, `first_n`, `all_n` | `n_reads` |
+| `polyg_start` | project, sample, read, lane, `cycle` (where the poly-G tail starts) | `n_reads` |
 | `flags` | one row per flag | `status`, `kind`, `project`, `sample` (only for `sample` flags), `read`, `lane`, `tile`, `cycle`, `rate`, `z`, `detail` |
-| `tile_interop` (with `--run-folder`) | read, lane, tile (summed over samples) | `n`, `total`, `n_rate`, `density_k`, `pct_pf`, `pct_q30`, `pct_occupied`, `pct_phasing`, `pct_prephasing` |
-| `cycle_interop` (with `--run-folder`) | read, lane, cycle (within the read; mean over the lane's tiles) | `intensity`, `fwhm`, `error_rate`, `pct_no_call` |
+| `tile_interop` (with `--run-folder`) | read, lane, tile (summed over samples) | `n`, `total`, `n_bases`, `bases`, `n_rate`, `n_base_rate`, `density_k`, `pct_pf`, `pct_q30`, `pct_occupied`, `pct_phasing`, `pct_prephasing` |
+| `cycle_interop` (with `--run-folder`) | read, lane, tile, cycle (within the read) | `intensity`, `fwhm`, `error_rate`, `pct_no_call` |
 
 In these tables:
 
@@ -211,8 +225,10 @@ Nspector writes MultiQC custom content to `<output>/multiqc/`:
 
 - `nspector_tile_rate_mqc.json`: a heatmap of % reads with N, with one row per sample, lane and read and one column per tile.
 - `nspector_cycle_rate_mqc.json`: a line graph of % reads with N per cycle.
-- `nspector_general_stats_mqc.tsv`: % reads with N, the N base count, % reads with a low-Q base and the worst flag status per sample, added to the General Statistics table.
+- `nspector_general_stats_mqc.tsv`: % reads with N, the N base count, % reads with a low-Q base, % reads with a poly-G tail and the worst flag status per sample, added to the General Statistics table.
 - `nspector_flags_mqc.json`: a table of every flag (only written when there are flags).
+- `nspector_read_loss_mqc.json`: a line graph of the reads lost when filtering on N bases per read, one line per read.
+- `nspector_verdict_mqc.html`: the written verdict and what removing the flagged tiles and cycles would cost.
 
 ```bash
 multiqc nspector_results/multiqc
@@ -237,7 +253,9 @@ nspector_results/
 ├── nspector_n_per_read.parquet
 ├── nspector_spatial.parquet
 ├── nspector_n_shape.parquet
+├── nspector_polyg_start.parquet
 ├── nspector_flags.parquet
+├── nspector_summary.json                 # status, verdict, counts, rates, removal costs
 ├── nspector_tile_interop.parquet         # only with --run-folder
 ├── nspector_cycle_interop.parquet        # only with --run-folder
 ├── SampleA_S1_L001_R1_001_n_sequences/   # only with --raw

@@ -214,6 +214,7 @@ def _reference_scan(
         scan.n_per_read,
         scan.spatial,
         scan.n_shape,
+        scan.polyg_start,
     )
 
 
@@ -252,6 +253,35 @@ class TestScanNContentParity:
         assert _kernel_scan(p) == _reference_scan(p)
         assert _kernel_scan(p, bin_size=7) == _reference_scan(p, bin_size=7)
 
+    def test_polyg_and_flank_quality(self, tmp_path):
+        """Poly-G tails and the quality of the bases next to Ns match the reference."""
+        records = [
+            # 10 G at the end: a tail starting at cycle 5
+            (_illumina_name(101, 1, 1), "ACGT" + "G" * 10, "I" * 4 + "#" * 10),
+            # 9 G: too short to count
+            (_illumina_name(102, 2, 2), "ACGT" + "G" * 9),
+            # all G: a tail from cycle 1
+            (_illumina_name(103, 3, 3), "G" * 12),
+            # one called base between two Ns counts once per side
+            (_illumina_name(104, 4, 4), "ANANA", "5#?#I"),
+            # N at both ends, mixed qualities
+            (_illumina_name(105, 5, 5), "NACGTN", "#,5?I#"),
+        ]
+        p = tmp_path / "polyg.fastq.gz"
+        _write_fastq(p, records)
+        got = _kernel_scan(p)
+        assert got == _reference_scan(p)
+        polyg = got[7]
+        assert polyg == [(1, 1, 1), (1, 5, 1)]
+        # one record per tile: sum the tiles
+        polyg_reads, flank_sum, flank_bases = (
+            sum(t[i] for t in got[2]) for i in (7, 9, 10)
+        )
+        assert polyg_reads == 2
+        # A(20) N A(30) N A(40): the middle A is next to two Ns; then , (11) and
+        # I (40) next to NACGTN's Ns
+        assert (flank_sum, flank_bases) == (20 + 30 + 30 + 40 + 11 + 40, 6)
+
     def test_format_error_stops_file(self, tmp_path):
         records = [
             (_illumina_name(101, 1, 1), "ACGTNACGT"),  # ok (record 0)
@@ -288,12 +318,13 @@ class TestScanNContentParity:
         _write_fastq(p, records)
         got = _kernel_scan(p)
         assert got == _reference_scan(p)
-        fmt_err, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape = got
+        fmt_err, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape, _ = got
         assert (fmt_err, max_len) == (None, 6)
+        # Q40 everywhere: 7 called bases (280), the G before ACGN's N (40)
         assert tiles == [
-            (1, 1101, 2, 1, 1, 0, 8),
-            (2, 1101, 1, 0, 0, 0, 6),
-            (2, 1102, 1, 1, 2, 0, 2),
+            (1, 1101, 2, 1, 1, 0, 8, 0, 280, 40, 1),
+            (2, 1101, 1, 0, 0, 0, 6, 0, 240, 0, 0),
+            (2, 1102, 1, 1, 2, 0, 2, 0, 0, 0, 0),
         ]
         assert tile_cycle == [
             (1, 1101, 4, 1, 0),
@@ -310,7 +341,7 @@ class TestScanNContentParity:
         _write_fastq(p, [(_illumina_name(1, 2, 3), "ACGT")])
         got = _kernel_scan(p)
         assert got == _reference_scan(p)
-        assert got[3:] == ([], [], [], [])
+        assert got[3:] == ([], [], [], [], [])
 
     def test_multi_member_gzip(self, tmp_path):
         """BCL Convert writes concatenated gzip members; all must be read."""

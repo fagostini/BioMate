@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import datetime
+import gzip
 import html
 import json
 import logging
@@ -19,8 +21,11 @@ from biomate.nspector.flags import (
     collapse_flags,
     flag_rank,
     flagged_share,
+    read_quality,
+    removal_costs,
     sample_status,
     status_name,
+    verdict,
 )
 from biomate.nspector.scan import UNDETERMINED, FileScan
 from biomate.nspector.tables import KEYS, NspectorTables
@@ -42,7 +47,7 @@ SIZE_WARNING_BYTES = 20 * 1024 * 1024
 SCHEME = "viridis"
 # outline colour for flagged tiles/cells; stands out against both ends of viridis
 FLAG_COLOR = "#ff7f0e"
-# flags listed in the report header; nspector_flags.parquet keeps all of them
+# flag rows shown at once in the report; the rest are folded under them
 MAX_FLAG_ROWS = 50
 
 # Vega expression: the value plotted for the active metric.
@@ -122,6 +127,13 @@ CAPTIONS = {
         "Runs of 1 are isolated no-calls; long runs come from bubbles, focus "
         "problems or dark cycles, and a run as long as the read is an all-N read."
     ),
+    "polyg": (
+        "Reads ending in a run of at least 10 G, by the cycle where the run "
+        "starts. On 2-colour instruments (NextSeq, NovaSeq) a cluster that gives "
+        "no signal is called G with a good quality, not N: these reads lost their "
+        "signal at that cycle without any N. A peak at one cycle matches a dark "
+        "cycle; a rise towards the end of the read is signal decay."
+    ),
     "first_n": (
         "Where the first N of each read falls: in the first 10 cycles, the last 10 "
         "cycles or in between; all-N reads are counted on their own. Ns early in the "
@@ -166,7 +178,7 @@ CAPTIONS = {
         "on the right to an edge effect. Click a point to select the tile."
     ),
     "read_pair": (
-        "One point per tile: the fraction of its reads with an N in R1 against "
+        "One point per tile: the fraction of its bases called N in R1 against "
         "R2. Tiles on the dashed diagonal are equally bad in both reads, which "
         "points to a physical defect on the tile; tiles off the diagonal had a "
         "problem during one read only, such as a dark cycle or a reagent issue. "
@@ -174,19 +186,19 @@ CAPTIONS = {
     ),
     "undetermined": (
         "One point per tile and read: the share of the tile's reads that were not "
-        "assigned to a sample against its N rate. Points rising to the right mean "
+        "assigned to a sample against its N per base. Points rising to the right mean "
         "the tiles that lose bases also lose reads at demultiplexing."
     ),
     "interop": (
-        "One point per tile: its N rate against the InterOp metric picked with the "
+        "One point per tile: its N per base against the InterOp metric picked with the "
         "InterOp control (%PF, cluster density, %≥Q30 and, when the instrument "
         "wrote them, % occupied and the phasing rates), coloured by lane. Tiles "
-        "with a high N rate and a low %PF or Q30 are likely physical problems on "
+        "with many Ns and a low %PF or Q30 are likely physical problems on "
         "the flowcell. Click a point to select the tile."
     ),
     "cycle_interop": (
         "What the instrument recorded at each cycle, averaged over the lane's "
-        "tiles; one line per lane, dashed for R2. Compare with N per cycle above: "
+        "tiles, with the tiles clicked on the tile map or a flag row in orange; R1 in the base colour, R2 lighter, one dash pattern per lane. Compare with N per cycle above: "
         "an N spike where the intensity drops points to fluidics or reagents, "
         "where the spot width (FWHM) jumps to a focus problem, and with neither to "
         "the base calling itself. The error rate needs a PhiX spike-in."
@@ -736,8 +748,10 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         pair = (
             tables.tile_summary.filter(polars.col("read").is_in(["R1", "R2"]))
             .group_by("project", "lane", "tile", "read")
-            .agg(polars.col("n", "total").sum())
-            .pivot("read", index=["project", "lane", "tile"], values=["n", "total"])
+            .agg(polars.col("n_bases", "bases").sum())
+            .pivot(
+                "read", index=["project", "lane", "tile"], values=["n_bases", "bases"]
+            )
             .fill_null(0)
         )
         pair_base = (
@@ -746,15 +760,16 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
                 f"(lane_sel == 'All' || datum.lane == lane_sel) && {PROJECT_FILTER}"
             )
             .transform_aggregate(
-                n_R1="sum(n_R1)",
-                total_R1="sum(total_R1)",
-                n_R2="sum(n_R2)",
-                total_R2="sum(total_R2)",
+                n_R1="sum(n_bases_R1)",
+                bases_R1="sum(bases_R1)",
+                n_R2="sum(n_bases_R2)",
+                bases_R2="sum(bases_R2)",
                 groupby=["lane", "tile"],
             )
-            .transform_filter("datum.total_R1 > 0 && datum.total_R2 > 0")
+            .transform_filter("datum.bases_R1 > 0 && datum.bases_R2 > 0")
+            # N per base: reads with N would read 100% after one dark cycle
             .transform_calculate(
-                r1="datum.n_R1 / datum.total_R1", r2="datum.n_R2 / datum.total_R2"
+                r1="datum.n_R1 / datum.bases_R1", r2="datum.n_R2 / datum.bases_R2"
             )
         )
         diagonal = pair_base.transform_calculate(
@@ -767,19 +782,19 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             .encode(x="zero:Q", y="zero:Q", x2="top:Q", y2="top:Q"),
             pair_base.mark_circle(size=60)
             .encode(
-                x=alt.X("r1:Q", title="N rate in R1").axis(format="%"),
-                y=alt.Y("r2:Q", title="N rate in R2").axis(format="%"),
+                x=alt.X("r1:Q", title="N per base in R1").axis(format="~%"),
+                y=alt.Y("r2:Q", title="N per base in R2").axis(format="~%"),
                 **tile_point,
                 tooltip=[
                     "lane:O",
                     "tile:O",
-                    alt.Tooltip("r1:Q", title="N rate R1", format=".3%"),
-                    alt.Tooltip("r2:Q", title="N rate R2", format=".3%"),
+                    alt.Tooltip("r1:Q", title="N per base R1", format=".3%"),
+                    alt.Tooltip("r2:Q", title="N per base R2", format=".3%"),
                 ],
             )
             .add_params(pick_tile),
         ).properties(
-            title="N rate per tile, R1 vs R2 (click a tile)", width=300, height=300
+            title="N per base per tile, R1 vs R2 (click a tile)", width=300, height=300
         )
         tile_views.append(_caption(read_pair, CAPTIONS["read_pair"], 300))
 
@@ -787,7 +802,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         undetermined = (
             alt.Chart(
                 tables.tile_summary.group_by("read", "lane", "tile").agg(
-                    polars.col("n", "total").sum(),
+                    polars.col("n_bases", "bases", "total").sum(),
                     polars.col("total")
                     .filter(polars.col("project") == UNDETERMINED)
                     .sum()
@@ -796,26 +811,27 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             )
             .transform_filter(LANE_FILTER)
             .transform_calculate(
-                share="datum.undetermined / datum.total", rate="datum.n / datum.total"
+                share="datum.undetermined / datum.total",
+                rate="datum.n_bases / datum.bases",
             )
             .mark_circle(size=60)
             .encode(
                 x=alt.X("share:Q", title="Undetermined reads on the tile").axis(
                     format="%"
                 ),
-                y=alt.Y("rate:Q", title="N rate (reads with N)").axis(format="%"),
+                y=alt.Y("rate:Q", title="N per base").axis(format="~%"),
                 **tile_point,
                 tooltip=[
                     "read:N",
                     "lane:O",
                     "tile:O",
                     alt.Tooltip("share:Q", title="Undetermined", format=".2%"),
-                    alt.Tooltip("rate:Q", title="N rate", format=".3%"),
+                    alt.Tooltip("rate:Q", title="N per base", format=".3%"),
                 ],
             )
             .add_params(pick_tile)
             .properties(
-                title="Undetermined share vs N rate per tile (click a tile)",
+                title="Undetermined share vs N per base, per tile (click a tile)",
                 width=300,
                 height=300,
             )
@@ -1031,6 +1047,12 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         .transform_filter(SELECTION_FILTER)
         .transform_filter(pick_sample)
     )
+    # one label per count is unreadable for long reads: label every 10th
+    count_axis = (
+        alt.Axis(labelExpr="datum.value % 10 == 0 ? datum.label : ''", labelAngle=0)
+        if int(tables.n_per_read["n_count"].max() or 0) > 40
+        else alt.Axis()
+    )
     n_per_read = (
         alt.Chart(tables.n_per_read)
         .transform_filter(SELECTION_FILTER)
@@ -1038,7 +1060,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         .transform_aggregate(n_reads="sum(n_reads)", groupby=["n_count", "read"])
         .mark_bar()
         .encode(
-            x=alt.X("n_count:O", title="N bases in read"),
+            x=alt.X("n_count:O", title="N bases in read", axis=count_axis),
             xOffset="read:N",
             y=alt.Y(
                 "n_reads:Q",
@@ -1182,7 +1204,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             .transform_filter(READ_FILTER)
             .transform_calculate(
                 metric_value="datum[interop_metric]",
-                rate="datum.n / datum.total",
+                rate="datum.n_bases / datum.bases",
             )
             .transform_filter("isValid(datum.metric_value)")
             .mark_circle(size=60)
@@ -1190,7 +1212,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
                 x=alt.X("metric_value:Q", title="InterOp metric (see control)").scale(
                     zero=False
                 ),
-                y=alt.Y("rate:Q", title="N rate (reads with N)").axis(format="%"),
+                y=alt.Y("rate:Q", title="N per base").axis(format="~%"),
                 color=alt.Color("lane:N", title="Lane"),
                 opacity=alt.when(pick_tile)
                 .then(alt.value(0.9))
@@ -1198,7 +1220,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
                 tooltip=[
                     "lane:O",
                     "tile:O",
-                    alt.Tooltip("rate:Q", title="N rate", format=".3%"),
+                    alt.Tooltip("rate:Q", title="N per base", format=".3%"),
                     alt.Tooltip("pct_pf:Q", title="% PF", format=".1f"),
                     alt.Tooltip("density_k:Q", title="Density K/mm²", format=".0f"),
                     alt.Tooltip("pct_q30:Q", title="% ≥ Q30", format=".1f"),
@@ -1206,7 +1228,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             )
             .add_params(interop_metric, pick_tile)
             .properties(
-                title="N rate vs InterOp tile metric (click a tile)",
+                title="N per base vs InterOp tile metric (click a tile)",
                 width=420,
                 height=240,
             )
@@ -1217,29 +1239,53 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
     if tables.cycle_interop is not None and (
         offered := _with_data(tables.cycle_interop, CYCLE_INTEROP_LABELS)
     ):
-        cycle_interop = alt.vconcat(
-            *[
+
+        def interop_panel(column: str, label: str) -> alt.LayerChart:
+            base = (
                 alt.Chart(tables.cycle_interop)
                 .transform_filter(LANE_FILTER)
                 .transform_filter(f"isValid(datum.{column})")
+            )
+            tooltip = [
+                "read:N",
+                "lane:O",
+                "cycle:Q",
+                alt.Tooltip("value:Q", title=label, format=".4g"),
+            ]
+            x = alt.X("cycle:Q", title="Cycle", axis=cycle_ticks)
+            lane_mean = (
+                base.transform_aggregate(
+                    value=f"mean({column})", groupby=["read", "lane", "cycle"]
+                )
                 .mark_line()
                 .encode(
-                    x=alt.X("cycle:Q", title="Cycle", axis=cycle_ticks),
-                    y=alt.Y(f"{column}:Q", title=label).scale(zero=False),
-                    color=alt.Color("lane:N", title="Lane"),
-                    strokeDash=alt.StrokeDash("read:N", title="Read"),
-                    tooltip=[
-                        "read:N",
-                        "lane:O",
-                        "cycle:Q",
-                        alt.Tooltip(f"{column}:Q", title=label, format=".4g"),
-                    ],
+                    x=x,
+                    y=alt.Y("value:Q", title=label).scale(zero=False),
+                    color=read_color,
+                    strokeDash=alt.StrokeDash("lane:N", title="Lane"),
+                    tooltip=tooltip,
                 )
-                .properties(width=FULL_WIDTH, height=90)
-                for column, label in offered.items()
-            ],
+            )
+            # the tiles clicked on the tile map, a flag row or a scatter
+            picked = (
+                base.transform_filter({"param": "pick_tile", "empty": False})
+                .transform_aggregate(
+                    value=f"mean({column})", groupby=["read", "lane", "cycle"]
+                )
+                .mark_line(color=FLAG_COLOR, strokeWidth=1.5)
+                .encode(x=x, y="value:Q", detail="read:N", tooltip=tooltip)
+            )
+            return alt.layer(lane_mean, picked).properties(width=FULL_WIDTH, height=90)
+
+        cycle_interop = alt.vconcat(
+            *[interop_panel(column, label) for column, label in offered.items()],
             spacing=8,
-        ).properties(title="InterOp per cycle (mean over the lane's tiles)")
+        ).properties(
+            title="InterOp per cycle: mean over the lane's tiles, clicked tiles "
+            "in orange"
+        )
+        # same cycle axis in every panel, whatever cycles a metric covers
+        cycle_interop = cycle_interop.resolve_scale(x="shared")
 
     # -- H: N-run shape ------------------------------------------------------
     shape = (
@@ -1253,7 +1299,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         )
         .mark_bar()
         .encode(
-            x=alt.X("longest_run:O", title="Longest N run in read"),
+            x=alt.X("longest_run:O", title="Longest N run in read", axis=count_axis),
             xOffset="read:N",
             y=alt.Y(
                 "n_reads:Q",
@@ -1298,6 +1344,34 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         first_n, _empty_note(sample_n, "n", FULL_WIDTH / 2, 70)
     ).properties(title="Where the first N falls", width=FULL_WIDTH, height=140)
 
+    # -- H2: poly-G tails (2-colour no-signal calls) --------------------------
+    polyg = None
+    if tables.polyg_start.height:
+        polyg = (
+            alt.Chart(tables.polyg_start)
+            .transform_filter(SELECTION_FILTER)
+            .transform_filter(pick_sample)
+            .transform_aggregate(n_reads="sum(n_reads)", groupby=["cycle", "read"])
+            .mark_line(interpolate="step-after", point=True)
+            .encode(
+                x=alt.X(
+                    "cycle:Q",
+                    title="Cycle where the poly-G tail starts",
+                    axis=cycle_ticks,
+                ),
+                y=alt.Y("n_reads:Q", title="Reads").scale(type="symlog"),
+                color=read_color,
+                opacity=shown(pick_read),
+                tooltip=["read:N", "cycle:Q", alt.Tooltip("n_reads:Q", format=",")],
+            )
+            .add_params(pick_read)
+            .properties(
+                title="Where poly-G tails start (clicked sample, or all)",
+                width=FULL_WIDTH,
+                height=180,
+            )
+        )
+
     # pick_tile / pick_read are shared on purpose by several views; Altair warns
     # each time it merges them while nesting the sections
     with warnings.catch_warnings():
@@ -1312,6 +1386,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             n_vs_lowq,
             run_length,
             first_n,
+            polyg,
             tile_map,
             tile_step * n_segments,
             spatial_view,
@@ -1332,6 +1407,7 @@ def _assemble(
     n_vs_lowq,
     run_length,
     first_n,
+    polyg,
     tile_map,
     tile_map_width,
     spatial_view,
@@ -1362,6 +1438,11 @@ def _assemble(
                 _caption(n_vs_lowq, CAPTIONS["n_vs_lowq"], FULL_WIDTH),
                 _caption(run_length, CAPTIONS["run_length"], FULL_WIDTH),
                 _caption(first_n, CAPTIONS["first_n"], FULL_WIDTH),
+                *(
+                    [_caption(polyg, CAPTIONS["polyg"], FULL_WIDTH)]
+                    if polyg is not None
+                    else []
+                ),
             ),
             _section(
                 "Flowcell",
@@ -1388,8 +1469,25 @@ def _assemble(
     )
 
 
-def _table(frame: polars.DataFrame, formats: dict[str, str] | None = None) -> str:
-    """Render a small polars frame as an HTML table."""
+def _jump_attrs(row: dict) -> str:
+    """Attributes that make a flag row jump to its lane, read and tiles on click."""
+    # "2201, 2302 and 3 more": the tiles named in the row
+    tiles = (row.get("tile") or "").split(" and ")[0].replace(", ", " ")
+    return (
+        f' class="jump" tabindex="0" data-read="{html.escape(str(row["read"]))}"'
+        f' data-lane="{row["lane"]}" data-tiles="{html.escape(tiles)}"'
+        ' onclick="jumpToFlag(this)"'
+        " onkeydown=\"if (event.key === 'Enter') jumpToFlag(this)\""
+    )
+
+
+def _table(
+    frame: polars.DataFrame, formats: dict[str, str] | None = None, row_attrs=None
+) -> str:
+    """Render a small polars frame as an HTML table.
+
+    ``row_attrs(row)`` returns extra attributes for the row's ``<tr>``.
+    """
     formats = formats or {}
     head = "".join(f"<th>{html.escape(c)}</th>" for c in frame.columns)
     rows = []
@@ -1401,7 +1499,8 @@ def _table(frame: polars.DataFrame, formats: dict[str, str] | None = None) -> st
             badge = col == "status" and text in ("PASS", "WARN", "FAIL")
             cls = f' class="badge {text.lower()}"' if badge else ""
             cells.append(f"<td><span{cls}>{html.escape(text)}</span></td>")
-        rows.append(f"<tr>{''.join(cells)}</tr>")
+        attrs = row_attrs(row) if row_attrs else ""
+        rows.append(f"<tr{attrs}>{''.join(cells)}</tr>")
     return (
         f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
     )
@@ -1510,53 +1609,6 @@ def project_summary(tables: NspectorTables) -> polars.DataFrame:
     )
 
 
-def _some(items: list[str], limit: int = 5) -> str:
-    """Join ``items`` with commas, naming at most ``limit`` of them."""
-    more = len(items) - limit
-    return ", ".join(items[:limit]) + (f" and {more} more" if more > 0 else "")
-
-
-def verdict(flags: polars.DataFrame, share: float | None) -> str:
-    """Sum up the collapsed flags (``collapse_flags``) in a few plain sentences."""
-    if not flags.height:
-        return "No anomalies: no lane, tile, cycle or sample reaches the warn rate."
-
-    def of(kind: str) -> list[dict]:
-        return flags.filter(polars.col("kind") == kind).to_dicts()
-
-    def where(row: dict) -> str:
-        return f"lane {row['lane']} {row['read']}"
-
-    def fails(rows: list[dict]) -> str:
-        count = sum(r["status"] == "FAIL" for r in rows)
-        return f" ({count} FAIL)" if count else ""
-
-    parts = []
-    if rows := of("lane"):
-        names = _some([f"{where(r)} ({r['status']})" for r in rows])
-        parts.append(f"Whole lane elevated: {names}.")
-    dark: dict[str, list[str]] = {}
-    for row in of("dark_cycle"):
-        dark.setdefault(where(row), []).append(row["cycles"])
-    parts += [f"Dark cycles on {k}: {_some(v)}." for k, v in dark.items()]
-    if rows := of("tile"):
-        worst = max(rows, key=lambda r: r["rate"])
-        parts.append(
-            f"{len(rows)} flagged tile(s){fails(rows)}; the worst is "
-            f"{worst['tile']} on {where(worst)}, at {worst['rate']:.2%} per cycle."
-        )
-    if rows := of("tile_cycle"):
-        parts.append(f"{len(rows)} short tile × cycle event(s){fails(rows)}.")
-    if rows := of("sample"):
-        names = dict.fromkeys(f"{r['project']} / {r['sample']}" for r in rows)
-        parts.append(f"Outlier sample(s): {_some(list(names))}.")
-    if share is not None:
-        parts.append(
-            f"Flagged lanes, tiles and cycles hold {share:.0%} of all N bases."
-        )
-    return " ".join(parts)
-
-
 # number formats of the HTML summary tables
 TABLE_FORMATS = {
     "N rate": ".3%",
@@ -1590,7 +1642,10 @@ _PAGE = """<!DOCTYPE html>
   table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }}
   th, td {{ text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }}
   tbody tr:nth-child(even) {{ background: var(--panel); }}
-  th {{ color: var(--muted); font-weight: 600; font-size: 12px; }}
+  th {{ color: var(--muted); font-weight: 600; font-size: 12px; cursor: pointer; user-select: none; }}
+  th[aria-sort="ascending"]::after {{ content: " ▲"; }}
+  th[aria-sort="descending"]::after {{ content: " ▼"; }}
+  .filter {{ font: inherit; padding: 4px 8px; margin: 0 0 8px; width: min(360px, 100%); border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); }}
   .help {{ background: var(--panel); border-left: 3px solid var(--accent); padding: 8px 14px; border-radius: 4px; margin-top: 20px; }}
   .help summary {{ cursor: pointer; font-weight: 600; }}
   .verdict {{ font-size: 15px; margin: 0 0 12px; }}
@@ -1601,6 +1656,8 @@ _PAGE = """<!DOCTYPE html>
   #controls .vega-bindings {{ display: flex; flex-wrap: wrap; gap: 4px 24px; padding: 8px 0; }}
   #controls label {{ cursor: pointer; }}
   #controls .vega-bind-name {{ font-weight: 600; }}
+  tr.jump {{ cursor: pointer; }}
+  tr.jump:hover td, tr.jump:focus td {{ background: color-mix(in srgb, var(--accent) 18%, transparent); }}
   .badge {{ display: inline-block; padding: 0 8px; border-radius: 10px; font-weight: 600; font-size: 12px; }}
   .badge.pass {{ background: #d3f9d8; color: #2b8a3e; }}
   .badge.warn {{ background: #fff3bf; color: #a35c00; }}
@@ -1644,6 +1701,7 @@ _PAGE = """<!DOCTYPE html>
     <div class="stat"><b>{n_reads}</b><span>reads with at least one N</span></div>
     <div class="stat"><b>{n_rate}</b><span>overall N rate (reads with N){by_read}</span></div>
     <div class="stat"><b>{n_per_base}</b><span>N per sequenced base</span></div>
+    <div class="stat"><b>{polyg_rate}</b><span>reads with a poly-G tail{polyg_by_read}</span></div>
     <div class="stat"><b>{n_tiles}</b><span>tiles across {n_lanes} lane(s)</span></div>
     <div class="stat"><b>{flagged_share}</b><span>of N bases on flagged lanes, tiles or cycles</span></div>
     <div class="stat"><b>{flag_badges}</b><span>anomaly flags</span></div>
@@ -1653,7 +1711,9 @@ _PAGE = """<!DOCTYPE html>
   <section id="projects"><h2>Projects</h2><div class="scroll">{projects}</div></section>
 </header>
 <main>
-  <section id="flags"><h2>Anomaly flags</h2>{flags}</section>
+  <section id="flags"><h2>Anomaly flags</h2>{flags}{costs}</section>
+  <section id="quality"><h2>Quality next to N</h2><div class="scroll">{quality}</div>
+    <p class="meta">Mean Phred score of the called bases, and of the called bases right before or after an N. Close values mean the Ns appear abruptly in otherwise good signal (a bubble, a dark cycle, an imaging dropout); a much lower score next to the Ns means the signal decayed before the base caller gave up. A poly-G tail is a 3′ run of at least 10 G: on 2-colour instruments, lost signal called as G.</p></section>
   <div class="grid" id="worst">
     <section><h2>Tiles with the highest N rate</h2><div class="scroll">{worst_tiles}</div></section>
     <section><h2>Cycles with the highest N rate</h2><div class="scroll">{worst_cycles}</div></section>
@@ -1671,11 +1731,18 @@ _PAGE = """<!DOCTYPE html>
   </details>
   <div id="controls"></div>
   <div id="vis"></div>
-  <section id="inputs"><h2>Inputs</h2><div class="scroll">{inputs}</div></section>
+  <section id="inputs"><h2>Inputs</h2><input type="search" class="filter" id="inputs-filter" placeholder="Filter by file, project or sample" aria-label="Filter the input files"><div class="scroll">{inputs}</div></section>
   <p class="meta" style="margin:24px 0">Full tables: <code>nspector_*.parquet</code> in this directory.</p>
 </main>
+<script type="application/octet-stream" id="spec">{spec}</script>
 <script type="text/javascript">
-  const spec = {spec};
+  // the chart spec with its data: gzip, base64 (a tenth of the plain JSON)
+  let spec;
+  async function loadSpec() {{
+    const bytes = Uint8Array.from(atob(document.getElementById('spec').textContent), (c) => c.charCodeAt(0));
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    spec = JSON.parse(await new Response(stream).text());
+  }}
   const themes = {{
     "dark": {{"background": "#14161a", "view": {{"fill": "#1e2128"}}, "axis": {{"domainColor": "#6b7280", "gridColor": "#2c313a", "tickColor": "#6b7280", "labelColor": "#c9ced6", "titleColor": "#e6e8ec"}}, "legend": {{"labelColor": "#c9ced6", "titleColor": "#e6e8ec"}}, "title": {{"color": "#e6e8ec"}}}},
     "light": {{"background": "#ffffff", "view": {{"fill": "#f3f3f3"}}, "title": {{"color": "#1d2330"}}}}
@@ -1699,6 +1766,20 @@ _PAGE = """<!DOCTYPE html>
       .catch(console.error);
   }}
 
+  // show a flag's lane, read and tiles: the charts are re-drawn with those
+  // values, like on a theme switch
+  function jumpToFlag(row) {{
+    const view = window.nspectorView;
+    if (!view) return;
+    const keep = Object.fromEntries(controls.map((name) => [name, view.signal(name)]));
+    keep.lane_sel = Number(row.dataset.lane);
+    keep.read_sel = row.dataset.read;
+    const tiles = row.dataset.tiles.split(' ').filter(Boolean).map((tile) => ({{"tile": Number(tile)}}));
+    if (tiles.length) keep.pick_tile = tiles;
+    render(document.documentElement.dataset.theme, keep)
+      .then(() => document.getElementById('controls').scrollIntoView());
+  }}
+
   function toggleTheme() {{
     const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = theme;
@@ -1708,7 +1789,42 @@ _PAGE = """<!DOCTYPE html>
     render(theme, keep);
   }}
 
-  render(document.documentElement.dataset.theme);
+  // click a column header to sort its table; numbers (with , and %) sort as numbers
+  function cellValue(row, index) {{
+    const text = row.cells[index].textContent.trim();
+    const number = Number(text.replace(/[,%]/g, ''));
+    return text !== '' && !Number.isNaN(number) ? number : text;
+  }}
+  document.querySelectorAll('table').forEach((table) => {{
+    table.querySelectorAll('th').forEach((th, index) => th.addEventListener('click', () => {{
+      const order = th.getAttribute('aria-sort') === 'descending' ? 'ascending' : 'descending';
+      table.querySelectorAll('th').forEach((other) => other.removeAttribute('aria-sort'));
+      th.setAttribute('aria-sort', order);
+      const body = table.tBodies[0];
+      const sign = order === 'ascending' ? 1 : -1;
+      const rows = [...body.rows].sort((a, b) => {{
+        const x = cellValue(a, index), y = cellValue(b, index);
+        // empty cells last, whatever the order
+        if (x === '' || y === '') return x === '' ? (y === '' ? 0 : 1) : -1;
+        if (typeof x === typeof y) return sign * (x < y ? -1 : x > y ? 1 : 0);
+        return sign * (typeof x === 'number' ? -1 : 1);
+      }});
+      body.append(...rows);
+    }}));
+  }});
+  document.getElementById('inputs-filter').addEventListener('input', (event) => {{
+    const needle = event.target.value.toLowerCase();
+    document.querySelectorAll('#inputs tbody tr').forEach((row) => {{
+      row.hidden = needle !== '' && !row.textContent.toLowerCase().includes(needle);
+    }});
+  }});
+
+  loadSpec()
+    .then(() => render(document.documentElement.dataset.theme))
+    .catch((error) => {{
+      console.error(error);
+      document.getElementById('vis').textContent = 'The charts could not be loaded: this browser cannot unpack the report data (it needs DecompressionStream; use a current Chrome, Edge, Firefox or Safari).';
+    }});
 </script>
 </body>
 </html>
@@ -1749,8 +1865,8 @@ def write_report(
             f"The report embeds {len(spec) / 2**20:.0f} MB of data and may be slow "
             "to open. Consider a larger --spatial-bin-size."
         )
-    # keep "</script>" in string data from closing the script element
-    spec = spec.replace("</", "<\\/")
+    # mtime=0: the same tables give the same file
+    spec = base64.b64encode(gzip.compress(spec.encode(), mtime=0)).decode("ascii")
 
     inputs, worst_tiles, worst_cycles = summary_tables(scans, tables)
     flags = _flags(tables)
@@ -1758,27 +1874,60 @@ def write_report(
     share = flagged_share(tables, flags)
     if flags.height:
         n_fail = int((flags["status"] == "FAIL").sum())
-        more = (
-            f"; showing the first {MAX_FLAG_ROWS} rows, all in nspector_flags.parquet"
-            if listed.height > MAX_FLAG_ROWS
-            else ""
-        )
         # project and sample only show up with sample flags, tile with tile flags
         used = [c for c in listed.columns if listed[c].null_count() < listed.height]
+        formats = {"rate": ".3%", "z": ".1f"}
+        rest = listed.slice(MAX_FLAG_ROWS).select(used)
         flags_html = (
             f'<p class="meta">{flags.height} flag(s): {n_fail} FAIL, '
-            f"{flags.height - n_fail} WARN. Consecutive cycles are listed as one "
-            f"row, with the largest rate{more}.</p>"
+            f"{flags.height - n_fail} WARN. Consecutive cycles, and tiles hit at "
+            "the same cycles, are listed as one row with the largest rate. Click a "
+            "row to show its lane, read and tiles in the charts.</p>"
             '<div class="scroll">'
-            + _table(
-                listed.head(MAX_FLAG_ROWS).select(used), {"rate": ".3%", "z": ".1f"}
-            )
+            + _table(listed.head(MAX_FLAG_ROWS).select(used), formats, _jump_attrs)
             + "</div>"
+            + (
+                f"<details><summary>Show the other {rest.height} row(s)</summary>"
+                f'<div class="scroll">{_table(rest, formats, _jump_attrs)}</div>'
+                "</details>"
+                if rest.height
+                else ""
+            )
         )
     else:
         flags_html = (
             "<p class='meta'>No lane, tile, cell, dark-cycle or sample flags.</p>"
         )
+    costs = removal_costs(tables, flags)
+    costs_html = ""
+    if costs:
+        costs_html = (
+            "<h2>What removing them would cost</h2>"
+            '<div class="scroll">'
+            + _table(
+                polars.DataFrame(costs).rename(
+                    {
+                        "lost": "reads or called bases lost",
+                        "n_removed": "N bases removed",
+                    }
+                ),
+                {"reads or called bases lost": ".2%", "N bases removed": ".2%"},
+            )
+            + '</div><p class="meta">Tiles are excluded at demultiplexing '
+            "(BCL Convert <code>--exclude-tiles</code>, bcl2fastq "
+            "<code>--tiles</code>) and drop their clusters from every read. Only "
+            "dark cycles that run to the end of a read can be trimmed "
+            "(<code>OverrideCycles</code>, <code>--use-bases-mask</code>); dark "
+            "cycles inside a read stay in the reads as N.</p>"
+        )
+    quality = read_quality(tables).rename(
+        {
+            "polyg_rate": "reads with a poly-G tail",
+            "mean_q": "mean Q of called bases",
+            "flank_q": "mean Q next to an N",
+        }
+    )
+    polyg_total = int(tables.sample_lane["polyg"].sum())
     by_read = (
         tables.sample_lane.group_by("read")
         .agg((polars.col("n").sum() / polars.col("total").sum()).alias("rate"))
@@ -1800,6 +1949,7 @@ def write_report(
     page = _PAGE.format(
         vegaembed=_vegaembed_bundle(),
         flags=flags_html,
+        costs=costs_html,
         spec=spec,
         generated=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
         n_files=len(scans),
@@ -1810,6 +1960,22 @@ def write_report(
         n_per_base=f"{n_bases / bases:.4%}" if bases else "n/a",
         flag_badges=flag_badges,
         flagged_share="n/a" if share is None else f"{share:.1%}",
+        polyg_rate=f"{polyg_total / total_reads:.3%}" if total_reads else "n/a",
+        polyg_by_read="<br>"
+        + " · ".join(
+            f"{r} {v:.3%}"
+            for r, v in quality.select("read", "reads with a poly-G tail").iter_rows()
+        )
+        if quality.height > 1
+        else "",
+        quality=_table(
+            quality,
+            {
+                "reads with a poly-G tail": ".3%",
+                "mean Q of called bases": ".1f",
+                "mean Q next to an N": ".1f",
+            },
+        ),
         verdict=html.escape(verdict(listed, share)),
         params=html.escape(
             " · ".join(
@@ -1910,7 +2076,69 @@ def write_multiqc(tables: NspectorTables, output: pathlib.Path) -> list[pathlib.
     path.write_text(json.dumps(linegraph, indent=1))
     written.append(path)
 
+    # read-loss curve: reads a "no more than k N bases" filter discards, per read
+    totals = dict(
+        tables.sample_lane.group_by("read").agg(polars.col("total").sum()).iter_rows()
+    )
+    loss: dict[str, dict[int, float]] = {}
+    for read, counts in (
+        tables.n_per_read.group_by("read", "n_count")
+        .agg(polars.col("n_reads").sum())
+        .sort("n_count", descending=True)
+        .partition_by("read", as_dict=True)
+        .items()
+    ):
+        name = read[0]
+        # reads with more Ns than k, for every k below the largest count seen
+        above = counts.with_columns(polars.col("n_reads").cum_sum().alias("above"))
+        loss[name] = {
+            int(k) - 1: round(100 * n / totals[name], 4)
+            for k, n in above.select("n_count", "above").iter_rows()
+        }
+    if loss:
+        curve = {
+            "id": "nspector_read_loss",
+            "section_name": "nspector: reads lost to an N filter",
+            "description": "Percentage of reads discarded when reads with more than "
+            "the given number of N bases are filtered out.",
+            "plot_type": "linegraph",
+            "pconfig": {
+                "id": "nspector_read_loss_plot",
+                "title": "nspector: reads lost when filtering on N bases per read",
+                "xlab": "Most N bases allowed in a read",
+                "ylab": "% reads lost",
+                "ymin": 0,
+            },
+            "data": {
+                read: dict(sorted(points.items())) for read, points in loss.items()
+            },
+        }
+        path = folder / "nspector_read_loss_mqc.json"
+        path.write_text(json.dumps(curve, indent=1))
+        written.append(path)
+
     flags = _flags(tables)
+    # the verdict and what removing the flagged tiles and cycles would cost
+    share = flagged_share(tables, flags)
+    costs = "".join(
+        f"<li>{html.escape(c['action'])} ({html.escape(c['what'])}): "
+        f"{c['lost']:.2%} of the reads or called bases lost, "
+        f"{c['n_removed']:.2%} of the N bases removed.</li>"
+        for c in removal_costs(tables, flags)
+    )
+    path = folder / "nspector_verdict_mqc.html"
+    path.write_text(
+        "<!--\n"
+        "id: 'nspector_verdict'\n"
+        "section_name: 'nspector: verdict'\n"
+        "description: 'What the N content of this run points to, from the nspector "
+        "anomaly flags.'\n"
+        "-->\n"
+        f"<p>{html.escape(verdict(collapse_flags(flags), share))}</p>\n"
+        + (f"<ul>{costs}</ul>\n" if costs else "")
+    )
+    written.append(path)
+
     if flags.height:
         table = {
             "id": "nspector_flags",
@@ -1921,10 +2149,7 @@ def write_multiqc(tables: NspectorTables, output: pathlib.Path) -> list[pathlib.
             "pconfig": {"id": "nspector_flags_table", "title": "nspector: flags"},
             "data": {
                 f"{i + 1:04d} {r['read']} L{r['lane']:03d}": {
-                    k: v
-                    for k, v in r.items()
-                    # JSON has no inf (z is inf when the lane's MAD is 0)
-                    if v is not None and not (isinstance(v, float) and math.isinf(v))
+                    k: v for k, v in r.items() if v is not None
                 }
                 for i, r in enumerate(flags.iter_rows(named=True))
             },
@@ -1940,11 +2165,13 @@ def write_multiqc(tables: NspectorTables, output: pathlib.Path) -> list[pathlib.
             polars.col("n").sum(),
             polars.col("n_bases").sum(),
             polars.col("lowq").sum(),
+            polars.col("polyg").sum(),
             polars.col("total").sum(),
         )
         .with_columns(
             (100 * polars.col("n") / polars.col("total")).alias("pct"),
             (100 * polars.col("lowq") / polars.col("total")).alias("pct_lowq"),
+            (100 * polars.col("polyg") / polars.col("total")).alias("pct_polyg"),
         )
         .join(sample_status(tables, flags), on="sample", how="left")
         .sort("sample")
@@ -1972,13 +2199,21 @@ def write_multiqc(tables: NspectorTables, output: pathlib.Path) -> list[pathlib.
         "#         max: 100",
         "#         suffix: '%'",
         "#         format: '{:,.3f}'",
+        "#     - pct_reads_polyg:",
+        "#         title: '% poly-G reads'",
+        "#         description: 'Percentage of reads ending in at least 10 G (nspector)'",
+        "#         min: 0",
+        "#         max: 100",
+        "#         suffix: '%'",
+        "#         format: '{:,.3f}'",
         "#     - n_status:",
         "#         title: 'N status'",
         "#         description: 'Worst nspector flag on the sample or its lanes (PASS/WARN/FAIL)'",
-        "Sample\tpct_reads_with_n\tn_bases\tpct_reads_lowq\tn_status",
+        "Sample\tpct_reads_with_n\tn_bases\tpct_reads_lowq\tpct_reads_polyg\tn_status",
     ]
     lines += [
-        f"{r['sample']}\t{r['pct']:.4f}\t{r['n_bases']}\t{r['pct_lowq']:.4f}\t{r['status']}"
+        f"{r['sample']}\t{r['pct']:.4f}\t{r['n_bases']}\t{r['pct_lowq']:.4f}"
+        f"\t{r['pct_polyg']:.4f}\t{r['status']}"
         for r in per_sample.iter_rows(named=True)
     ]
     path = folder / "nspector_general_stats_mqc.tsv"

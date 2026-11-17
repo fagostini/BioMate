@@ -44,6 +44,7 @@ temp/
 site/
 dist/
 build/
+rust/biomate_kernels/target/
 
 # Notebooks
 notebooks/
