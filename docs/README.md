@@ -2,18 +2,21 @@
 
 BioMate represents a collection of scripts and utility tools for everyday processing of biological data, conveniently gathered into a single Python package.
 
-Install it as a command-line tool with `uv tool install git+https://github.com/fagostini/BioMate`. To check the package information and available sub-commands, you can run `biomate --help`.
+Install it as a command-line tool with `uv tool install git+https://github.com/fagostini/BioMate`. To check the package information and available sub-commands, you can run `biomate --help`. The `--run-folder` option of Nspector needs the optional `interop` extra: `uv tool install 'biomate[interop] @ git+https://github.com/fagostini/BioMate'`.
 
 ## Available tools
 
-- [Blabber](blabber.md) - FASTA, FASTQ or plain text sequence generator. It can be used to re-generate a demultiplexed flowcell folder using a sample sheet as input.
-- [Dirstruct](dirstruct.md) - Extract or create a directory structure. It can be used to simulate nested folder structures for testing purposes.
-- [Indexer](indexer.md) - Indexing tool for FASTA/FASTQ files. It can be used to search for expected indexes and get 'fuzzy' information.
-- [FastRewind](fastrewind.md) - Convert a demultiplexed folder back into the Illumina NovaSeqXPlus output. It can be used to generate a subset for demultiplex testing.
-- [Nspector](nspector.md) - Inspect FASTQ files for N-base content and their distribution across flowcell tiles and sequencing cycles.
-- [Strainer](strainer.md) - Evaluate index mixing across flowcell lanes by identifying sample indexes from one lane appearing in undetermined reads of another.
-- [Triage](triage.md) - Triage the undetermined reads of a flowcell: Strainer, index discovery and Waif from a single pass over the FASTQ headers.
-- [Waif](waif.md) - Report the barcodes that remain undetermined in every demultiplexing run of a lane, with an estimated read count.
+Each tool is a sub-command: `biomate <name> --help` lists its options.
+
+- [Blabber](blabber.md) (`biomate blabber`) - FASTA, FASTQ or plain text sequence generator. It can be used to re-generate a demultiplexed flowcell folder using a sample sheet as input.
+- [Dirstruct](dirstruct.md) (`biomate dirstruct`) - Extract or create a directory structure. It can be used to simulate nested folder structures for testing purposes.
+- [Indexer](indexer.md) (`biomate index`) - Indexing tool for FASTA/FASTQ files. It can be used to search for expected indexes and get 'fuzzy' information.
+- [FastRewind](fastrewind.md) (`biomate fastrewind`) - Convert a demultiplexed folder back into the Illumina NovaSeqXPlus output. It can be used to generate a subset for demultiplex testing.
+- [Nspector](nspector.md) (`biomate nspector`) - Inspect FASTQ files for N-base content and their distribution across flowcell tiles and sequencing cycles.
+- [Strainer](strainer.md) (`biomate strainer`) - Evaluate index mixing across flowcell lanes by identifying sample indexes from one lane appearing in undetermined reads of another.
+- [Triage](triage.md) (`biomate triage`) - Triage the undetermined reads of a flowcell: Strainer, index discovery and Waif from a single pass over the FASTQ headers.
+- [Waif](waif.md) (`biomate waif`) - Report the barcodes that remain undetermined in every demultiplexing run of a lane, with an estimated read count.
+- [Web Interface](web-interface.md) (`biomate web-interface`) - Local web server with a form for each tool.
 
 ## General options
 
@@ -24,7 +27,7 @@ In addition to the `--version` option, which prints the current version of the B
 
 > _**Note:** By default, the logging level is set to `INFO`, which will print general information about the execution of the sub-command, but not the detailed debug information._
 
-> _**Important:** In some cases (e.g. when the output will be printed to the standard output), the `--quiet` option will be applied automatically to avoid cluttering the output with unnecessary information. In such cases, the logging level will be set to `ERROR` regardless of the `--verbose` or `--quiet` options._
+> _**Important:** In some cases (e.g. when the output will be printed to the standard output), the `--quiet` option will be applied automatically to avoid cluttering the output with unnecessary information. In such cases, the logging level will be set to `ERROR`, unless `--verbose` is given: `--verbose` always takes precedence and sets the level to `DEBUG`._
 
 ## External dependencies
 

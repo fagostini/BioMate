@@ -41,8 +41,10 @@ The module globs `**/Undetermined_*_L00<Lane>_R1_*.fastq.gz` under `--input-path
 Files below any `Demultiplexing/` directory are excluded.
 If bcl-convert split a dataset into several 1M-read parts (`_001`, `_002`, ...), their counts are summed, so each (Lane, Dataset, Barcode) combination is unique.
 
-The Sample Sheet must be in either the legacy `FCID,...` format or the modern `Lane,...` format (the one used by `[BCLConvert_Data]` sheets).
-Rows without any index and rows with an empty `Sample_Project` are ignored; a lane is selected when its rows carry samples from two or more distinct projects.
+The Sample Sheet data header may start with `FCID` (legacy) or `Lane` (the format used by `[BCLConvert_Data]` sheets), but in both cases the lanes are read from the columns named exactly `Lane`, `index`, `index2` and `Sample_Project` (legacy names such as `Index` or `SampleProject` are not recognised).
+Rows without any index and rows with an empty `Sample_Project` are ignored; a lane is selected when its rows carry samples from two or more distinct projects. If no lane is selected, the run stops with an error and nothing is written.
+
+In exact mode the lanes come from the sample sheet, not from being shared between datasets: a selected lane with a single dataset reports every undetermined barcode of that dataset.
 
 ## Output
 
@@ -56,15 +58,15 @@ A CSV with the following columns is written to `--output-file` (or to stdout):
 | `Total %` | Percentage of the lane's total reported count |
 
 Rows are sorted by lane, then by count (descending), then by barcode.
-If no barcode is undetermined in every run of a lane (or no lane is shared), the file is still written but contains only the header row.
+In default mode, if no barcode is undetermined in every run of a lane (or no lane is shared), the file is still written but contains only the header row. If no `Stats.json` file is found, the run stops with an error.
 
 ## Counting Strategies (Exact Mode)
 
 Each undetermined FASTQ file is counted with the fastest strategy that is correct for it:
 
-- **Serial**: one fused streaming pass (decompress + count) for small files.
-- **Threaded**: the `zlib` inflate C call (which releases the GIL) runs in a producer thread overlapped with the counting pass, for large files.
-- **Forked (with `--block-cache`)**: a small index of the gzip member byte offsets is built and cached (validated against the source by path, mtime and size); the file is then counted by one forked worker per contiguous run of members. This is only used when every member boundary falls on a FASTQ line boundary; otherwise the module falls back to the serial pass. A multi-member file whose boundary falls mid-header is never split.
+- **Serial**: one fused streaming pass (decompress + count), used when the file is smaller than 8 MiB or when there are fewer than 2 cores per file.
+- **Threaded**: the `zlib` inflate C call (which releases the GIL) runs in a producer thread overlapped with the counting pass, for the other files when `--block-cache` is not set.
+- **Forked (with `--block-cache`)**: a small index of the gzip member byte offsets is built and cached (validated against the source by path, mtime and size); the file is then counted by one forked worker per contiguous run of members. This replaces the threaded strategy and is only used when the file has at least 2 gzip members and every member boundary falls on a FASTQ line boundary; otherwise the module falls back to the serial pass. A multi-member file whose boundary falls mid-header is never split.
 
 Per-file counting runs in a process pool (one worker per file, up to the core count) and the output order matches the file order, so the results are deterministic.
 
@@ -92,4 +94,4 @@ The second command counts the undetermined FASTQ headers exactly, using the give
 - A (Dataset, Lane) must be uniformly single- or dual-index; mixing the two within one dataset is a data error and aborts the run.
 - Two datasets with equal total index length but crossed per-index lengths (e.g. 10+8 vs 8+10) can leave one index untruncated, in which case that lane's intersection comes out empty.
 - `--block-cache` is only supported on Linux (it relies on `os.fork`); on other platforms the argument is rejected.
-- The web interface runs each tool with a 10-minute timeout; large exact-mode runs should be done from the command line.
+- The [web interface](web-interface.md) runs each tool without a timeout and shows the output only when the run finishes; long exact-mode runs are easier to follow from the command line.

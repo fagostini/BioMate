@@ -30,6 +30,9 @@ This document tracks tested versions and known compatibility constraints for Bio
 | tornado | 6.5.7 | ✅ Tested | Web interface server |
 | regex | 2026.5.9 | ✅ Tested | Pattern matching for index evaluation |
 | dnaio | 1.2.4 | ✅ Tested | FASTQ/FASTA file I/O |
+| rich | 14.3.3 | ✅ Tested | Logging and progress output |
+| fastavro | 1.12.1 | ✅ Tested | Avro intermediate files in fastrewind |
+| interop | 1.9.0 | Optional (`interop` extra) | InterOp metrics for `nspector --run-folder` |
 
 ## Known Compatibility Issues
 
@@ -76,7 +79,7 @@ This document tracks tested versions and known compatibility constraints for Bio
 
 - **Reason:** `itertools.batched` used in blabber.py (line 12) and fastrewind.py
 - **Impact:** Only available in Python 3.12+
-- **Current Requirement:** pyproject.toml specifies `python = ">=3.12"`
+- **Current Requirement:** pyproject.toml specifies `requires-python = ">=3.12"`
 - **Backward Compatibility:** None needed; requirement is intentional
 
 ## Breaking Changes & Migration Guide
@@ -110,11 +113,8 @@ The following dependencies can be safely updated:
 ### Update Procedure
 
 ```bash
-# Check for new versions
-uv update
-
-# Lock updated versions
-uv lock
+# Upgrade the locked versions within the pyproject.toml constraints
+uv lock --upgrade
 
 # Run full test suite
 uv run pytest tests/ -v
@@ -174,7 +174,7 @@ uv run biomate nspector --input test.fastq --output /tmp
 ## Environment Variables
 
 None required. Optional:
-- `SSL_CERT` / `SSL_KEY`: For web interface HTTPS (see web_interface.py)
+- `SSL_CERT` / `SSL_KEY`: For web interface HTTPS. The `--ssl-cert` / `--ssl-key` options take priority (see [Web Interface](web-interface.md)).
 
 ## Reporting Compatibility Issues
 
@@ -197,8 +197,8 @@ If you encounter compatibility problems:
 
 | Version | Release Date | Status |
 |---|---|---|
-| 0.3.0 | Current | All known compatibility issues resolved |
-| 0.2.x | Earlier | See git history for older tested versions |
+| 0.6.0 | Current | All known compatibility issues resolved |
+| < 0.6.0 | Earlier | See git history for older tested versions |
 
 ---
 

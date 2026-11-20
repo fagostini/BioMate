@@ -4,35 +4,36 @@ This module allows to generate different flavours of FASTA, FASTQ or plain text 
 
 ## Usage
 
-The minimal command is `biomate blabber`, which will generate 100 random 50 nucleotide long sequences in TEXT format (one sequence per line), using the standard nucleotide alphabet (A, C, G, T), and it will print them to the standard output.
+The minimal command is `biomate blabber`, which will generate 100 random 100 nucleotide long sequences in TEXT format (one sequence per line), using the standard nucleotide alphabet (A, C, G, T), and it will print them to the standard output.
 
 ## Options
 
 - `--seq-number`: Number of sequences to generate. Default is 100.
-- `--seq-length`: Length of each sequence. Default is 50.
+- `--seq-length`: Length of each sequence. Default is 100.
 - `--alphabet`: Alphabet to use for sequence generation. Default is 'ACGT'.
-- `--output`: Path to the output file. If not specified, the output will be printed to the standard output. If a sample sheet is provided, this must be a directory where the flowcell folder will be created.
+- `--output`: Path to the output file. If not specified, the output will be printed to the standard output. If it is an existing directory, the sequences are written to `sequences.txt`, `sequences.fasta` or `sequences.fastq` inside it. If a sample sheet is provided, this option is required and must be an existing directory, where the flowcell folder will be created.
 - `--format`: Format of the output sequences. Can be 'fasta', 'fastq', 'fastq-ext' or 'text'. Default is 'text'. The 'fastq-ext' format includes additional information in the FASTQ header.
-- `--sample-sheet`: Path to a sample sheet file. If provided, the output will be generated based on the sample sheet, creating a flowcell folder structure. The sample sheet should be in the format used by Illumina sequencing systems, with the
+- `--sample-sheet`: Path to a sample sheet file. If provided, the output will be generated based on the sample sheet, creating a flowcell folder structure (see [Sample Sheet Usage](#sample-sheet-usage)). Requires `--output`, and `--format` `fastq` or `fastq-ext` (the default `text` is switched to `fastq-ext`; `fasta` is an error).
 - `--flowcell-id`: Full run folder name (`date_instrument_run_number_flowcell_id`) to use as the output folder; when given, the instrument, run number and flowcell in the read names are also pinned to its parts (default: a random identity is generated).
-- `--taint`: Add reads from the samples to the Undetermined files of lanes with mixed sequencing designs (see below).
+- `--taint`: Add reads from the samples to the Undetermined files of every lane, to simulate lanes with mixed sequencing designs (see below).
 - `--taint-count`: Write exactly this many reads to the Undetermined files of each lane with an indexed design (implies `--taint`, deterministic selection, see below).
-- `--random-seed`: Seed for the random number generator. Only affects the percentage-based `--taint` selection; `--taint-count` selection is seed-independent.
+- `--random-seed`: Seed for the random number generator. It drives all random choices (sequences, qualities, run folder and flowcell names, tile assignment and positions, and the percentage-based `--taint` selection), so the same seed gives the same output. Only the `--taint-count` selection is seed-independent.
 
 ## Sample Sheet Usage
 
-When a sample sheet is provided, the output will be generated based on the sample sheet, creating a flowcell folder structure. The sample sheet should be in the format used by Illumina sequencing systems, at least with the following columns:
+When a sample sheet is provided, the output will be generated based on the sample sheet, creating a flowcell folder structure. Two sample sheet layouts are accepted (the data is read from the `[Data]` or `[BCLConvert_Data]` section):
 
-- `FCID`: Flowcell ID.
-- `Lane`: Lane number.
-- `Sample_ID`: Sample ID.
-- `Recipe`: Recipe name.
-- `Sample_Project`: Sample project name.
+- **Legacy (bcl2fastq) layout**: `FCID`, `Lane`, `Sample_ID`, `Recipe`, `Sample_Project`. The flowcell ID is taken from `FCID`.
+- **Version 2 (BCL Convert) layout**: `Lane`, `Sample_ID`, `Sample_Project`, `OverrideCycles`, `index`, `index2`. A random flowcell ID is generated.
 
-> _**Note:** The `--seq-length` and `--format` options will be ignored when a sample sheet is provided, as the sequence lengths will be derived from the Recipe column in the sample sheet, and the format will be set to 'fastq-ext'._
+A sheet with neither `Recipe` nor `OverrideCycles` is rejected.
 
-The name of the output directory will have the following format: `<DATE>_<RAND_1>_<RAND_2>_A<FCID>`, where `<DATE>` is the current date in `YYYYMMDD` format, `<RAND_1>` is a random 2-character string followed by a random 5-digit number, and `<RAND_2>` is a random 4-digit number, and `<FCID>` is the Flowcell ID from the sample sheet.
-Within the output flowcell folder, a `Demultiplexing` folder will be created, containing `Sample_Project` subfolders and the Undetermined FASTQ files for each lane. Each `Sample_Project` The `Sample_ID` subfolders that in turn contain the FASTQ files for each sample. The FASTQ files will be named according to the following pattern: `<Sample_Name>_<RAND_1>_S<RAND_2>_<Lane>_R[12]_001.fastq.gz`, where `<Sample_Name>` is derived from the corresponding column in the sample sheet, `<RAND_1>` is a 4-digit random number, `<RAND_2>` is the sample index (from 1 to the total number of samples in the flowcell), and `<Lane>` is the lane number from the sample sheet, converted to the format `LXXX` (e.g., `L001` for lane 1).
+> _**Note:** `--seq-length` is ignored when a sample sheet is provided: the read lengths are derived from the `Recipe` or `OverrideCycles` column. The output is FASTQ: with `--format fastq-ext` (also the default when `--format` is not given) the read headers carry the `1:N:0:<index>` comment, with `--format fastq` they do not._
+
+The name of the output directory will have the following format: `<DATE>_<INSTRUMENT>_<RUN>_A<FCID>`, where `<DATE>` is the current date in `YYYYMMDD` format, `<INSTRUMENT>` is a random 2-letter string followed by a random 5-digit number, `<RUN>` is a random number from 100 to 999 zero-padded to 4 digits (e.g. `0992`), and `<FCID>` is the flowcell ID. With `--flowcell-id`, the given name is used as is.
+Within the output flowcell folder, a `Demultiplexing` folder will be created, containing one subfolder per `Sample_Project`, each with one subfolder per `Sample_ID` holding that sample's FASTQ files. The FASTQ files are named `<NAME>_S<N>_<Lane>_R[12]_001.fastq.gz`, where `<NAME>` is the `Sample_ID` without its `Sample_` prefix, `<N>` is the sample index (from 1 to the total number of samples in the flowcell), and `<Lane>` is the lane number converted to the format `LXXX` (e.g., `L001` for lane 1). The R2 file is only written when the recipe has a second read.
+
+The Undetermined files (`Undetermined_S0_<Lane>_R[12]_001.fastq.gz`) sit directly in the `Demultiplexing` folder and are only written with `--taint` or `--taint-count` (see below).
 
 The `--seq-number` and `--alphabet` options will be used to generate the content of the FASTQ files, with the specified number of sequences and using the specified alphabet. The generated sequences will be random, but their identifiers will be consistent among paired reads (R1 and R2) to ensure they can be processed correctly in downstream applications.
 
@@ -50,7 +51,7 @@ The input sample sheet will be copied to the flowcell folder as `SampleSheet.csv
 │   │   └── Sample_P41583_102
 │   │       ├── P41583_102_S2_L001_R1_001.fastq.gz
 │   │       └── P41583_102_S2_L001_R2_001.fastq.gz
-│   └── Undetermined_S0_L001_R1_001.fastq.gz
+│   ├── Undetermined_S0_L001_R1_001.fastq.gz   (only with --taint/--taint-count)
 │   └── Undetermined_S0_L001_R2_001.fastq.gz
 └── SampleSheet.csv
 ```

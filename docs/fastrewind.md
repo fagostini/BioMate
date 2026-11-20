@@ -8,19 +8,23 @@ This module allows to convert a series of FASTQ files back into the Illumina Nov
 
 ## Usage
 
-The minimal command is `biomate fastrewind --input <PATH>`. This will search for FASTQ file(s) and the SampleSheet.csv file, from which it will extract the information regarding the run (mainly, the number of cycles, and how they are split between reads and indexes).
+The minimal command is `biomate fastrewind --input-path <PATH>`. This will search `<PATH>` recursively for gzipped FASTQ files (`*.fastq.gz`; uncompressed files are not picked up) and for the SampleSheet.csv file, from which it will extract the information regarding the run (mainly, the number of cycles, and how they are split between reads and indexes).
 
 ## Options
 
-- `--input-path`: Path to the input flowcell directory containing demultiplexed FASTQ files.
+- `--input-path` (required): Path to the input flowcell directory containing demultiplexed FASTQ files.
 - `--output-path`: Path to the output directory where the BCL structure will be created (default: current directory).
 - `--sample-sheet`: Path to the Sample Sheet file. If not provided, the script will look for SampleSheet.csv in the input directory.
-- `--total-cycles`: The total number of cycles. If this is larger than the sequences in the samples, shorter samples will be filled with Ns.
+- `--total-cycles`: The total number of cycles. Only used when it is larger than the total derived from the sample sheet (a smaller value is ignored); shorter samples are then filled with Ns.
 - `--interop-dir`: Path to the InterOp directory where `IndexMetricsOut.bin` is written (default: `<output-path>/InterOp`).
-- `--instrument`: The type of Illumina instrument, which will determine the type of outputs and folder structure. _Please, be aware that only the NovaSeqXPlus is currently supported._
+- `--instrument`: The type of Illumina instrument: `NovaSeqXPlus` (default), `MiSeq` or `NextSeq2000`. _Only `NovaSeqXPlus` is currently supported; the other values are rejected._
 - `--flowcell-id`: Flowcell name (the full run folder name, e.g. `20260310_LM43899_0385_A12GGASZR5`) to use as the run id in the `RunInfo.xml` file, instead of generating one; its last part is written in the `Flowcell` element and its date segment (with the time fixed to midnight) in the `Date` element (default: derived from the read names, date set to the current time).
 - `--threads`: Number of threads used by dnaio to read/write files. Default is 0, which corresponds to a single thread.
-- `--force`: Force overwrite of existing files in the output directory (the `Data` and `InterOp` folders are cleaned up when re-running into an existing output).
+- `--force`: Force overwrite of existing files in the output directory. When `<output-path>/Data` already exists, the `Data` folder and the InterOp folder are cleaned up first; with a custom `--interop-dir`, only its `IndexMetricsOut.bin` is removed.
+
+## Outputs
+
+The output directory receives the BCL structure under `Data/`, `RunInfo.xml`, `RunParameters.xml`, and a copy of the sample sheet as `SampleSheet.csv` (skipped with a warning when one already exists there).
 
 ## InterOp Output
 

@@ -34,12 +34,12 @@ biomate nspector \
 - `--threads`: Rust engine: files scanned in parallel (default `0` = one per available core). Python engine: extra decompression threads per file. The Rust engine also decompresses each gzip file on its own thread, ahead of parsing, and reads multi-member gzip (as written by BCL Convert).
 - `--spatial-bin-size`: width of the spatial bins in read-name X/Y coordinate units (default: `2000`). Raise it if the report gets large.
 - `--spatial-cycle-window`: spatial bins are counted per window of this many cycles (default: `10`), so the spatial map can follow a cycle range dragged on the N per cycle chart.
-- `--min-qual`: Phred score below which a called (non-N) base counts as low quality (default: `20`). See [Low-quality companion](#low-quality-companion).
-- `--warn-rate`, `--fail-rate`: thresholds for the [anomaly flags](#anomaly-flags) (defaults: `0.01` and `0.05`).
-- `--run-folder`: an Illumina run folder. Nspector reads per-tile cluster density, %PF, %≥Q30, % occupied and phasing rates from its `InterOp/` files and plots them against the N rate; it also plots the intensity, spot width (focus), PhiX error rate and no-call rate at each cycle under the N per cycle chart. Metrics the instrument did not write are left out. Needs the optional extra: `pip install 'biomate[interop]'`.
-- `--fail-on WARN|FAIL`: exit with code 3, after every output is written, when the worst anomaly flag is at least this status. Without it the exit code is 0 whatever the flags, so a pipeline can gate on the run status.
+- `--min-qual`: Phred score (0–93) below which a called (non-N) base counts as low quality (default: `20`). See [Low-quality companion](#low-quality-companion).
+- `--warn-rate`, `--fail-rate`: thresholds for the [anomaly flags](#anomaly-flags) (defaults: `0.01` and `0.05`); they must satisfy `0 < --warn-rate <= --fail-rate <= 1`.
+- `--run-folder`: an Illumina run folder, which must contain an `InterOp/` subfolder. Nspector reads per-tile cluster density, %PF, %≥Q30, % occupied and phasing rates from its `InterOp/` files and plots them against the N rate; it also plots the intensity, spot width (focus), PhiX error rate and no-call rate at each cycle under the N per cycle chart. Metrics the instrument did not write are left out. Needs the optional extra: `pip install 'biomate[interop]'`.
+- `--fail-on WARN|FAIL`: exit with code 3, after every output is written, when the worst anomaly flag is at least this status. Without it the exit code is 0 whatever the flags, so a pipeline can gate on the run status. If no input file is usable, nothing is written and the exit code is 0 even with `--fail-on`.
 - `--raw`: also write every N-containing read (lane, tile, X, Y, N cycles) as Parquet parts under `<stem>_n_sequences/`. This output grows with the number of reads and always uses the Python engine.
-- `--png`: also write the static PNG charts for each input file.
+- `--png`: also write the static PNG charts for each input file that has at least one read with an N.
 - `--no-html`: skip the HTML report.
 - `--no-multiqc`: skip the MultiQC files.
 
@@ -91,7 +91,7 @@ Flags appear:
 - as orange outlines on the tile map and the tile × cycle heatmap;
 - under the flag table, as **What removing them would cost**: the reads given up and the share of all N bases removed by excluding the flagged tiles at demultiplexing, and by trimming dark cycles that run to the end of a read. Dark cycles inside a read cannot be left out by the demultiplexer and stay in the reads as N;
 - in a status column of the worst-tiles table;
-- in `nspector_summary.json`, with the run status (worst flag), the written verdict, flag counts, N rates per read, the removal costs and the parameters used;
+- in `nspector_summary.json` (see [Summary JSON](#summary-json));
 - in MultiQC, as an `N status` column (worst flag on the sample or its lanes) and a flags table.
 
 ### Project, sample, lane and read
@@ -164,7 +164,7 @@ Each table is written as `nspector_<table>.parquet`:
 | `sample_cycle` | project, sample, read, lane, cycle (dense) | `n`, `lowq`, `total`, `n_rate`, `lowq_rate` |
 | `tile_summary` | project, sample, read, lane, tile | `surface`, `swath`, `segment`, `n`, `n_bases`, `lowq`, `total`, `bases`, `n_rate`, `n_base_rate`, `lowq_rate`, `mean_n_per_affected_read` |
 | `tile_cycle` | project, read, lane, tile, cycle (summed over the project's samples; only cycles with an N or a low-Q base) | `n`, `lowq`, `total` (the project's reads on the tile), `n_rate`, `lowq_rate` |
-| `n_per_read` | project, sample, read, lane, number of N bases | `n_reads` |
+| `n_per_read` | project, sample, read, lane, `n_count` (number of N bases in the read) | `n_reads` |
 | `spatial` | project, read, lane, tile, `cycle` (first cycle of the window), `x_bin`, `y_bin` (summed over samples; bin = coordinate // `--spatial-bin-size`) | `n_bases` |
 | `n_shape` | project, sample, read, lane, `longest_run`, `first_n`, `all_n` | `n_reads` |
 | `flags` | one row per flag | `status`, `kind`, `project`, `sample` (only for `sample` flags), `read`, `lane`, `tile`, `cycle`, `rate`, `z`, `detail` |
@@ -252,12 +252,31 @@ nspector_results/
 │   ├── nspector_tile_rate_mqc.json
 │   ├── nspector_cycle_rate_mqc.json
 │   ├── nspector_general_stats_mqc.tsv
-│   └── nspector_flags_mqc.json
+│   ├── nspector_read_loss_mqc.json
+│   ├── nspector_verdict_mqc.html
+│   └── nspector_flags_mqc.json           # only when there are flags
 └── individual_tiles/                     # only with --png
     └── SampleA_S1_L001_R1_001_tile_1101.png
 ```
 
-With `--png`, each input file also gets `<stem>_n_count_distribution.png` and `<stem>_n_distribution_per_cycle_and_tile.png`.
+With `--png`, each input file with at least one N read also gets `<stem>_n_count_distribution.png` and `<stem>_n_distribution_per_cycle_and_tile.png`.
+
+## Summary JSON
+
+`nspector_summary.json` holds the run in one object, for pipelines and LIMS:
+
+| Key | Content |
+| --- | --- |
+| `status` | worst flag: `FAIL`, `WARN`, or `PASS` when there are no flags |
+| `verdict` | the written verdict shown at the top of the report |
+| `flags` | `{"FAIL": n, "WARN": n}` |
+| `flags_by_kind` | number of flags per kind |
+| `flagged_n_share` | share of all N bases on a flagged lane, tile, cell or dark cycle |
+| `reads`, `reads_with_n` | total reads and reads with at least one N |
+| `n_rate`, `n_per_base` | share of reads with an N, and share of bases that are N |
+| `by_read` | `{"<read>": {"n_rate": ..., "n_per_base": ...}}` |
+| `removal_costs` | reads given up and N share removed by excluding flagged tiles or trimming dark cycles |
+| `parameters` | the options used |
 
 ## Read header format
 
