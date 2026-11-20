@@ -75,9 +75,9 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     parser.add_argument(
         "--instrument",
         type=str,
-        choices=["NovaSeqXPlus", "MiSeq", "NextSeq2000"],
         default="NovaSeqXPlus",
-        help="The type of Illumina instrument, which will determine the type of outputs and folder structure.",
+        help="Instrument label written to RunParameters.xml (default: NovaSeqXPlus). "
+        "The output always uses the NovaSeq X Plus file layout.",
     )
     parser.add_argument(
         "--flowcell-id",
@@ -115,11 +115,9 @@ def clean_directory(directory: pathlib.Path) -> None:
 
 def validate_args(args) -> argparse.Namespace:
     """Validate the command line arguments."""
-    # Checked first, so that an unsupported run never reaches the --force cleanup
-    if args.instrument != "NovaSeqXPlus":
-        raise argparse.ArgumentTypeError(
-            "Only the 'NovaSeqXPlus' instrument is currently supported."
-        )
+    # Checked first, so that an invalid run never reaches the --force cleanup
+    if not args.instrument.strip():
+        raise argparse.ArgumentTypeError("--instrument must not be empty.")
     if not args.input_path.is_dir():
         raise argparse.ArgumentTypeError(
             f"Input path {args.input_path} is not a valid directory."
@@ -557,7 +555,6 @@ def parse_fastq_groups(
     masks_table: dict,
     tempdir: pathlib.Path,
     threads: int = 0,
-    instrument: str = "NovaSeqXPlus",
     index_counts: dict | None = None,
     index_lookup: dict | None = None,
     cycles_dict: dict | None = None,
@@ -608,9 +605,8 @@ def parse_fastq_groups(
         logging.debug("   Reads buffer correctly dumped!")
         return defaultdict(list)
 
-    if instrument == "NovaSeqXPlus":
-        tempdir = tempdir.joinpath(lane)
-        tempdir.mkdir(parents=True, exist_ok=True)
+    tempdir = tempdir.joinpath(lane)
+    tempdir.mkdir(parents=True, exist_ok=True)
 
     # Define the schema of the avro file for the positions
     avro_schema = parse_schema(
@@ -1038,16 +1034,11 @@ def preprocess_and_write_bcls(
     tiles_path: pathlib.Path,
     total_cycles: int,
     threads: int = 0,
-    instrument: str = "NovaSeqXPlus",
     quality_map: dict = {0: "00", 9: "01", 24: "10", 40: "11"},
     pattern_suffix: str = f"[1-8]_[1-{SURFACE_COUNT}][1-{SWATH_COUNT}][0-{str(TILE_COUNT)[0]}][0-9].fastq.gz",
 ) -> None:
     """Process the tile files and generate the final BCL file"""
-    pattern = (
-        f"{lane}/{pattern_suffix}"
-        if instrument == "NovaSeqXPlus"
-        else f"{lane[-1]}_*.fastq.gz"
-    )
+    pattern = f"{lane}/{pattern_suffix}"
 
     # Get the list of all tile files, and group them by tile id
     tiles_files = defaultdict(list)
@@ -1455,7 +1446,6 @@ def main(args: argparse.Namespace) -> None:
                     masks_table,
                     tempdir,
                     args.threads,
-                    args.instrument,
                     None if is_undetermined else index_counts,
                     index_lookup if is_undetermined else None,
                     cycles_dict if is_undetermined else None,
@@ -1484,7 +1474,6 @@ def main(args: argparse.Namespace) -> None:
                 tempdir,
                 total_cycles,
                 args.threads,
-                args.instrument,
             )
 
             tiles_by_lane.setdefault(lane, set()).update(

@@ -261,10 +261,16 @@ class TestValidateArgs:
         assert not (args.output_path / "Data").exists()
         assert (outside / "keep.txt").exists()
 
-    def test_unsupported_instrument_rejected_before_cleanup(self, tmp_path):
-        """An unsupported instrument fails before --force deletes anything."""
+    def test_any_instrument_label_accepted(self, tmp_path):
+        """The instrument is only a label: other names are accepted."""
+        args = self._make_args(tmp_path)
+        args.instrument = "NextSeq2000"
+        assert validate_args(args) is args
+
+    def test_empty_instrument_rejected_before_cleanup(self, tmp_path):
+        """An empty instrument label fails before --force deletes anything."""
         args = self._make_args(tmp_path, force=True)
-        args.instrument = "MiSeq"
+        args.instrument = " "
         (args.output_path / "Data").mkdir(parents=True)
         with pytest.raises(argparse.ArgumentTypeError):
             validate_args(args)
@@ -657,7 +663,6 @@ def test_parse_fastq_groups_uses_only_r1_r2_with_extra_files(tmp_path, monkeypat
         masks_table=masks_table,
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
     )
 
     assert len(reader_calls) == 1
@@ -722,7 +727,6 @@ def test_parse_fastq_groups_skips_when_no_r1_r2(tmp_path, monkeypatch):
         masks_table=masks_table,
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
     )
 
     assert dict(result) == {}
@@ -1029,7 +1033,6 @@ def test_parse_fastq_groups_accumulates_index_counts(tmp_path, monkeypatch):
         masks_table=masks_table,
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
         index_counts=index_counts,
     )
 
@@ -1126,7 +1129,6 @@ def test_parse_fastq_groups_without_index_counts_unchanged(tmp_path, monkeypatch
         masks_table=masks_table,
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
     )
 
     assert "1101" in result
@@ -1464,7 +1466,6 @@ def test_parse_fastq_groups_undetermined_resolves_recipe_from_index(
         masks_table={},
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
         index_counts=index_counts,
         index_lookup=INDEXED_RECIPES,
         cycles_dict={"R1": 2, "I1": 4, "I2": 4, "R2": 2},
@@ -1520,7 +1521,6 @@ def test_parse_fastq_groups_undetermined_falls_back_for_unknown_index(
         masks_table={},
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
         index_lookup=INDEXED_RECIPES,
         cycles_dict={"R1": 2, "I1": 4, "I2": 4, "R2": 2},
     )
@@ -1552,7 +1552,6 @@ def test_parse_fastq_groups_undetermined_single_end(tmp_path, monkeypatch, caplo
         masks_table={},
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
         index_counts=index_counts,
         index_lookup={
             ("L001", "ACGT", ""): {
