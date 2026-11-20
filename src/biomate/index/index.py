@@ -26,7 +26,7 @@ _KERNEL_CHUNK = 100_000
 
 def _detect_input_type(filename: str) -> str | None:
     """Detect the input file type based on filename."""
-    if re.match(r".*\.f(ast)?q(.gz)$", filename):
+    if re.match(r".*\.f(ast)?q(\.gz)?$", filename):
         return "FASTQ"
     elif re.match(r".*\.f(ast)?a(.gz)?$", filename):
         return "FASTA"
@@ -113,15 +113,15 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     Validate the command line arguments.
     """
     if args.min_count < 1:
-        raise ValueError("--min-count must be >= 1.")
+        raise argparse.ArgumentTypeError("--min-count must be >= 1.")
     if args.threads < 1:
-        raise ValueError("--threads must be >= 1.")
+        raise argparse.ArgumentTypeError("--threads must be >= 1.")
     for path in args.input:
         if not path.is_file():
-            raise FileNotFoundError(f"Input file {path} does not exist.")
+            raise argparse.ArgumentTypeError(f"Input file {path} does not exist.")
     names = [_output_name(path) for path in args.input]
     if len(set(names)) != len(names):
-        raise ValueError(
+        raise argparse.ArgumentTypeError(
             "Input files must have distinct names: per-file results would overwrite each other."
         )
     return args

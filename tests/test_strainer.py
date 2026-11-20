@@ -440,6 +440,15 @@ class TestValidateArgs:
         with pytest.raises(argparse.ArgumentTypeError, match="[Ss]ample"):
             validate_args(args)
 
+    def test_file_without_lane_raises(self, tmp_path):
+        """A non-lane-split undetermined file is a usage error naming the file."""
+        args = self._make_args(tmp_path)
+        (args.input_path / "Undetermined_S0_R1_001.fastq.gz").write_bytes(b"")
+        with pytest.raises(
+            argparse.ArgumentTypeError, match="Undetermined_S0_R1_001.fastq.gz"
+        ):
+            validate_args(args)
+
 
 # ---------------------------------------------------------------------------
 # main — end to end

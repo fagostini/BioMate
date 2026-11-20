@@ -114,9 +114,9 @@ class TestValidateArgs:
         assert result is args
 
     def test_nonexistent_input_raises(self, tmp_path):
-        """A path that does not exist raises FileNotFoundError."""
+        """A path that does not exist raises ArgumentTypeError (usage error)."""
         args = self._make_args(tmp_path / "missing.fastq")
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(argparse.ArgumentTypeError):
             validate_args(args)
 
     def test_duplicate_input_names_raise(self, tmp_path):
@@ -126,7 +126,16 @@ class TestValidateArgs:
             (tmp_path / d / "s.fastq").write_text("")
         args = self._make_args(tmp_path / "a" / "s.fastq")
         args.input.append(tmp_path / "b" / "s.fastq")
-        with pytest.raises(ValueError):
+        with pytest.raises(argparse.ArgumentTypeError):
+            validate_args(args)
+
+    def test_min_count_zero_raises(self, tmp_path):
+        """--min-count 0 raises ArgumentTypeError (usage error, no traceback)."""
+        f = tmp_path / "sample.fastq"
+        f.write_text("")
+        args = self._make_args(f)
+        args.min_count = 0
+        with pytest.raises(argparse.ArgumentTypeError, match="min-count"):
             validate_args(args)
 
 

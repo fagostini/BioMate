@@ -13,6 +13,9 @@ from biomate.headers import count_header_indexes
 from biomate.samplesheet import read_section
 from biomate.setup import setup_logging
 
+# Lane token of a lane-split file name, e.g. Undetermined_S0_L001_R1_001
+LANE_IN_NAME = regex.compile(r"_(L\d{3})_")
+
 # Module-level constants
 POLY_G_ARTIFACT = "GGGG"  # Sequence pattern indicating likely sequencing errors
 RESULTS_SCHEMA = {
@@ -36,9 +39,16 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise argparse.ArgumentTypeError(
             f"Input path {args.input_path} is not a valid directory."
         )
-    if not any(args.input_path.glob("**/Undetermined*R1*.fastq.gz")):
+    undetermined = list(args.input_path.glob("**/Undetermined*R1*.fastq.gz"))
+    if not undetermined:
         raise argparse.ArgumentTypeError(
             f"No FASTQ files found in the input directory {args.input_path}."
+        )
+    no_lane = [f.name for f in undetermined if not LANE_IN_NAME.search(f.name)]
+    if no_lane:
+        raise argparse.ArgumentTypeError(
+            "Undetermined files must be split by lane (*_*_LXXX_*); "
+            f"no lane in: {', '.join(sorted(no_lane))}."
         )
     if not (args.input_path / "SampleSheet.csv").is_file() and not args.sample_sheet:
         raise argparse.ArgumentTypeError(
@@ -162,8 +172,8 @@ def top_undetermined(
 ) -> list[dict[str, str | int | float]]:
     """Rows of the most frequent header indexes (``counts``) of one file."""
     # Extract lane information from the file name
-    lane = undetermined_file_path.name.split("_")[2]
-    if not regex.match(r"^L\d{3}$", lane):
+    match = LANE_IN_NAME.search(undetermined_file_path.name)
+    if not match:
         raise ValueError(
             f"Invalid lane format in file name: {undetermined_file_path.name}. Expected format: *_*_LXXX_*"
         )
@@ -175,7 +185,7 @@ def top_undetermined(
 
     return [
         {
-            "Lane": lane,
+            "Lane": match.group(1),
             "Undetermined_Index": idx,
             "Count": count,
         }

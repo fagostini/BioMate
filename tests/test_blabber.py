@@ -171,6 +171,29 @@ class TestValidateArgs:
         with pytest.raises(argparse.ArgumentTypeError, match="[Oo]utput"):
             validate_args(args)
 
+    def test_fastq_ext_with_sample_sheet_requires_output(self, tmp_path):
+        """fastq-ext with --sample-sheet but no --output raises ArgumentTypeError."""
+        ss = tmp_path / "ss.csv"
+        ss.write_text("")
+        args = self._base_args(format="fastq-ext", sample_sheet=ss, output=None)
+        with pytest.raises(argparse.ArgumentTypeError, match="[Oo]utput"):
+            validate_args(args)
+
+    def test_sample_sheet_switches_text_to_fastq_ext(self, tmp_path):
+        """--sample-sheet with the default text format switches to fastq-ext."""
+        ss = tmp_path / "ss.csv"
+        ss.write_text("")
+        args = self._base_args(sample_sheet=ss, output=tmp_path)
+        assert validate_args(args).format == "fastq-ext"
+
+    def test_sample_sheet_with_fasta_raises(self, tmp_path):
+        """--sample-sheet with --format fasta raises ArgumentTypeError."""
+        ss = tmp_path / "ss.csv"
+        ss.write_text("")
+        args = self._base_args(format="fasta", sample_sheet=ss, output=tmp_path)
+        with pytest.raises(argparse.ArgumentTypeError, match="fastq"):
+            validate_args(args)
+
 
 # ---------------------------------------------------------------------------
 # partition_tiles_by_lane / assign_tiles_to_samples
