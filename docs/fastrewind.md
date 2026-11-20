@@ -15,7 +15,7 @@ The minimal command is `biomate fastrewind --input-path <PATH>`. This will searc
 - `--input-path` (required): Path to the input flowcell directory containing demultiplexed FASTQ files.
 - `--output-path`: Path to the output directory where the BCL structure will be created (default: current directory).
 - `--sample-sheet`: Path to the Sample Sheet file. If not provided, the script will look for SampleSheet.csv in the input directory.
-- `--total-cycles`: The total number of cycles. Only used when it is larger than the total derived from the sample sheet (a smaller value is ignored); shorter samples are then filled with Ns.
+- `--total-cycles`: The total number of cycles. Only used when it is larger than the total derived from the sample sheet (a smaller value is ignored); the extra cycles are then written to the BCL data as no-calls after the last read. They are not added to `RunInfo.xml`, `RunParameters.xml` or the copied sample sheet, so bcl-convert ignores them and the demultiplexed reads keep the sample-sheet lengths.
 - `--interop-dir`: Path to the InterOp directory where `IndexMetricsOut.bin` is written (default: `<output-path>/InterOp`).
 - `--instrument`: The type of Illumina instrument: `NovaSeqXPlus` (default), `MiSeq` or `NextSeq2000`. _Only `NovaSeqXPlus` is currently supported; the other values are rejected._
 - `--flowcell-id`: Flowcell name (the full run folder name, e.g. `20260310_LM43899_0385_A12GGASZR5`) to use as the run id in the `RunInfo.xml` file, instead of generating one; its last part is written in the `Flowcell` element and its date segment (with the time fixed to midnight) in the `Date` element (default: derived from the read names, date set to the current time).
