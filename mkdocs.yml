@@ -14,5 +14,6 @@ nav:
     - Strainer: strainer.md
     - Triage: triage.md
     - Waif: waif.md
+    - Web Interface: web-interface.md
 theme:
   name: readthedocs

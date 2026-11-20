@@ -261,10 +261,16 @@ class TestValidateArgs:
         assert not (args.output_path / "Data").exists()
         assert (outside / "keep.txt").exists()
 
-    def test_unsupported_instrument_rejected_before_cleanup(self, tmp_path):
-        """An unsupported instrument fails before --force deletes anything."""
+    def test_any_instrument_label_accepted(self, tmp_path):
+        """The instrument is only a label: other names are accepted."""
+        args = self._make_args(tmp_path)
+        args.instrument = "NextSeq2000"
+        assert validate_args(args) is args
+
+    def test_empty_instrument_rejected_before_cleanup(self, tmp_path):
+        """An empty instrument label fails before --force deletes anything."""
         args = self._make_args(tmp_path, force=True)
-        args.instrument = "MiSeq"
+        args.instrument = " "
         (args.output_path / "Data").mkdir(parents=True)
         with pytest.raises(argparse.ArgumentTypeError):
             validate_args(args)
@@ -657,7 +663,6 @@ def test_parse_fastq_groups_uses_only_r1_r2_with_extra_files(tmp_path, monkeypat
         masks_table=masks_table,
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
     )
 
     assert len(reader_calls) == 1
@@ -666,8 +671,7 @@ def test_parse_fastq_groups_uses_only_r1_r2_with_extra_files(tmp_path, monkeypat
     assert "_R2_" in reader_calls[0][0] or "_R2_" in reader_calls[0][1]
     assert all("_I1_" not in name and "_I2_" not in name for name in reader_calls[0])
 
-    assert "2101" in result
-    assert (1001, 1002) in result["2101"]
+    assert ("2101", 1001, 1002) in result.rows()
 
 
 def test_parse_fastq_groups_skips_when_no_r1_r2(tmp_path, monkeypatch):
@@ -722,10 +726,9 @@ def test_parse_fastq_groups_skips_when_no_r1_r2(tmp_path, monkeypatch):
         masks_table=masks_table,
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
     )
 
-    assert dict(result) == {}
+    assert result.is_empty()
 
 
 # ---------------------------------------------------------------------------
@@ -1029,7 +1032,6 @@ def test_parse_fastq_groups_accumulates_index_counts(tmp_path, monkeypatch):
         masks_table=masks_table,
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
         index_counts=index_counts,
     )
 
@@ -1039,7 +1041,18 @@ def test_parse_fastq_groups_accumulates_index_counts(tmp_path, monkeypatch):
     }
 
 
-def test_parse_fastq_groups_without_index_counts_unchanged(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "tile, x, y",
+    [
+        ("1101", 1001, 1002),
+        # Real instrument positions: X above the UInt16 range, tile outside
+        # the simulated layout
+        ("2498", 78484, 56394),
+    ],
+)
+def test_parse_fastq_groups_without_index_counts_unchanged(
+    tmp_path, monkeypatch, tile, x, y
+):
     """Omitting index_counts keeps the previous behaviour (no accumulation)."""
 
     class FakeRead:
@@ -1087,7 +1100,7 @@ def test_parse_fastq_groups_without_index_counts_unchanged(tmp_path, monkeypatch
     sample_name = "Sample_1_S1_L001_001"
     tempdir = tmp_path / "lane_tmp"
     tempdir.mkdir(parents=True)
-    read_name = "INST:1:FLOWCELL:1:1101:1001:1002 1:N:0:ACGT+TGCA"
+    read_name = f"INST:1:FLOWCELL:1:{tile}:{x}:{y} 1:N:0:ACGT+TGCA"
     records = [
         (
             FakeRead(read_name, "AC", "II"),
@@ -1126,11 +1139,9 @@ def test_parse_fastq_groups_without_index_counts_unchanged(tmp_path, monkeypatch
         masks_table=masks_table,
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
     )
 
-    assert "1101" in result
-    assert (1001, 1002) in result["1101"]
+    assert result.rows() == [(tile, x, y)]
 
 
 # ---------------------------------------------------------------------------
@@ -1464,7 +1475,6 @@ def test_parse_fastq_groups_undetermined_resolves_recipe_from_index(
         masks_table={},
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
         index_counts=index_counts,
         index_lookup=INDEXED_RECIPES,
         cycles_dict={"R1": 2, "I1": 4, "I2": 4, "R2": 2},
@@ -1482,8 +1492,8 @@ def test_parse_fastq_groups_undetermined_resolves_recipe_from_index(
     assert by_name[read_a][1] == "I" * 18
     assert by_name[read_b][1] == "I" * 12
     # Positions are returned like for regular sample groups
-    assert (1001, 1002) in result["1101"]
-    assert (1003, 1004) in result["1102"]
+    assert ("1101", 1001, 1002) in result.rows()
+    assert ("1102", 1003, 1004) in result.rows()
     assert caplog.text == ""
 
 
@@ -1520,7 +1530,6 @@ def test_parse_fastq_groups_undetermined_falls_back_for_unknown_index(
         masks_table={},
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
         index_lookup=INDEXED_RECIPES,
         cycles_dict={"R1": 2, "I1": 4, "I2": 4, "R2": 2},
     )
@@ -1552,7 +1561,6 @@ def test_parse_fastq_groups_undetermined_single_end(tmp_path, monkeypatch, caplo
         masks_table={},
         tempdir=tempdir,
         threads=0,
-        instrument="NovaSeqXPlus",
         index_counts=index_counts,
         index_lookup={
             ("L001", "ACGT", ""): {
@@ -1575,7 +1583,7 @@ def test_parse_fastq_groups_undetermined_single_end(tmp_path, monkeypatch, caplo
     # Only the N-padded I1 is appended in single-end mode
     assert [seq for _, seq, _ in written] == ["AC" + "N" * 10]
     assert [qual for _, _, qual in written] == ["I" * 12]
-    assert (1001, 1002) in result["1101"]
+    assert ("1101", 1001, 1002) in result.rows()
     assert caplog.text == ""
 
 

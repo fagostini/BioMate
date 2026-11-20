@@ -253,10 +253,9 @@ MODULES: List[Dict[str, Any]] = [
             },
             {
                 "label": "Instrument",
-                "param_type": "select",
+                "param_type": "text",
                 "default": "NovaSeqXPlus",
-                "options": ["NovaSeqXPlus", "MiSeq", "NextSeq2000"],
-                "help": "Sequencing instrument type",
+                "help": "Instrument label written to RunParameters.xml (the output always uses the NovaSeq X Plus layout)",
                 "form_name": "instrument",
                 "cli_name": "instrument",
             },

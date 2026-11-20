@@ -13,18 +13,20 @@ There are two main commands in this module:
 
 The command `biomate dirstruct extract` allows you to extract the directory structure of a specified directory. This is useful, in combination with the `create` command, to recreate the structure without copying the contents.
 
-To run the extraction, the command is `biomate dirstruct extract --source-path <SOURCE_PATH> --output-file <OUTPUT_FILE>`, where `<SOURCE_PATH>` is the path to the directory you want to extract, and `<OUTPUT_FILE>` is the path to the output file where the directory structure will be saved. If the output file is not specified, the structure will be printed to the standard output.
+To run the extraction, the command is `biomate dirstruct extract --source-path <SOURCE_PATH> --output-file <OUTPUT_FILE>`, where `<SOURCE_PATH>` is the path to the directory you want to extract, and `<OUTPUT_FILE>` is the path to the output file where the directory structure will be saved. If the output file is not specified, the structure will be printed to the standard output. An existing output file is overwritten.
 
 #### Output File Format
 
-The output file contains a list of relative paths to directories and files, in top-down hierarchical order, with each line representing either a directory or a file. By default, a tab character is used to separate the path component from a tag indicating whether the path is a directory ('dir') or a file ('file'). For example:
+The output file contains a list of paths to directories and files, in top-down hierarchical order, with each line representing either a directory or a file. Paths are relative to the parent of `<SOURCE_PATH>`, so every line starts with the name of the source directory itself, and directories have no trailing `/`. By default, a tab character is used to separate the path component from a tag indicating whether the path is a directory ('dir') or a file ('file'). For example, `biomate dirstruct extract --source-path data --output-file structure.tsv` writes:
 
 ```text
-path/to/directory/    dir
-path/to/directory/file.txt    file
-path/to/another/directory/    dir
-path/to/another/directory/file2.txt    file
+data	dir
+data/file.txt	file
+data/sub	dir
+data/sub/file2.txt	file
 ```
+
+File lines are indented by two spaces on the standard output, and in the output file when `--no-tags` is used; `create` strips this indentation, so either form can be fed back to it.
 
 The tab-separated tags are optional and can be omitted by using the `--no-tags` option. In this case, the output will simply be a list of relative paths without any additional information. However, the tags can be useful when regenerating the directory structure to distinguish between directories and files (see below).
 
@@ -42,4 +44,4 @@ The `create` command will only _touch_ the generated files, meaning it will crea
 
 The input file should contain a list of relative paths to directories and files, similar to the output format of the `extract` command. Each line should represent either a directory or a file, with an optional tab character separating the path from a tag indicating whether it is a directory ('dir') or a file ('file'). As an example, please refer to the output file format described above.
 
-If the tags are present, the `create` command will use them to determine whether to create a directory or a file at each path. If the tags are omitted, the command will assume that all paths without an extension are directories and all paths with an extension are files. In this case, if a file cannot be create, for whatever reason, the module will attempt to create the parent directories first, and then create the file.
+If the tags are present, the `create` command will use them to determine whether to create a directory or a file at each path. If the tags are omitted, the command will assume that all paths without an extension are directories and all paths with an extension are files (`.DS_Store` is also treated as a file). Missing parent directories of a file are always created first.

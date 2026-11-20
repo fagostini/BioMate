@@ -231,7 +231,16 @@ def validate_args(args) -> argparse.Namespace:
         raise argparse.ArgumentTypeError(
             "The number of tainted sequences must be a positive integer."
         )
-    if args.format == "fastq":
+    if args.sample_sheet:
+        # A sample sheet only makes sense for FASTQ output: default to the
+        # extended headers rather than silently ignoring the sheet
+        if args.format == "text":
+            args.format = "fastq-ext"
+        elif args.format == "fasta":
+            raise argparse.ArgumentTypeError(
+                "--sample-sheet needs --format fastq or fastq-ext."
+            )
+    if args.format in ("fastq", "fastq-ext"):
         if args.sample_sheet:
             if not args.sample_sheet.is_file():
                 raise argparse.ArgumentTypeError(

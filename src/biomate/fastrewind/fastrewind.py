@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 from collections import OrderedDict, defaultdict
 from datetime import datetime
 import numpy
-from itertools import product, batched
+from itertools import batched
 import dnaio
 import polars
 import regex as re
@@ -26,6 +26,9 @@ TILE_HEIGHT = 160  # 2879
 SURFACE_COUNT = 2
 SWATH_COUNT = 4
 TILE_COUNT = 16
+# Cluster positions of a tile, as read-name coordinates: stored sparse (one row
+# per cluster), so memory follows the number of clusters, not the tile area
+POSITIONS_SCHEMA = {"tile": polars.String, "x": polars.UInt32, "y": polars.UInt32}
 # Version of the InterOp IndexMetricsOut.bin binary format (version 2 is the
 # one written by current instruments, version 1 the one documented in the
 # bcl2fastq2 software guide)
@@ -75,9 +78,9 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     parser.add_argument(
         "--instrument",
         type=str,
-        choices=["NovaSeqXPlus", "MiSeq", "NextSeq2000"],
         default="NovaSeqXPlus",
-        help="The type of Illumina instrument, which will determine the type of outputs and folder structure.",
+        help="Instrument label written to RunParameters.xml (default: NovaSeqXPlus). "
+        "The output always uses the NovaSeq X Plus file layout.",
     )
     parser.add_argument(
         "--flowcell-id",
@@ -115,11 +118,9 @@ def clean_directory(directory: pathlib.Path) -> None:
 
 def validate_args(args) -> argparse.Namespace:
     """Validate the command line arguments."""
-    # Checked first, so that an unsupported run never reaches the --force cleanup
-    if args.instrument != "NovaSeqXPlus":
-        raise argparse.ArgumentTypeError(
-            "Only the 'NovaSeqXPlus' instrument is currently supported."
-        )
+    # Checked first, so that an invalid run never reaches the --force cleanup
+    if not args.instrument.strip():
+        raise argparse.ArgumentTypeError("--instrument must not be empty.")
     if not args.input_path.is_dir():
         raise argparse.ArgumentTypeError(
             f"Input path {args.input_path} is not a valid directory."
@@ -557,7 +558,6 @@ def parse_fastq_groups(
     masks_table: dict,
     tempdir: pathlib.Path,
     threads: int = 0,
-    instrument: str = "NovaSeqXPlus",
     index_counts: dict | None = None,
     index_lookup: dict | None = None,
     cycles_dict: dict | None = None,
@@ -608,9 +608,8 @@ def parse_fastq_groups(
         logging.debug("   Reads buffer correctly dumped!")
         return defaultdict(list)
 
-    if instrument == "NovaSeqXPlus":
-        tempdir = tempdir.joinpath(lane)
-        tempdir.mkdir(parents=True, exist_ok=True)
+    tempdir = tempdir.joinpath(lane)
+    tempdir.mkdir(parents=True, exist_ok=True)
 
     # Define the schema of the avro file for the positions
     avro_schema = parse_schema(
@@ -665,7 +664,7 @@ def parse_fastq_groups(
         logging.warning(
             f"No R1/R2 FASTQ files found for sample '{name}' in lane '{lane}'. Skipping sample group."
         )
-        return defaultdict(set)
+        return empty_positions()
 
     with dnaio.open(*sorted(filenames), open_threads=threads) as reader:
         # Procedure for single-end reads
@@ -793,44 +792,38 @@ def parse_fastq_groups(
         logging.warning(
             f"No readable records found for sample '{name}' in lane '{lane}'. Skipping sample group."
         )
-        return defaultdict(set)
+        return empty_positions()
 
-    dt = (
+    positions = (
         polars.read_avro(avro_file)
-        .unique()
         .with_columns(
-            [polars.col("x").cast(polars.UInt16), polars.col("y").cast(polars.UInt16)]
+            polars.col("x").cast(polars.UInt32), polars.col("y").cast(polars.UInt32)
         )
+        .unique()
         .sort(["tile", "x", "y"])
-    ).partition_by("tile", as_dict=True, include_key=False)
-
-    tiles_and_locs = defaultdict(set)
-    for k, v in dt.items():
-        tiles_and_locs.setdefault(k[0], set()).update(set(v.rows()))
+    )
 
     logging.debug(
         f"Correctly processed {buffer_counter} clusters from sample '{name}' in lane '{lane}'"
     )
-    return tiles_and_locs
+    return positions
 
 
-def write_filter(filter_path: pathlib.Path, cluster_filter: list) -> None:
-    """Write the filter file."""
+def empty_positions() -> polars.DataFrame:
+    """An empty (tile, x, y) cluster position table."""
+    return polars.DataFrame(schema=POSITIONS_SCHEMA)
+
+
+def write_filter(filter_path: pathlib.Path, cluster_filter) -> None:
+    """Write the filter file (one 0/1 byte per cluster of s.locs)."""
     filter_path.parent.mkdir(exist_ok=True, parents=True)
+    cluster_filter = numpy.asarray(cluster_filter, dtype=numpy.uint8)
     with open(filter_path, "wb") as f_out:
         f_out.write(struct.pack("<III", 0, 3, len(cluster_filter)))
-        f_out.write(bytes(cluster_filter))  # bit 0 is pass or failed filter
+        f_out.write(cluster_filter.tobytes())  # bit 0 is pass or failed filter
 
 
-def encode_loc_bytes(x_pos, y_pos) -> bytes:
-    """Pack the X and Y coordinates into bytes."""
-    # In the read name, the smallest value for X and Y is 1000, so they are
-    # re-scaled in order for them to start from 0, while the division by 10 for
-    # converting them to float (not sure if needed or if the factor is correct)
-    return struct.pack("<ff", (x_pos - 1000) / 10, (y_pos - 1000) / 10)
-
-
-def write_locs(locs_path: pathlib.Path, unique_locs: list) -> None:
+def write_locs(locs_path: pathlib.Path, x_pos, y_pos) -> None:
     """Write the .locs file(s)."""
     locs_path.parent.mkdir(exist_ok=True, parents=True)
     # The locs file format is one 3 Illumina formats(pos, locs, and clocs) that stores position data exclusively.
@@ -841,10 +834,15 @@ def write_locs(locs_path: pathlib.Path, unique_locs: list) -> None:
     #     bytes 13-16: : X coordinate of first cluster (little-endian 32-bit float)
     #     bytes 17-20: : Y coordinate of first cluster (little-endian 32-bit float)
     #     The remaining bytes of the file store the X and Y coordinates of the remaining clusters.
+    # In the read name, the smallest value for X and Y is 1000, so they are
+    # re-scaled in order for them to start from 0, while the division by 10 for
+    # converting them to float (not sure if needed or if the factor is correct)
+    coords = numpy.empty((len(x_pos), 2), dtype="<f4")
+    coords[:, 0] = (numpy.asarray(x_pos, dtype=numpy.float64) - 1000) / 10
+    coords[:, 1] = (numpy.asarray(y_pos, dtype=numpy.float64) - 1000) / 10
     with open(locs_path, "wb") as f_out:
-        f_out.write(struct.pack("<IfI", 1, 1, len(unique_locs)))
-        for x_pos, y_pos in unique_locs:
-            f_out.write(encode_loc_bytes(x_pos, y_pos))
+        f_out.write(struct.pack("<IfI", 1, 1, len(coords)))
+        f_out.write(coords.tobytes())
 
 
 def write_index_metrics(
@@ -1038,16 +1036,11 @@ def preprocess_and_write_bcls(
     tiles_path: pathlib.Path,
     total_cycles: int,
     threads: int = 0,
-    instrument: str = "NovaSeqXPlus",
     quality_map: dict = {0: "00", 9: "01", 24: "10", 40: "11"},
-    pattern_suffix: str = f"[1-8]_[1-{SURFACE_COUNT}][1-{SWATH_COUNT}][0-{str(TILE_COUNT)[0]}][0-9].fastq.gz",
+    pattern_suffix: str = "[0-9]_[0-9]*.fastq.gz",
 ) -> None:
     """Process the tile files and generate the final BCL file"""
-    pattern = (
-        f"{lane}/{pattern_suffix}"
-        if instrument == "NovaSeqXPlus"
-        else f"{lane[-1]}_*.fastq.gz"
-    )
+    pattern = f"{lane}/{pattern_suffix}"
 
     # Get the list of all tile files, and group them by tile id
     tiles_files = defaultdict(list)
@@ -1231,6 +1224,8 @@ def write_run_info_xml(
     tile_names: str | None = None,
     desc: str | None = None,
     flowcell_name: str | None = None,
+    image_width: int = TILE_WIDTH,
+    image_height: int = TILE_HEIGHT,
 ) -> None:
     """Write the RunInfo.xml file."""
     if desc is None:
@@ -1294,7 +1289,7 @@ def write_run_info_xml(
             f_out.write("        </Tiles>\n      </TileSet>\n")
         f_out.write("    </FlowcellLayout>\n")
         f_out.write(
-            f'    <ImageDimensions Width="{TILE_WIDTH}" Height="{TILE_HEIGHT}"/>\n'
+            f'    <ImageDimensions Width="{image_width}" Height="{image_height}"/>\n'
         )
         f_out.write(
             "    <ImageChannels>\n      <Name>blue</Name>\n      <Name>green</Name>\n    </ImageChannels>\n"
@@ -1416,29 +1411,17 @@ def main(args: argparse.Namespace) -> None:
     # Dictionary containing the cluster counts by (lane, tile, sample group)
     # for the InterOp index metrics
     index_counts = defaultdict(int)
-    lanes_filter_dict = dict()
+    # Cluster positions seen on each tile, per lane
+    lane_positions = dict()
     for lane, files in lanes_dict.items():
         logging.info(f"Processing lane '{lane}'")
-        # Create a dictionary of numpy arrays to store the filter information
-        lanes_filter_dict[lane] = {
-            k: numpy.zeros((TILE_WIDTH * 10 + 1, TILE_HEIGHT * 10 + 1), dtype=bool)
-            for k in [
-                "".join(t)
-                for t in product(
-                    [str(x + 1) for x in range(SURFACE_COUNT)],
-                    [str(x + 1) for x in range(SWATH_COUNT)],
-                    [f"{x + 1:02}" for x in range(TILE_COUNT)],
-                )
-            ]
-        }
         # Create a temporary directory where to put all intermediate files
         with tempfile.TemporaryDirectory(delete=True) as tempdir:
             tempdir = pathlib.Path(tempdir)
             logging.debug(
                 f"Created lane temporary folder for reads split by tile at: '{tempdir}'"
             )
-            # Dictionary containing the cluster counts by tile
-            unique_locs_by_tile = defaultdict(set)
+            positions = [empty_positions()]
             for name, filenames in files.items():
                 is_undetermined = name.startswith("Undetermined")
                 if not is_undetermined and name not in masks_table:
@@ -1455,27 +1438,12 @@ def main(args: argparse.Namespace) -> None:
                     masks_table,
                     tempdir,
                     args.threads,
-                    args.instrument,
                     None if is_undetermined else index_counts,
                     index_lookup if is_undetermined else None,
                     cycles_dict if is_undetermined else None,
                 )
 
-                for k, v in tiles_and_locs.items():
-                    logging.debug(f"Populating filter arrays with tile {k}")
-                    # Tile names and coordinates must fit the simulated flowcell
-                    # geometry: only blabber-generated FASTQ files are supported
-                    try:
-                        for coords in v:
-                            lanes_filter_dict[lane][k][coords] = 1
-                    except (KeyError, IndexError) as e:
-                        raise ValueError(
-                            f"FASTQ group '{name}' has a tile or cluster position "
-                            f"(tile {k}) outside the supported flowcell layout. "
-                            "FastRewind only supports FASTQ files generated by "
-                            "'biomate blabber'."
-                        ) from e
-                    unique_locs_by_tile.setdefault(k, set()).update(v)
+                positions.append(tiles_and_locs)
 
             logging.info("Writing (c)BCL files...")
             preprocess_and_write_bcls(
@@ -1484,11 +1452,11 @@ def main(args: argparse.Namespace) -> None:
                 tempdir,
                 total_cycles,
                 args.threads,
-                args.instrument,
             )
 
+            lane_positions[lane] = polars.concat(positions).unique()
             tiles_by_lane.setdefault(lane, set()).update(
-                {x for x in unique_locs_by_tile.keys()}
+                lane_positions[lane].get_column("tile").unique().to_list()
             )
 
     tiles_by_lane = {lane: tiles for lane, tiles in tiles_by_lane.items() if tiles}
@@ -1502,58 +1470,45 @@ def main(args: argparse.Namespace) -> None:
         extract_flowcell_layout(tiles_by_lane)
     )
 
-    # Extract all the detected unique positions on the flowcell
-    unique_positions = polars.DataFrame(schema={"x": polars.UInt16, "y": polars.UInt16})
-    for lane, tiles in lanes_filter_dict.items():
-        for tile, matrix in tiles.items():
-            ones = numpy.nonzero(matrix)
-            unique_positions = unique_positions.vstack(
-                polars.DataFrame(
-                    {"x": ones[0] + 1, "y": ones[1] + 1},
-                    schema={"x": polars.UInt16, "y": polars.UInt16},
-                )
-            ).unique()
-            # unique_positions.update([ (int(x+1), int(y+1)) for x,y in zip(ones[0], ones[1]) ])
-
+    # All the unique positions on the flowcell, shared by every tile (s.locs).
+    # The +1 offset is kept from the former grid layout, so outputs are unchanged
+    shifted = [polars.col("x") + 1, polars.col("y") + 1]
     unique_positions = (
-        unique_positions.unique()
+        polars.concat([p.select(shifted) for p in lane_positions.values()])
+        .unique()
         .sort(["y", "x"])
-        .select(polars.concat_list("x", "y").alias("coords"))
     )
 
     logging.info("Writing LOCS file...")
     # Naming convention: Data/Intensities/s.locs
     write_locs(
         args.output_path.joinpath("Data/Intensities/s.locs"),
-        unique_positions.get_column("coords").to_list(),  # flowcell_unique_locs,
+        unique_positions.get_column("x").to_numpy(),
+        unique_positions.get_column("y").to_numpy(),
     )
 
-    # Write the filter files
+    # Write the filter files: one byte per s.locs position, 1 where the tile
+    # has a cluster. Every lane gets a file for each tile seen in any lane, as
+    # on the instrument (all 0 where the lane has no cluster on that tile)
     logging.info("Writing FILTER files...")
-    for lane, tiles in lanes_filter_dict.items():
-        for tile, matrix in tiles.items():
-            ones = numpy.nonzero(matrix)
-            df = (
-                polars.DataFrame(
-                    {"x": ones[0] + 1, "y": ones[1] + 1},
-                    schema={"x": polars.UInt16, "y": polars.UInt16},
-                )
-                .unique()
-                .select(polars.concat_list("x", "y").alias("filter"))
-            )
-            df = unique_positions.join(
-                df, left_on="coords", right_on="filter", how="full"
-            ).with_columns(
-                polars.when(polars.col("filter").is_null())
-                .then(polars.lit(0))
-                .otherwise(polars.lit(1))
-                .alias("filter")
-            )
+    all_tiles = sorted(set().union(*tiles_by_lane.values()))
+    for lane, positions in lane_positions.items():
+        by_tile = positions.partition_by("tile", as_dict=True)
+        for tile in all_tiles:
+            tile_positions = by_tile.get((tile,), empty_positions())
+            flags = unique_positions.join(
+                tile_positions.select(shifted).with_columns(
+                    polars.lit(1, dtype=polars.UInt8).alias("filter")
+                ),
+                on=["x", "y"],
+                how="left",
+                maintain_order="left",
+            ).get_column("filter")
             write_filter(
                 args.output_path.joinpath(
                     f"Data/Intensities/BaseCalls/{lane}/s_{lane[-1]}_{tile}.filter"
                 ),
-                cluster_filter=df.get_column("filter").to_list(),
+                cluster_filter=flags.fill_null(0).to_numpy(),
             )
 
     logging.info("Writing RunInfo XML file...")
@@ -1567,6 +1522,9 @@ def main(args: argparse.Namespace) -> None:
         tile_names,
         sample_read,
         args.flowcell_id,
+        # At least the simulated tile size, larger when real positions need it
+        max(TILE_WIDTH, int(unique_positions.get_column("x").max() - 1000) // 10 + 1),
+        max(TILE_HEIGHT, int(unique_positions.get_column("y").max() - 1000) // 10 + 1),
     )
 
     write_run_parameters_xml(

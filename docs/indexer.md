@@ -4,14 +4,15 @@ This module allows you to scan one or more FASTQ files, either gzipped or uncomp
 
 ## Usage
 
-The command `biomate index` takes at least two arguments: the path to a FASTQ file (`--input`) and the pattern to search for. The pattern can be a single string or a regular expression (`--index-regex`), or a path to a file containing a list of patterns or regular expressions (`--index-file`). If no output (`--output`) is specified, only the statistics for each matched pattern will be printed to the standard output; otherwise, both the statistics for each matched pattern (`pattern<INDEX>_matches.txt`) and for each edit distance (`pattern<INDEX>_errors.txt`) will be written to files, where `<INDEX>` is the index of the pattern in the input file or `1` if a single pattern is provided.
+The command `biomate index` requires the path to one or more FASTQ files (`--input`). With a pattern it searches for it; without one it runs [index discovery](#index-discovery). The pattern can be a single string or a regular expression (`--index-regex`), or a path to a file containing a list of patterns or regular expressions (`--index-file`). If no output (`--output`) is specified, only the statistics for each matched pattern will be printed to the standard output; otherwise, both the statistics for each matched pattern (`pattern<INDEX>_matches.txt`) and for each edit distance (`pattern<INDEX>_errors.txt`) will be written to files, where `<INDEX>` is the index of the pattern in the input file or `1` if a single pattern is provided.
 
 ## Options
 
-- `--input`: Path(s) to the input FASTQ file(s). They can be gzipped or uncompressed. Results are kept per file: with several inputs, standard output prints a `# <path>` line before each file's results, and `--output` gets one subdirectory per input file, named after the file without its `.fastq.gz`/`.fq.gz`/`.fasta`/`.fa` suffix (input file names must therefore be distinct).
-- `--output`: Path to the output directory where the results will be saved. If not specified, the results will be printed to the standard output. The output directory will contain two files: `indexing_patterns.txt` with the statistics for each matched pattern, and `indexing_errors.txt` with the statistics for each edit distance.
-- `--index-regex`: Regular expression to search for in the sequences.
+- `--input`: Path(s) to the input FASTQ file(s). They can be gzipped or uncompressed. Results are kept per file: with several inputs, standard output prints a `# <path>` line before each file's results, and `--output` gets one subdirectory per input file, named after the file without its `.fastq`/`.fq`/`.fasta`/`.fa` suffix (optionally followed by `.gz`); input file names must therefore be distinct.
+- `--output`: Path to the output directory where the results will be saved. If not specified, the results will be printed to the standard output. With a pattern, the output directory contains `pattern<INDEX>_matches.txt` (statistics for each matched sequence) and `pattern<INDEX>_errors.txt` (statistics for each edit distance) per pattern; with index discovery, it contains `indexes_matches.txt` and `indexes_groups.txt`.
+- `--index-regex`: Pattern or regular expression to search for in the sequences. Patterns are uppercased, and a `+` separates the two parts of a dual index. Cannot be combined with `--index-file`.
 - `--index-file`: Path to a file containing a list of patterns or regular expressions to search for in the sequences. Each line in the file should contain a single pattern or regular expression.
+- `--engine`: Matching engine, `regex` (default) or `rust`. `rust` needs the optional `biomate_kernels` package and falls back to `regex` when the package is missing or the pattern uses regular-expression syntax. Ignored by index discovery.
 - `--distance`: Maximum edit distance to consider when matching patterns. Default is 0 (exact match).
 - `--min-count`: Index discovery only. Indexes seen fewer times are not grouped or listed; their read and index totals are reported in one `# ... below --min-count ...` line (at the end of standard output, or of `indexes_groups.txt`). Default is 1 (keep all). On large files most distinct indexes are sequencing noise seen once or twice, so a small cutoff (e.g. 10) cuts grouping time, memory and output size by orders of magnitude.
 - `--threads`: Number of input files processed in parallel. Only used with several inputs and `--output`; standard output is always written one file at a time. Default is 1.
@@ -24,7 +25,7 @@ When neither `--index-regex` nor `--index-file` is given, the module reads the i
 
 Index discovery reads FASTQ input only (gzipped or uncompressed, four lines per record); pattern search also accepts FASTA. The header format is checked on the first record: if it carries no index, a warning is logged and no index is reported for that file. Percentages are relative to the number of reads in the file.
 
-Each output line is `<group index> <distance> <index> <count> <percentage>`, groups sorted by their total count. With `--output`, these lines go to `indexes_matches.txt`, and `indexes_groups.txt` holds one `<group index> <total count> <percentage>` line per group.
+Each output line is `<group seed> <distance> <index> <count> <percentage>`, where `<group seed>` is the sequence of the most frequent index of the group; groups are sorted by their total count. With `--output`, these lines go to `indexes_matches.txt`, and `indexes_groups.txt` holds one `<group seed> <total count> <percentage>` line per group.
 
 ## Example of Standard Output
 

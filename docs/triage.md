@@ -18,9 +18,9 @@ All files are written to `--output-path`:
 
 | File | Content |
 |---|---|
-| `<flowcell_name>_unexpected_indexes.csv`, `<flowcell_name>_lane_summary.csv` | The [Strainer](strainer.md) reports: sample indexes found in the undetermined reads of another lane, or reverse-complemented in any lane. Only written when something is found. |
-| `<flowcell_name>_top_undetermined.csv` | For each undetermined file, the 20 largest index groups, as in the [index discovery](indexer.md#index-discovery) with `--distance 1`. Columns: `File`, `Index` (the most frequent index of the group), `Count`, `Fraction` (of all the reads of the file) and `Variants` (number of distinct indexes in the group). |
-| `<flowcell_name>_always_undetermined.csv` | The [Waif](waif.md) report (default `Stats.json` mode). Only written when the input directory holds re-run datasets sharing a lane. |
+| `<flowcell_name>_unexpected_indexes.csv`, `<flowcell_name>_lane_summary.csv` | The [Strainer](strainer.md) reports: sample indexes found in the undetermined reads of another lane, or reverse-complemented in any lane. Written under the same conditions as in Strainer. |
+| `<flowcell_name>_top_undetermined.csv` | For each undetermined file, the 20 largest index groups, as in the [index discovery](indexer.md#index-discovery) with `--distance 1`. Columns: `File`, `Index` (the most frequent index of the group), `Count`, `Fraction` (of all the reads of the file) and `Variants` (number of distinct indexes in the group). Always written, with only the header row when there is no data. |
+| `<flowcell_name>_always_undetermined.csv` | The [Waif](waif.md) report (default `Stats.json` mode). Only written when the input directory holds re-run datasets (`Stats.json`) sharing a lane; otherwise Waif is skipped with an info message. Datasets with different index lengths in a shared lane stop the triage with an error, after the other reports are written. |
 
 ## Notes
 
