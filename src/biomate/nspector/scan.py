@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 import os
 import pathlib
@@ -138,8 +139,12 @@ class FileScan:
     Counter lists are sorted and hold only non-zero entries; their size depends
     on lanes x tiles x cycles, never on the number of reads:
 
-    * ``tiles``: (lane, tile, total, reads_with_n, n_bases, lowq_reads, bases),
-      ``bases`` being the sum of read lengths
+    * ``tiles``: (lane, tile, total, reads_with_n, n_bases, lowq_reads, bases,
+      polyg_reads, qual_sum, flank_qual_sum, flank_bases), ``bases`` being the
+      sum of read lengths, ``polyg_reads`` the reads ending in at least
+      ``POLYG_MIN_RUN`` G, ``qual_sum`` the Phred sum of the called (non-N)
+      bases and ``flank_*`` the Phred sum and count of the called bases next
+      to an N (a base between two Ns counts once per side)
     * ``tile_cycle``: (lane, tile, cycle, reads_with_n, reads_with_lowq),
       1-based cycles, rows where either count is non-zero
     * ``n_per_read``: (lane, n_count, reads)
@@ -147,6 +152,7 @@ class FileScan:
       (cycle - 1) // cycle_window, n_bases)
     * ``n_shape``: (lane, longest_n_run, first_n_region, all_n, reads), see
       :func:`first_n_region`
+    * ``polyg_start``: (lane, cycle where the poly-G tail starts, reads)
 
     Low-quality ("lowq") counts only called bases (not N) whose Phred score
     is below ``min_qual``.
@@ -158,9 +164,7 @@ class FileScan:
     project: str = ""
     format_error: int | None = None
     max_len: int = 0
-    tiles: list[tuple[int, int, int, int, int, int, int]] = dataclasses.field(
-        default_factory=list
-    )
+    tiles: list[tuple[int, ...]] = dataclasses.field(default_factory=list)
     tile_cycle: list[tuple[int, int, int, int, int]] = dataclasses.field(
         default_factory=list
     )
@@ -171,6 +175,7 @@ class FileScan:
     n_shape: list[tuple[int, int, int, int, int]] = dataclasses.field(
         default_factory=list
     )
+    polyg_start: list[tuple[int, int, int]] = dataclasses.field(default_factory=list)
 
     @property
     def stem(self) -> str:
@@ -281,7 +286,10 @@ class RawWriter:
 
 
 class LowQCounter:
-    """Count called (non-N) bases below ``min_qual`` per tile and cycle.
+    """Count called (non-N) bases below ``min_qual`` per tile and cycle, and
+    sum per tile the Phred scores of the called bases (``qual_sum``) and of
+    the called bases next to an N (``flank_sum``, ``flank_bases``; a base
+    between two Ns counts once per side).
 
     Reads are buffered per (lane, tile, length) and compared in numpy
     batches; a per-base Python loop made the Python engine ~13x slower.
@@ -298,11 +306,14 @@ class LowQCounter:
         )
         self.cycles: dict[tuple[int, int], numpy.ndarray] = {}
         self.reads: Counter[tuple[int, int]] = Counter()
+        self.qual_sum: Counter[tuple[int, int]] = Counter()
+        self.flank_sum: Counter[tuple[int, int]] = Counter()
+        self.flank_bases: Counter[tuple[int, int]] = Counter()
         self.buffered = 0
 
     def add(self, lane: int, tile: int, sequence: str, qualities: str) -> None:
         """Buffer one read, counting the buffer when it is full."""
-        if self.threshold <= 33 or not sequence:
+        if not sequence:
             return
         key = (lane, tile, len(sequence))
         seqs, quals = self.buffers[key]
@@ -317,7 +328,27 @@ class LowQCounter:
         seqs, quals = self.buffers.pop(key)
         seq = numpy.frombuffer("".join(seqs).encode("ascii"), numpy.uint8)
         qual = numpy.frombuffer("".join(quals).encode("ascii"), numpy.uint8)
-        low = ((qual < self.threshold) & (seq != ord("N"))).reshape(-1, length)
+        is_n = (seq == ord("N")).reshape(-1, length)
+        called = ~is_n
+        q = qual.reshape(-1, length)
+        # sums of uint8 in int64, never a full int64 copy: this runs on every read
+        n_called = int(called.sum())
+        self.qual_sum[(lane, tile)] += (
+            int(q.sum(dtype=numpy.int64)) - int(q[is_n].sum(dtype=numpy.int64))
+        ) - 33 * n_called
+        # called bases followed by an N, and called bases after an N
+        before = called[:, :-1] & is_n[:, 1:]
+        after = is_n[:, :-1] & called[:, 1:]
+        sides = int(before.sum()) + int(after.sum())
+        self.flank_sum[(lane, tile)] += (
+            int(q[:, :-1][before].sum(dtype=numpy.int64))
+            + int(q[:, 1:][after].sum(dtype=numpy.int64))
+            - 33 * sides
+        )
+        self.flank_bases[(lane, tile)] += sides
+        if self.threshold <= 33:
+            return  # min_qual 0: nothing is low quality
+        low = (q < self.threshold) & called
         counts = self.cycles.get((lane, tile))
         if counts is None or len(counts) < length:
             grown = numpy.zeros(length, numpy.int64)
@@ -345,6 +376,11 @@ class LowQCounter:
         )
 
 
+# shortest 3' G run counted as a poly-G tail (as fastp's default): on 2-colour
+# instruments a cluster that gives no signal is called G, not N
+POLYG_MIN_RUN = 10
+
+
 def scan_file_python(
     path: pathlib.Path,
     threads: int = 0,
@@ -362,6 +398,7 @@ def scan_file_python(
     n_per_read: Counter[tuple[int, int]] = Counter()
     spatial: Counter[tuple[int, int, int, int, int]] = Counter()
     n_shape: Counter[tuple[int, int, int, int]] = Counter()
+    polyg_start: Counter[tuple[int, int]] = Counter()
 
     with dnaio.open(path, open_threads=threads) as reader:
         for idx, record in enumerate(reader):
@@ -373,10 +410,16 @@ def scan_file_python(
             sequence = record.sequence
             if len(sequence) > scan.max_len:
                 scan.max_len = len(sequence)
-            acc = tiles.setdefault((lane, tile), [0, 0, 0, 0])
+            # total, reads with N, N bases, bases, poly-G reads; the quality
+            # sums are counted by lowq, in numpy batches
+            acc = tiles.setdefault((lane, tile), [0, 0, 0, 0, 0])
             acc[0] += 1
             acc[3] += len(sequence)
             lowq.add(lane, tile, sequence, record.qualities)
+            polyg = len(sequence) - len(sequence.rstrip("G"))
+            if polyg >= POLYG_MIN_RUN:
+                acc[4] += 1
+                polyg_start[(lane, len(sequence) - polyg + 1)] += 1
             if "N" not in sequence:
                 continue
             cycles = [i + 1 for i, c in enumerate(sequence) if c == "N"]
@@ -398,7 +441,17 @@ def scan_file_python(
         raw.flush()
     lowq_cycle = lowq.finish()
     scan.tiles = sorted(
-        (lane, tile, *acc[:3], lowq.reads[(lane, tile)], acc[3])
+        (
+            lane,
+            tile,
+            *acc[:3],
+            lowq.reads[(lane, tile)],
+            acc[3],
+            acc[4],
+            lowq.qual_sum[(lane, tile)],
+            lowq.flank_sum[(lane, tile)],
+            lowq.flank_bases[(lane, tile)],
+        )
         for (lane, tile), acc in tiles.items()
     )
     scan.tile_cycle = sorted(
@@ -408,12 +461,13 @@ def scan_file_python(
     scan.n_per_read = sorted((*k, v) for k, v in n_per_read.items())
     scan.spatial = sorted((*k, v) for k, v in spatial.items())
     scan.n_shape = sorted((*k, v) for k, v in n_shape.items())
+    scan.polyg_start = sorted((*k, v) for k, v in polyg_start.items())
     return scan
 
 
 def _from_kernel(path: pathlib.Path, result: tuple) -> FileScan:
     """Convert one ``biomate_kernels.scan_n_content`` tuple to a FileScan."""
-    fmt_err, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape = result
+    fmt_err, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape, polyg = result
     sample, read = parse_fastq_name(path)
     return FileScan(
         path=path,
@@ -427,18 +481,61 @@ def _from_kernel(path: pathlib.Path, result: tuple) -> FileScan:
         n_per_read=[tuple(t) for t in n_per_read],
         spatial=[tuple(t) for t in spatial],
         n_shape=[tuple(t) for t in n_shape],
+        polyg_start=[tuple(t) for t in polyg],
+    )
+
+
+# layout of the biomate_kernels.scan_n_content result this code reads; the
+# kernel exports its own as SCAN_FORMAT (builds before it had none: 1).
+# Changing the result layout: bump this and SCAN_FORMAT in
+# rust/biomate_kernels/src/lib.rs together
+KERNEL_SCAN_FORMAT = 2
+
+
+def kernel_problem() -> str | None:
+    """Why the Rust kernel cannot be used for nspector, or None when it can."""
+    if biomate_kernels is None:
+        return "not installed in this environment"
+    found = getattr(biomate_kernels, "SCAN_FORMAT", 1)
+    if found != KERNEL_SCAN_FORMAT:
+        return (
+            f"built from another BioMate version (scan format {found}, this "
+            f"version reads {KERNEL_SCAN_FORMAT})"
+        )
+    return None
+
+
+@functools.cache
+def _warn_outdated_kernel(problem: str) -> None:
+    # once per run: resolve_engine is called by validate_args and scan_files
+    # a missing kernel is normal (containers, plain installs): info, not warning
+    log = logging.info if biomate_kernels is None else logging.warning
+    log(
+        f"biomate_kernels is {problem}; scanning with the slower Python engine. "
+        "Build it with: cd rust/biomate_kernels && maturin develop --release "
+        "(see 'Rust engine' in the BioMate README)."
     )
 
 
 def resolve_engine(engine: str) -> str:
-    """Map ``auto`` to ``rust`` when biomate_kernels imports, else ``python``."""
+    """Map ``auto`` to ``rust`` when a matching biomate_kernels imports, else ``python``.
+
+    An installed kernel built from another BioMate version returns counters in
+    another layout: ``auto`` then falls back to Python with a warning, and
+    ``rust`` raises.
+    """
+    problem = kernel_problem()
     if engine == "auto":
-        return "rust" if biomate_kernels is not None else "python"
-    if engine == "rust" and biomate_kernels is None:
+        if problem is None:
+            return "rust"
+        _warn_outdated_kernel(problem)
+        return "python"
+    if engine == "rust" and problem is not None:
         raise RuntimeError(
-            "--engine rust needs biomate_kernels, which is not installed in this "
-            "environment. Build it (cd rust/biomate_kernels && maturin develop "
-            "--release) or use --engine auto/python."
+            f"--engine rust needs biomate_kernels, which is {problem}. Build it "
+            "(cd rust/biomate_kernels && maturin develop --release; see 'Rust "
+            "engine' in the BioMate README) or use "
+            "--engine auto/python."
         )
     return engine
 

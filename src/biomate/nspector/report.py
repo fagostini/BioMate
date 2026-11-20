@@ -21,6 +21,7 @@ from biomate.nspector.flags import (
     collapse_flags,
     flag_rank,
     flagged_share,
+    read_quality,
     removal_costs,
     sample_status,
     status_name,
@@ -125,6 +126,13 @@ CAPTIONS = {
         "For each read with Ns, the length of its longest stretch of consecutive Ns. "
         "Runs of 1 are isolated no-calls; long runs come from bubbles, focus "
         "problems or dark cycles, and a run as long as the read is an all-N read."
+    ),
+    "polyg": (
+        "Reads ending in a run of at least 10 G, by the cycle where the run "
+        "starts. On 2-colour instruments (NextSeq, NovaSeq) a cluster that gives "
+        "no signal is called G with a good quality, not N: these reads lost their "
+        "signal at that cycle without any N. A peak at one cycle matches a dark "
+        "cycle; a rise towards the end of the read is signal decay."
     ),
     "first_n": (
         "Where the first N of each read falls: in the first 10 cycles, the last 10 "
@@ -1336,6 +1344,34 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         first_n, _empty_note(sample_n, "n", FULL_WIDTH / 2, 70)
     ).properties(title="Where the first N falls", width=FULL_WIDTH, height=140)
 
+    # -- H2: poly-G tails (2-colour no-signal calls) --------------------------
+    polyg = None
+    if tables.polyg_start.height:
+        polyg = (
+            alt.Chart(tables.polyg_start)
+            .transform_filter(SELECTION_FILTER)
+            .transform_filter(pick_sample)
+            .transform_aggregate(n_reads="sum(n_reads)", groupby=["cycle", "read"])
+            .mark_line(interpolate="step-after", point=True)
+            .encode(
+                x=alt.X(
+                    "cycle:Q",
+                    title="Cycle where the poly-G tail starts",
+                    axis=cycle_ticks,
+                ),
+                y=alt.Y("n_reads:Q", title="Reads").scale(type="symlog"),
+                color=read_color,
+                opacity=shown(pick_read),
+                tooltip=["read:N", "cycle:Q", alt.Tooltip("n_reads:Q", format=",")],
+            )
+            .add_params(pick_read)
+            .properties(
+                title="Where poly-G tails start (clicked sample, or all)",
+                width=FULL_WIDTH,
+                height=180,
+            )
+        )
+
     # pick_tile / pick_read are shared on purpose by several views; Altair warns
     # each time it merges them while nesting the sections
     with warnings.catch_warnings():
@@ -1350,6 +1386,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             n_vs_lowq,
             run_length,
             first_n,
+            polyg,
             tile_map,
             tile_step * n_segments,
             spatial_view,
@@ -1370,6 +1407,7 @@ def _assemble(
     n_vs_lowq,
     run_length,
     first_n,
+    polyg,
     tile_map,
     tile_map_width,
     spatial_view,
@@ -1400,6 +1438,11 @@ def _assemble(
                 _caption(n_vs_lowq, CAPTIONS["n_vs_lowq"], FULL_WIDTH),
                 _caption(run_length, CAPTIONS["run_length"], FULL_WIDTH),
                 _caption(first_n, CAPTIONS["first_n"], FULL_WIDTH),
+                *(
+                    [_caption(polyg, CAPTIONS["polyg"], FULL_WIDTH)]
+                    if polyg is not None
+                    else []
+                ),
             ),
             _section(
                 "Flowcell",
@@ -1658,6 +1701,7 @@ _PAGE = """<!DOCTYPE html>
     <div class="stat"><b>{n_reads}</b><span>reads with at least one N</span></div>
     <div class="stat"><b>{n_rate}</b><span>overall N rate (reads with N){by_read}</span></div>
     <div class="stat"><b>{n_per_base}</b><span>N per sequenced base</span></div>
+    <div class="stat"><b>{polyg_rate}</b><span>reads with a poly-G tail{polyg_by_read}</span></div>
     <div class="stat"><b>{n_tiles}</b><span>tiles across {n_lanes} lane(s)</span></div>
     <div class="stat"><b>{flagged_share}</b><span>of N bases on flagged lanes, tiles or cycles</span></div>
     <div class="stat"><b>{flag_badges}</b><span>anomaly flags</span></div>
@@ -1668,6 +1712,8 @@ _PAGE = """<!DOCTYPE html>
 </header>
 <main>
   <section id="flags"><h2>Anomaly flags</h2>{flags}{costs}</section>
+  <section id="quality"><h2>Quality next to N</h2><div class="scroll">{quality}</div>
+    <p class="meta">Mean Phred score of the called bases, and of the called bases right before or after an N. Close values mean the Ns appear abruptly in otherwise good signal (a bubble, a dark cycle, an imaging dropout); a much lower score next to the Ns means the signal decayed before the base caller gave up. A poly-G tail is a 3′ run of at least 10 G: on 2-colour instruments, lost signal called as G.</p></section>
   <div class="grid" id="worst">
     <section><h2>Tiles with the highest N rate</h2><div class="scroll">{worst_tiles}</div></section>
     <section><h2>Cycles with the highest N rate</h2><div class="scroll">{worst_cycles}</div></section>
@@ -1874,6 +1920,14 @@ def write_report(
             "(<code>OverrideCycles</code>, <code>--use-bases-mask</code>); dark "
             "cycles inside a read stay in the reads as N.</p>"
         )
+    quality = read_quality(tables).rename(
+        {
+            "polyg_rate": "reads with a poly-G tail",
+            "mean_q": "mean Q of called bases",
+            "flank_q": "mean Q next to an N",
+        }
+    )
+    polyg_total = int(tables.sample_lane["polyg"].sum())
     by_read = (
         tables.sample_lane.group_by("read")
         .agg((polars.col("n").sum() / polars.col("total").sum()).alias("rate"))
@@ -1906,6 +1960,22 @@ def write_report(
         n_per_base=f"{n_bases / bases:.4%}" if bases else "n/a",
         flag_badges=flag_badges,
         flagged_share="n/a" if share is None else f"{share:.1%}",
+        polyg_rate=f"{polyg_total / total_reads:.3%}" if total_reads else "n/a",
+        polyg_by_read="<br>"
+        + " · ".join(
+            f"{r} {v:.3%}"
+            for r, v in quality.select("read", "reads with a poly-G tail").iter_rows()
+        )
+        if quality.height > 1
+        else "",
+        quality=_table(
+            quality,
+            {
+                "reads with a poly-G tail": ".3%",
+                "mean Q of called bases": ".1f",
+                "mean Q next to an N": ".1f",
+            },
+        ),
         verdict=html.escape(verdict(listed, share)),
         params=html.escape(
             " · ".join(
@@ -2095,11 +2165,13 @@ def write_multiqc(tables: NspectorTables, output: pathlib.Path) -> list[pathlib.
             polars.col("n").sum(),
             polars.col("n_bases").sum(),
             polars.col("lowq").sum(),
+            polars.col("polyg").sum(),
             polars.col("total").sum(),
         )
         .with_columns(
             (100 * polars.col("n") / polars.col("total")).alias("pct"),
             (100 * polars.col("lowq") / polars.col("total")).alias("pct_lowq"),
+            (100 * polars.col("polyg") / polars.col("total")).alias("pct_polyg"),
         )
         .join(sample_status(tables, flags), on="sample", how="left")
         .sort("sample")
@@ -2127,13 +2199,21 @@ def write_multiqc(tables: NspectorTables, output: pathlib.Path) -> list[pathlib.
         "#         max: 100",
         "#         suffix: '%'",
         "#         format: '{:,.3f}'",
+        "#     - pct_reads_polyg:",
+        "#         title: '% poly-G reads'",
+        "#         description: 'Percentage of reads ending in at least 10 G (nspector)'",
+        "#         min: 0",
+        "#         max: 100",
+        "#         suffix: '%'",
+        "#         format: '{:,.3f}'",
         "#     - n_status:",
         "#         title: 'N status'",
         "#         description: 'Worst nspector flag on the sample or its lanes (PASS/WARN/FAIL)'",
-        "Sample\tpct_reads_with_n\tn_bases\tpct_reads_lowq\tn_status",
+        "Sample\tpct_reads_with_n\tn_bases\tpct_reads_lowq\tpct_reads_polyg\tn_status",
     ]
     lines += [
-        f"{r['sample']}\t{r['pct']:.4f}\t{r['n_bases']}\t{r['pct_lowq']:.4f}\t{r['status']}"
+        f"{r['sample']}\t{r['pct']:.4f}\t{r['n_bases']}\t{r['pct_lowq']:.4f}"
+        f"\t{r['pct_polyg']:.4f}\t{r['status']}"
         for r in per_sample.iter_rows(named=True)
     ]
     path = folder / "nspector_general_stats_mqc.tsv"

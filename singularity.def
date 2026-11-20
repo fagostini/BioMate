@@ -2,11 +2,22 @@ Bootstrap: docker
 From: ubuntu:24.04
 
 %post
-    apt-get update && apt-get install -y python3 python3-pip
+    apt-get update && apt-get install -y python3 python3-pip curl ca-certificates build-essential
     NOW=`date`
     echo "export NOW=\"${NOW}\"" >> $SINGULARITY_ENVIRONMENT
     rm -rf /var/lib/apt/lists/*
     python3 -m pip install --break-system-packages /mnt
+    # Optional Rust kernels (biomate_kernels: nspector and index --engine rust).
+    # Toolchain and build files live in /tmp and are removed afterwards; the
+    # target dir is moved off /mnt so the bound source tree stays untouched.
+    export RUSTUP_HOME=/tmp/rustup CARGO_HOME=/tmp/cargo CARGO_TARGET_DIR=/tmp/kernels-target
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
+    export PATH="$CARGO_HOME/bin:$PATH"
+    python3 -m pip install --break-system-packages --target /tmp/maturin "maturin>=1.5,<2.0"
+    cd /mnt/rust/biomate_kernels
+    PYTHONPATH=/tmp/maturin /tmp/maturin/bin/maturin build --release --out /tmp/wheels
+    python3 -m pip install --break-system-packages /tmp/wheels/*.whl
+    rm -rf /tmp/rustup /tmp/cargo /tmp/kernels-target /tmp/maturin /tmp/wheels
 
 %runscript
     echo "Container was created $NOW"

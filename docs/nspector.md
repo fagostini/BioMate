@@ -30,7 +30,7 @@ biomate nspector \
 
 - `--input`: one or more FASTQ files (`.fastq`, `.fq`, optionally gzipped) and/or directories to search recursively. A file found twice is scanned once. Required.
 - `--output`: output directory, created if missing (default: `./output`).
-- `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` stops with an error when `biomate_kernels` is missing. Both engines produce identical results.
+- `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` stops with an error when `biomate_kernels` is missing. Both engines produce identical results; the Rust one is about 20× faster. `biomate_kernels` is not installed with BioMate: see [Rust engine](https://github.com/fagostini/BioMate#rust-engine-optional) to build it.
 - `--threads`: Rust engine: files scanned in parallel (default `0` = one per available core). Python engine: extra decompression threads per file. The Rust engine also decompresses each gzip file on its own thread, ahead of parsing, and reads multi-member gzip (as written by BCL Convert).
 - `--spatial-bin-size`: width of the spatial bins in read-name X/Y coordinate units (default: `2000`). Raise it if the report gets large.
 - `--spatial-cycle-window`: spatial bins are counted per window of this many cycles (default: `10`), so the spatial map can follow a cycle range dragged on the N per cycle chart.
@@ -68,6 +68,16 @@ The two metrics separate two failure modes:
 
 For each read with an N, nspector records the longest run of consecutive Ns, whether the read is all N, and where the first N falls: the first 10 cycles, the middle, or the last 10 cycles (the start wins on reads of 20 cycles or fewer).
 Random Ns give runs of 1. Bubbles and dark cycles give long runs or all-N reads.
+
+### Poly-G tails and quality next to N
+
+On 2-colour instruments (NextSeq, NovaSeq) a cluster that gives no signal is called G with a good quality, not N, so a read that lost its signal can end in a run of G without any N. Nspector counts the reads ending in at least 10 G (as fastp does) and the cycle where that run starts. The report shows the share per read in the header and where the tails start under **N within reads**.
+
+For each N it also records the Phred score of the called base right before and after it. The **Quality next to N** table compares that with the mean of all called bases. Close values mean the Ns appear abruptly in otherwise good signal (a bubble, a dark cycle, an imaging dropout). A much lower score next to the Ns means the signal decayed before the base caller gave up.
+
+### Index reads
+
+Index FASTQ files (`_I1_001.fastq.gz`, `_I2_001.fastq.gz`, written by BCL Convert with `CreateFastqForIndexReads`) are scanned like any other read. Their flags name the read (`lane 1 I1`), and the Undetermined scatter plots them per read, so tiles losing index cycles show up as tiles with more undetermined reads.
 
 ## Anomaly flags
 
@@ -160,13 +170,14 @@ Each table is written as `nspector_<table>.parquet`:
 
 | Table | Grain | Columns |
 | --- | --- | --- |
-| `sample_lane` | project, sample, read, lane | `n`, `n_bases`, `lowq`, `total`, `bases`, `n_rate`, `n_base_rate`, `lowq_rate` |
+| `sample_lane` | project, sample, read, lane | `n`, `n_bases`, `lowq`, `total`, `bases`, `n_rate`, `n_base_rate`, `lowq_rate`, `polyg`, `qual_sum`, `flank_qual_sum`, `flank_bases`, `polyg_rate`, `mean_q`, `flank_q` |
 | `sample_cycle` | project, sample, read, lane, cycle (dense) | `n`, `lowq`, `total`, `n_rate`, `lowq_rate` |
-| `tile_summary` | project, sample, read, lane, tile | `surface`, `swath`, `segment`, `n`, `n_bases`, `lowq`, `total`, `bases`, `n_rate`, `n_base_rate`, `lowq_rate`, `mean_n_per_affected_read` |
+| `tile_summary` | project, sample, read, lane, tile | `surface`, `swath`, `segment`, `n`, `n_bases`, `lowq`, `total`, `bases`, `n_rate`, `n_base_rate`, `lowq_rate`, `mean_n_per_affected_read`, `polyg`, `qual_sum`, `flank_qual_sum`, `flank_bases`, `polyg_rate`, `mean_q`, `flank_q` |
 | `tile_cycle` | project, read, lane, tile, cycle (summed over the project's samples; only cycles with an N or a low-Q base) | `n`, `lowq`, `total` (the project's reads on the tile), `n_rate`, `lowq_rate` |
 | `n_per_read` | project, sample, read, lane, `n_count` (number of N bases in the read) | `n_reads` |
 | `spatial` | project, read, lane, tile, `cycle` (first cycle of the window), `x_bin`, `y_bin` (summed over samples; bin = coordinate // `--spatial-bin-size`) | `n_bases` |
 | `n_shape` | project, sample, read, lane, `longest_run`, `first_n`, `all_n` | `n_reads` |
+| `polyg_start` | project, sample, read, lane, `cycle` (where the poly-G tail starts) | `n_reads` |
 | `flags` | one row per flag | `status`, `kind`, `project`, `sample` (only for `sample` flags), `read`, `lane`, `tile`, `cycle`, `rate`, `z`, `detail` |
 | `tile_interop` (with `--run-folder`) | read, lane, tile (summed over samples) | `n`, `total`, `n_bases`, `bases`, `n_rate`, `n_base_rate`, `density_k`, `pct_pf`, `pct_q30`, `pct_occupied`, `pct_phasing`, `pct_prephasing` |
 | `cycle_interop` (with `--run-folder`) | read, lane, tile, cycle (within the read) | `intensity`, `fwhm`, `error_rate`, `pct_no_call` |
@@ -214,7 +225,7 @@ Nspector writes MultiQC custom content to `<output>/multiqc/`:
 
 - `nspector_tile_rate_mqc.json`: a heatmap of % reads with N, with one row per sample, lane and read and one column per tile.
 - `nspector_cycle_rate_mqc.json`: a line graph of % reads with N per cycle.
-- `nspector_general_stats_mqc.tsv`: % reads with N, the N base count, % reads with a low-Q base and the worst flag status per sample, added to the General Statistics table.
+- `nspector_general_stats_mqc.tsv`: % reads with N, the N base count, % reads with a low-Q base, % reads with a poly-G tail and the worst flag status per sample, added to the General Statistics table.
 - `nspector_flags_mqc.json`: a table of every flag (only written when there are flags).
 - `nspector_read_loss_mqc.json`: a line graph of the reads lost when filtering on N bases per read, one line per read.
 - `nspector_verdict_mqc.html`: the written verdict and what removing the flagged tiles and cycles would cost.
@@ -242,6 +253,7 @@ nspector_results/
 ├── nspector_n_per_read.parquet
 ├── nspector_spatial.parquet
 ├── nspector_n_shape.parquet
+├── nspector_polyg_start.parquet
 ├── nspector_flags.parquet
 ├── nspector_summary.json                 # status, verdict, counts, rates, removal costs
 ├── nspector_tile_interop.parquet         # only with --run-folder
@@ -274,7 +286,8 @@ With `--png`, each input file with at least one N read also gets `<stem>_n_count
 | `flagged_n_share` | share of all N bases on a flagged lane, tile, cell or dark cycle |
 | `reads`, `reads_with_n` | total reads and reads with at least one N |
 | `n_rate`, `n_per_base` | share of reads with an N, and share of bases that are N |
-| `by_read` | `{"<read>": {"n_rate": ..., "n_per_base": ...}}` |
+| `polyg_rate` | share of reads ending in a poly-G tail |
+| `by_read` | per read: `{"<read>": {"n_rate", "n_per_base", "polyg_rate", "mean_q", "flank_q"}}`, where `mean_q` is the mean quality of all called bases and `flank_q` the mean quality of the called bases next to an N |
 | `removal_costs` | reads given up and N share removed by excluding flagged tiles or trimming dark cycles |
 | `parameters` | the options used |
 

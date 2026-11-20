@@ -133,8 +133,12 @@ class TestScan:
         scan = scan_file_python(path)
         assert scan.format_error is None
         assert scan.tile_cycle == [(1, 1101, 1, 1, 0), (1, 1101, 5, 1, 0)]
-        # last field: bases sequenced (sum of read lengths)
-        assert scan.tiles == [(1, 1101, 3, 2, 2, 0, 14), (1, 1102, 1, 0, 0, 0, 6)]
+        # bases sequenced (sum of read lengths), then poly-G reads, the Phred sum
+        # of the 12 called bases (Q40) and of the 2 called bases next to an N
+        assert scan.tiles == [
+            (1, 1101, 3, 2, 2, 0, 14, 0, 480, 80, 2),
+            (1, 1102, 1, 0, 0, 0, 6, 0, 240, 0, 0),
+        ]
         assert scan.max_len == 6
         assert scan.total_reads == 4
         assert (scan.sample, scan.read) == ("S", "R1")
@@ -153,7 +157,9 @@ class TestScan:
             ],
         )
         scan = scan_file_python(path, min_qual=20)
-        assert scan.tiles == [(1, 1101, 4, 3, 8, 1, 46)]
+        # called-base Phred sum 101 + 60 + 1280; next to an N: A(2) and G(40) in
+        # ANGTA, T(40) and A(40) around seq_a's run
+        assert scan.tiles == [(1, 1101, 4, 3, 8, 1, 46, 0, 1441, 122, 4)]
         lowq = {c: q for _, _, c, _, q in scan.tile_cycle if q}
         assert lowq == {1: 1, 4: 1}
         assert scan.n_shape == [
@@ -442,6 +448,32 @@ class TestValidateArgs:
         )
         with pytest.raises(argparse.ArgumentTypeError, match="biomate_kernels"):
             validate_args(args)
+
+    def test_outdated_kernel_falls_back_or_raises(self, tmp_path, monkeypatch, caplog):
+        """A kernel from another version: auto scans in Python, rust refuses."""
+        monkeypatch.setattr(nspector_scan, "biomate_kernels", argparse.Namespace())
+        nspector_scan._warn_outdated_kernel.cache_clear()
+        with caplog.at_level("WARNING"):
+            assert nspector_scan.resolve_engine("auto") == "python"
+            assert nspector_scan.resolve_engine("auto") == "python"
+        warned = [r for r in caplog.records if "slower Python engine" in r.message]
+        assert len(warned) == 1 and "scan format 1" in warned[0].message
+        with pytest.raises(RuntimeError, match="another BioMate version"):
+            nspector_scan.resolve_engine("rust")
+
+    def test_missing_kernel_logs_python_fallback_once(self, monkeypatch, caplog):
+        monkeypatch.setattr(nspector_scan, "biomate_kernels", None)
+        nspector_scan._warn_outdated_kernel.cache_clear()
+        with caplog.at_level("INFO"):
+            assert nspector_scan.resolve_engine("auto") == "python"
+            assert nspector_scan.resolve_engine("auto") == "python"
+        noted = [r for r in caplog.records if "slower Python engine" in r.message]
+        assert len(noted) == 1 and noted[0].levelname == "INFO"
+        assert "Rust engine" in noted[0].message
+
+    def test_kernel_reports_the_scan_format_this_code_reads(self):
+        kernels = pytest.importorskip("biomate_kernels")
+        assert kernels.SCAN_FORMAT == nspector_scan.KERNEL_SCAN_FORMAT
 
     def test_spatial_bin_size_must_be_positive(self, tmp_path):
         args = self._make_args(tmp_path, spatial_bin_size=0)
@@ -1115,3 +1147,33 @@ def test_summary_json_and_fail_on(run_files, tmp_path):
     with pytest.raises(SystemExit) as exit_info:
         nspector.main(args)
     assert exit_info.value.code == nspector.FLAGGED_EXIT_CODE == 3
+
+
+def test_polyg_and_quality_reach_tables_report_and_summary(tmp_path):
+    """Poly-G tails and the quality next to N flow from the scan to every output."""
+    from biomate.nspector.flags import read_quality, summary
+
+    records = [
+        # a tail of 12 G from cycle 9
+        _rec("ACGTACGT" + "G" * 12, x="1", y="1"),
+        # the N sits between two Q10 ('+') bases
+        (illumina_header(x="2", y="2"), "ANAC", "+#+I"),
+        _rec("ACGTACGTACGTACGTACGT", x="3", y="3"),
+        _rec("ACGTACGTACGTACGTACGT", x="4", y="4"),
+    ]
+    path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+    write_fastq_gz(path, records)
+    tables = build_tables(scan_files([path], "python"))
+    assert tables.polyg_start.select("cycle", "n_reads").rows() == [(9, 1)]
+    quality = read_quality(tables).row(0, named=True)
+    assert quality["polyg_rate"] == 0.25
+    assert quality["flank_q"] == 10.0
+    # 63 called bases: 60 at Q40, two at Q10, one at Q40
+    assert quality["mean_q"] == pytest.approx((60 * 40 + 10 + 10 + 40) / 63)
+    tables.flags = build_flags(tables)
+    assert summary(tables, tables.flags)["by_read"]["R1"]["flank_q"] == 10.0
+    page = write_report([], tables, tmp_path).read_text()
+    assert "Quality next to N" in page and "reads with a poly-G tail" in page
+    write_multiqc(tables, tmp_path)
+    stats = (tmp_path / "multiqc" / "nspector_general_stats_mqc.tsv").read_text()
+    assert "pct_reads_polyg" in stats and "\t25.0000\t" in stats

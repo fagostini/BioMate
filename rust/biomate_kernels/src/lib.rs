@@ -345,11 +345,22 @@ struct TileAcc {
     lowq_reads: u64,
     /// all bases (sum of read lengths), the denominator of the N base rate
     bases: u64,
+    /// reads ending in at least `POLYG_MIN_RUN` G (2-colour no-signal calls)
+    polyg_reads: u64,
+    /// sum of Phred scores of the called (non-N) bases
+    qual_sum: u64,
+    /// sum of Phred scores of the called bases next to an N, and their count
+    /// (a base between two Ns counts once per side)
+    flank_qual_sum: u64,
+    flank_bases: u64,
     /// reads with an N at cycle `i + 1`
     cycles: Vec<u64>,
     /// reads with a called base below `min_qual` at cycle `i + 1`
     lowq_cycles: Vec<u64>,
 }
+
+/// Shortest 3' G run counted as a poly-G tail (as fastp's default).
+const POLYG_MIN_RUN: usize = 10;
 
 /// Cycles at each end of the read used to classify where the first N falls.
 const EDGE_CYCLES: usize = 10;
@@ -381,24 +392,30 @@ struct FileScan {
     spatial: HashMap<(i32, i32, i32, i32, u32), u64>,
     /// (lane, longest N run, first-N region, all-N flag) -> reads
     n_shape: HashMap<(i32, u32, u8, u8), u64>,
+    /// (lane, 1-based cycle where the poly-G tail starts) -> reads
+    polyg_start: HashMap<(i32, u32), u64>,
 }
 
 /// Python tuple returned per file by `scan_n_content`:
-/// `(format_error, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape)` with
-/// `tiles = [(lane, tile, total, reads_with_n, n_bases, lowq_reads, bases)]`,
+/// `(format_error, max_len, tiles, tile_cycle, n_per_read, spatial, n_shape,
+/// polyg_start)` with
+/// `tiles = [(lane, tile, total, reads_with_n, n_bases, lowq_reads, bases,
+/// polyg_reads, qual_sum, flank_qual_sum, flank_bases)]`,
 /// `tile_cycle = [(lane, tile, cycle, reads_with_n, reads_with_lowq)]`
 /// (1-based, rows where either count is non-zero),
 /// `n_per_read = [(lane, n_count, reads)]`,
 /// `spatial = [(lane, tile, x // bin, y // bin, (cycle - 1) // window, n_bases)]`,
-/// `n_shape = [(lane, longest_run, first_region, all_n, reads)]`, all sorted.
+/// `n_shape = [(lane, longest_run, first_region, all_n, reads)]`,
+/// `polyg_start = [(lane, start_cycle, reads)]`, all sorted.
 type ScanTuple = (
     Option<usize>,
     u32,
-    Vec<(i32, i32, u64, u64, u64, u64, u64)>,
+    Vec<(i32, i32, u64, u64, u64, u64, u64, u64, u64, u64, u64)>,
     Vec<(i32, i32, u32, u64, u64)>,
     Vec<(i32, u32, u64)>,
     Vec<(i32, i32, i32, i32, u32, u64)>,
     Vec<(i32, u32, u8, u8, u64)>,
+    Vec<(i32, u32, u64)>,
 );
 
 /// Port of `biomate.nspector.scan.extract_tile_coordinates`.
@@ -512,6 +529,7 @@ fn scan_fastq_file(
         n_per_read: HashMap::new(),
         spatial: HashMap::new(),
         n_shape: HashMap::new(),
+        polyg_start: HashMap::new(),
     };
     let mut name_line: Vec<u8> = Vec::new();
     let mut seq_line: Vec<u8> = Vec::new();
@@ -565,8 +583,17 @@ fn scan_fastq_file(
         let mut n_count = 0u32;
         let mut any_lowq = false;
         let (mut run, mut longest, mut first) = (0u32, 0u32, usize::MAX);
+        let phred = |i: usize| qual.get(i).map_or(0, |q| q.saturating_sub(33) as u64);
         for (i, b) in seq.iter().enumerate() {
             if *b == b'N' {
+                if i > 0 && seq[i - 1] != b'N' {
+                    acc.flank_qual_sum += phred(i - 1);
+                    acc.flank_bases += 1;
+                }
+                if i + 1 < seq.len() && seq[i + 1] != b'N' {
+                    acc.flank_qual_sum += phred(i + 1);
+                    acc.flank_bases += 1;
+                }
                 if acc.cycles.len() <= i {
                     acc.cycles.resize(i + 1, 0);
                 }
@@ -584,6 +611,7 @@ fn scan_fastq_file(
                 first = first.min(i);
             } else {
                 run = 0;
+                acc.qual_sum += phred(i);
                 if qual.get(i).is_some_and(|q| *q < lowq_byte) {
                     if acc.lowq_cycles.len() <= i {
                         acc.lowq_cycles.resize(i + 1, 0);
@@ -595,6 +623,12 @@ fn scan_fastq_file(
         }
         if any_lowq {
             acc.lowq_reads += 1;
+        }
+        let polyg = seq.iter().rev().take_while(|b| **b == b'G').count();
+        if polyg >= POLYG_MIN_RUN {
+            acc.polyg_reads += 1;
+            let start = (seq.len() - polyg + 1) as u32;
+            *out.polyg_start.entry((lane, start)).or_insert(0) += 1;
         }
         if n_count > 0 {
             acc.reads_with_n += 1;
@@ -624,6 +658,10 @@ fn to_tuple(s: FileScan) -> ScanTuple {
             acc.n_bases,
             acc.lowq_reads,
             acc.bases,
+            acc.polyg_reads,
+            acc.qual_sum,
+            acc.flank_qual_sum,
+            acc.flank_bases,
         ));
         for i in 0..acc.cycles.len().max(acc.lowq_cycles.len()) {
             let n = acc.cycles.get(i).copied().unwrap_or(0);
@@ -649,7 +687,18 @@ fn to_tuple(s: FileScan) -> ScanTuple {
         .map(|((l, run, region, all_n), c)| (l, run, region, all_n, c))
         .collect();
     n_shape.sort_unstable();
-    (s.format_error, s.max_len, tiles, tile_cycle, n_per_read, spatial, n_shape)
+    let mut polyg_start: Vec<_> = s.polyg_start.into_iter().map(|((l, c), n)| (l, c, n)).collect();
+    polyg_start.sort_unstable();
+    (
+        s.format_error,
+        s.max_len,
+        tiles,
+        tile_cycle,
+        n_per_read,
+        spatial,
+        n_shape,
+        polyg_start,
+    )
 }
 
 /// Scan N content of one or more FASTQ files.
@@ -761,5 +810,10 @@ mod tests {
 fn biomate_kernels(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_class::<IndexPattern>()?;
     m.add_function(wrap_pyfunction!(scan_n_content, m)?)?;
+    // layout of the scan_n_content result; nspector refuses another one
+    // (2: tiles with poly-G and quality sums, plus polyg_start). Changing
+    // the result layout: bump this and KERNEL_SCAN_FORMAT in
+    // src/biomate/nspector/scan.py together
+    m.add("SCAN_FORMAT", 2)?;
     Ok(())
 }

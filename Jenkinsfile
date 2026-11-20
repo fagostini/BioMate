@@ -1,7 +1,20 @@
 pipeline {
     agent any 
     stages {
-        stage('Build') { 
+        stage('Kernels') {
+            agent {
+                dockerfile {
+                    filename 'Dockerfile'
+                }
+            }
+            steps {
+                // the image must ship biomate_kernels matching this checkout
+                sh 'python -c "from biomate.nspector.scan import kernel_problem; p = kernel_problem(); assert p is None, \'biomate_kernels is \' + p"'
+                sh 'rm -rf .ci-pytest && pip install --quiet --target .ci-pytest pytest'
+                sh 'PYTHONPATH=.ci-pytest python -m pytest -q -p no:cacheprovider tests/test_biomate_kernels_parity.py'
+            }
+        }
+        stage('Build') {
             agent { 
                 dockerfile {
                     filename 'Dockerfile'

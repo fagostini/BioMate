@@ -17,6 +17,7 @@ The command `biomate index` requires the path to one or more FASTQ files (`--inp
 - `--min-count`: Index discovery only. Indexes seen fewer times are not grouped or listed; their read and index totals are reported in one `# ... below --min-count ...` line (at the end of standard output, or of `indexes_groups.txt`). Default is 1 (keep all). On large files most distinct indexes are sequencing noise seen once or twice, so a small cutoff (e.g. 10) cuts grouping time, memory and output size by orders of magnitude.
 - `--threads`: Number of input files processed in parallel. Only used with several inputs and `--output`; standard output is always written one file at a time. Default is 1.
 - `--error-type`: Type of error to consider when calculating the edit distance. Can be insertions (`i`), deletions (`d`), substitutions (`s`), or any error (`e`). Default is `s`.
+- `--engine`: `regex` (default) or `rust`. `rust` matches literal patterns (letters and `+` only) with the native `biomate_kernels` package; it falls back to `regex`, with a warning, for other patterns or when `biomate_kernels` is not installed. `biomate_kernels` is not installed with BioMate: see [Rust engine](https://github.com/fagostini/BioMate#rust-engine-optional) to build it.
 
 ## Index discovery
 
