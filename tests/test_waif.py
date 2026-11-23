@@ -50,6 +50,7 @@ def make_args(
     exact: bool = False,
     sample_sheet: Path | None = None,
     block_cache: Path | None = None,
+    lanes: list[int] | None = None,
 ) -> argparse.Namespace:
     """Build the argparse.Namespace expected by validate_args and main."""
     return argparse.Namespace(
@@ -58,6 +59,7 @@ def make_args(
         exact=exact,
         sample_sheet=sample_sheet,
         block_cache=block_cache,
+        lanes=lanes,
         verbose=False,
         quiet=False,
     )
@@ -69,9 +71,10 @@ def run_main(
     exact: bool = False,
     sample_sheet: Path | None = None,
     block_cache: Path | None = None,
+    lanes: list[int] | None = None,
 ) -> pl.DataFrame:
     """Run the waif module end to end and read the results CSV back."""
-    main(make_args(input_dir, output_file, exact, sample_sheet, block_cache))
+    main(make_args(input_dir, output_file, exact, sample_sheet, block_cache, lanes))
     return pl.read_csv(output_file)
 
 
@@ -370,6 +373,19 @@ class TestStatsJsonMode:
         assert out.height == 1
         assert out["Count"].to_list() == [200]  # mean of the two re-runs only
 
+    def test_lanes_restricts_output(self, tmp_path: Path) -> None:
+        """--lanes keeps only the requested shared lanes; an ineligible one is
+        skipped."""
+        write_flowcell(
+            tmp_path,
+            {
+                "D0": {1: {"AAAA+AAAA": 100}, 2: {"CCCC+CCCC": 100}},
+                "D1": {1: {"AAAA+AAAA": 100}, 2: {"CCCC+CCCC": 100}},
+            },
+        )
+        out = run_main(tmp_path, tmp_path / "out.csv", lanes=[2, 5])
+        assert out["Lane"].to_list() == [2]
+
 
 class TestExactMode:
     """End-to-end tests of the --exact (FASTQ counting) mode."""
@@ -385,6 +401,21 @@ class TestExactMode:
         assert out.height == 1
         assert out["Barcode"].to_list() == ["AAAA+AAAA"]
         assert out["Count"].to_list() == [150]  # round_up_10(mean(200, 100))
+
+    def test_exact_lanes_restricts_input(self, tmp_path: Path) -> None:
+        """--lanes with --exact reads only the requested lanes' FASTQs."""
+        for lane in (1, 2):
+            write_fastq(tmp_path, "D0", lane, {"AAAA+AAAA": 100})
+            write_fastq(tmp_path, "D1", lane, {"AAAA+AAAA": 100})
+        write_samplesheet(tmp_path, {1, 2})
+        out = run_main(tmp_path, tmp_path / "out.csv", exact=True, lanes=[1])
+        assert out["Lane"].to_list() == [1]
+
+    def test_exact_lanes_none_eligible_is_an_error(self, tmp_path: Path) -> None:
+        write_fastq(tmp_path, "D0", 1, {"AAAA+AAAA": 100})
+        write_samplesheet(tmp_path, {1})
+        with pytest.raises(ValueError, match="requested lanes"):
+            run_main(tmp_path, tmp_path / "out.csv", exact=True, lanes=[3])
 
     def test_exact_single_index(self, tmp_path: Path) -> None:
         """Exact mode counts bare single-index barcodes from the FASTQ headers
@@ -750,6 +781,7 @@ class TestValidateArgs:
             exact=False,
             sample_sheet=None,
             block_cache=None,
+            lanes=None,
             verbose=False,
             quiet=False,
         )

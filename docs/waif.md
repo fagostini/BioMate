@@ -15,6 +15,7 @@ By default the module reads the `UnknownBarcodes` field of every `Stats.json` fi
 - `--output-file`: File to write the results CSV to. If not specified, the results are written to stdout (and logging is suppressed automatically). The parent directory is created automatically if it does not exist.
 - `--exact`: Enable exact counting of undetermined indexes by reading the undetermined FASTQ files instead of relying on `Stats.json`. Requires a Sample Sheet to identify the lanes that carry samples from two or more projects.
 - `--sample-sheet`: Path to an explicit Sample Sheet file (only used in exact mode). If not provided, the module looks for `SampleSheet.csv` inside `--input-path`.
+- `--lanes LANE [LANE ...]`: Only process these lanes (e.g. `--lanes 1 3`). The selection is applied on top of the automatic one: requested lanes that are not shared between datasets (default mode) or not multi-project in the Sample Sheet (exact mode) are skipped with a warning. In exact mode only the requested lanes' FASTQ files are read, and the run stops with an error if none of them is eligible.
 - `--block-cache DIR`: Directory for a small gzip member-offset index of the undetermined files; enables forked per-file workers that decompress and count in parallel (effective when there are fewer files than cores). Each file is scanned once to locate member boundaries; the index file is tiny and the source is never copied or re-compressed. Only supported on Linux.
 
 ## Input Format
