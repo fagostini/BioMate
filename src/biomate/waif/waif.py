@@ -79,6 +79,19 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         ),
     )
     parser.add_argument(
+        "--lanes",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="LANE",
+        help=(
+            "Only process these lanes (e.g. --lanes 1 3). Lanes that would "
+            "not be selected anyway (not shared between datasets, or not "
+            "multi-project in the Sample Sheet with --exact) are skipped "
+            "with a warning. Default: all selected lanes."
+        ),
+    )
+    parser.add_argument(
         "--block-cache",
         type=pathlib.Path,
         default=None,
@@ -119,6 +132,10 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
                 f"Sample Sheet not found in {args.input_path} "
                 "(required for --exact); provide one with --sample-sheet."
             )
+    if args.lanes is not None and any(lane < 1 for lane in args.lanes):
+        raise argparse.ArgumentTypeError(
+            f"Lane numbers must be positive integers, got {args.lanes}."
+        )
     if args.block_cache is not None:
         if sys.platform != "linux":
             raise argparse.ArgumentTypeError(
@@ -573,6 +590,16 @@ def shared_undetermined(
     return finalize(pair_frames)
 
 
+def restrict_lanes(lanes: list[int], requested: list[int] | None) -> list[int]:
+    """Keep only the ``requested`` lanes (all when None), warning about the
+    requested lanes that are not in ``lanes``."""
+    if requested is None:
+        return lanes
+    for lane in sorted(set(requested) - set(lanes)):
+        logging.warning(f"Requested lane {lane} is not eligible; skipping")
+    return [lane for lane in lanes if lane in requested]
+
+
 def main(args: argparse.Namespace) -> None:
     """Main function."""
     if args.output_file is None:
@@ -590,10 +617,16 @@ def main(args: argparse.Namespace) -> None:
                 "No lane with samples from two or more projects found in the "
                 "Sample Sheet; nothing to do in --exact mode."
             )
+        lanes_to_filter = restrict_lanes(lanes_to_filter, args.lanes)
+        if not lanes_to_filter:
+            raise ValueError(
+                f"None of the requested lanes {sorted(set(args.lanes))} carries "
+                "samples from two or more projects; nothing to do in --exact mode."
+            )
         table = fastqs_to_stats_frames(input_dir, lanes_to_filter, args.block_cache)
     else:
         table = load_stats_frames(input_dir)
-        lanes_to_filter = find_shared_lanes(table)
+        lanes_to_filter = restrict_lanes(find_shared_lanes(table), args.lanes)
 
     present_lanes = set(table.get_column("Lane").unique().to_list())
     lanes_to_filter = [lane for lane in lanes_to_filter if lane in present_lanes]
