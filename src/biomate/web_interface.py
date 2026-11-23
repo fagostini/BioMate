@@ -557,59 +557,6 @@ MODULES: List[Dict[str, Any]] = [
         ],
     },
     {
-        "name": "strainer",
-        "title": "Index Mixing Evaluator",
-        "short_description": (
-            "Evaluates index (barcode) mixing/cross-talk across flowcell "
-            "lanes by analysing Undetermined FASTQ files."
-        ),
-        "description": (
-            "Strainer flags potential sample swapping or index hopping by "
-            "comparing unexpected indexes found in undetermined FASTQ pools "
-            "against expected indexes from the Sample Sheet. It reads all "
-            "Undetermined*R1*.fastq.gz files, filters poly-G artifacts, and "
-            "searches each sample's indexes in the undetermined reads of the "
-            "other lanes (allowing 1 mismatch). Sample indexes are also searched "
-            "reverse-complemented (exact match) in every lane, to reveal an index "
-            "entered in the wrong orientation. Outputs CSV reports of unexpected "
-            "indexes and lane summaries."
-        ),
-        "parameters": [
-            {
-                "label": "Input Path",
-                "param_type": "text",
-                "default": "",
-                "help": "Flowcell directory with undetermined FASTQ files",
-                "form_name": "input_path",
-                "cli_name": "input-path",
-            },
-            {
-                "label": "Output Path",
-                "param_type": "text",
-                "default": ".",
-                "help": "Output directory for results (default: current dir)",
-                "form_name": "output_path",
-                "cli_name": "output-path",
-            },
-            {
-                "label": "Sample Sheet Path",
-                "param_type": "text",
-                "default": "",
-                "help": "Path to SampleSheet.csv (looks in input dir if omitted)",
-                "form_name": "sample_sheet",
-                "cli_name": "sample-sheet",
-            },
-            {
-                "label": "Threads",
-                "param_type": "number",
-                "default": "1",
-                "help": "Number of threads for parallel processing",
-                "form_name": "threads",
-                "cli_name": "threads",
-            },
-        ],
-    },
-    {
         "name": "waif",
         "title": "Undetermined Barcode Intersection",
         "short_description": (
@@ -692,7 +639,6 @@ MODULES: List[Dict[str, Any]] = [
     },
 ]
 
-# Triage takes the same arguments as strainer
 MODULES.append(
     {
         "name": "triage",
@@ -704,11 +650,99 @@ MODULES.append(
         "description": (
             "Triage counts the header indexes of every Undetermined*R1*.fastq.gz "
             "file once, then writes the strainer reports (cross-lane and "
-            "reverse-complemented sample indexes), the largest undetermined "
+            "reverse-complemented sample indexes), the barcode findings (index "
+            "mixing, swapped, reversed or complemented indexes, putative "
+            "samples), the largest undetermined "
             "index groups of each file and, when re-run Stats.json files are "
             "present, the barcodes undetermined in every run of a lane."
         ),
-        "parameters": next(m for m in MODULES if m["name"] == "strainer")["parameters"],
+        "parameters": [
+            {
+                "label": "Input Path",
+                "param_type": "text",
+                "default": "",
+                "help": "Flowcell directory with undetermined FASTQ files",
+                "form_name": "input_path",
+                "cli_name": "input-path",
+            },
+            {
+                "label": "Output Path",
+                "param_type": "text",
+                "default": ".",
+                "help": "Output directory for results (default: current dir)",
+                "form_name": "output_path",
+                "cli_name": "output-path",
+            },
+            {
+                "label": "Sample Sheet Path",
+                "param_type": "text",
+                "default": "",
+                "help": "Path to SampleSheet.csv (looks in input dir if omitted)",
+                "form_name": "sample_sheet",
+                "cli_name": "sample-sheet",
+            },
+            {
+                "label": "Threads",
+                "param_type": "number",
+                "default": "1",
+                "help": "Number of threads for parallel processing",
+                "form_name": "threads",
+                "cli_name": "threads",
+            },
+        ],
+    }
+)
+
+
+MODULES.append(
+    {
+        "name": "fqcheck",
+        "title": "FASTQ Integrity Check",
+        "short_description": (
+            "Checks that FASTQ files are complete and that their mates hold "
+            "the same reads, optionally writing md5 checksums."
+        ),
+        "description": (
+            "FqCheck groups the *.fastq.gz and *.fastq files of a directory by "
+            "mate (R1, R2, I1, I2) and reads each group once. It reports "
+            "truncated or corrupt gzip files, malformed records, mates with "
+            "different read counts or out-of-sync read names, and non-Illumina "
+            "file names. The command fails when any group has an error."
+        ),
+        "parameters": [
+            {
+                "label": "Input Path",
+                "param_type": "text",
+                "default": "",
+                "help": "Directory searched recursively for FASTQ files",
+                "form_name": "input_path",
+                "cli_name": "input-path",
+            },
+            {
+                "label": "Output Path",
+                "param_type": "text",
+                "default": ".",
+                "help": "Output directory for the report (default: current dir)",
+                "form_name": "output_path",
+                "cli_name": "output-path",
+            },
+            {
+                "label": "Write md5",
+                "param_type": "boolean",
+                "default": False,
+                "help": "Also write an md5sum-compatible checksum file",
+                "form_name": "md5",
+                "cli_name": "md5",
+            },
+            {
+                "label": "Threads",
+                "param_type": "number",
+                "default": "1",
+                "help": "Number of file groups checked in parallel",
+                "form_name": "threads",
+                "cli_name": "threads",
+            },
+        ],
     }
 )
 

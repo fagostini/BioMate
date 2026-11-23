@@ -16,6 +16,6 @@ The minimal command is `biomate web-interface`, which serves the interface at `h
 
 ## Notes
 
-- The modules available in the interface are Blabber, Dirstruct, FastRewind, Index, Nspector, Strainer, Waif and Triage.
+- The modules available in the interface are Blabber, Dirstruct, FastRewind, FqCheck, Index, Nspector, Waif and Triage.
 - Runs have no timeout: a long run keeps the request open until it finishes. For long runs, use the command line, where the progress is visible.
 - Paths in the forms are paths on the machine that runs the server.

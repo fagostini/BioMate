@@ -10,6 +10,7 @@ nav:
     - Dirstruct: dirstruct.md
     - Index: indexer.md
     - FastRewind: fastrewind.md
+    - FqCheck: fqcheck.md
     - Nspector: nspector.md
     - Strainer: strainer.md
     - Triage: triage.md

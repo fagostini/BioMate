@@ -11,6 +11,7 @@ from biomate import (
     blabber,
     dirstruct,
     fastrewind,
+    fqcheck,
     index,
     nspector,
     strainer,
@@ -94,6 +95,7 @@ def main():
     dirstruct.dirstruct.init_parser(subparsers)
     index.index.init_parser(subparsers)
     fastrewind.fastrewind.init_parser(subparsers)
+    fqcheck.fqcheck.init_parser(subparsers)
     nspector.nspector.init_parser(subparsers)
     strainer.strainer.init_parser(subparsers)
     triage.triage.init_parser(subparsers)

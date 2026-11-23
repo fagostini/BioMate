@@ -12,9 +12,10 @@ Each tool is a sub-command: `biomate <name> --help` lists its options.
 - [Dirstruct](dirstruct.md) (`biomate dirstruct`) - Extract or create a directory structure. It can be used to simulate nested folder structures for testing purposes.
 - [Index](indexer.md) (`biomate index`) - Indexing tool for FASTA/FASTQ files. It can be used to search for expected indexes and get 'fuzzy' information.
 - [FastRewind](fastrewind.md) (`biomate fastrewind`) - Convert a demultiplexed folder back into the Illumina NovaSeqXPlus output. It can be used to generate a subset for demultiplex testing.
+- [FqCheck](fqcheck.md) (`biomate fqcheck`) - Check that FASTQ files are complete and that their mates hold the same reads, optionally writing md5 checksums.
 - [Nspector](nspector.md) (`biomate nspector`) - Inspect FASTQ files for N-base content and their distribution across flowcell tiles and sequencing cycles.
-- [Strainer](strainer.md) (`biomate strainer`) - Evaluate index mixing across flowcell lanes by identifying sample indexes from one lane appearing in undetermined reads of another.
-- [Triage](triage.md) (`biomate triage`) - Triage the undetermined reads of a flowcell: Strainer, index discovery and Waif from a single pass over the FASTQ headers.
+- [Strainer](strainer.md) (`biomate strainer`) - _Deprecated: use Triage, which writes the same reports._ Evaluate index mixing across flowcell lanes by identifying sample indexes from one lane appearing in undetermined reads of another.
+- [Triage](triage.md) (`biomate triage`) - Triage the undetermined reads of a flowcell: Strainer, barcode findings, index discovery and Waif from a single pass over the FASTQ headers.
 - [Waif](waif.md) (`biomate waif`) - Report the barcodes that remain undetermined in every demultiplexing run of a lane, with an estimated read count.
 - [Web Interface](web-interface.md) (`biomate web-interface`) - Local web server with a form for each tool.
 

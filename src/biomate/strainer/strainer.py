@@ -4,7 +4,6 @@ import argparse
 import logging
 import pathlib
 from collections import Counter
-from multiprocessing import Pool
 
 import polars
 import regex
@@ -72,9 +71,9 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     """Initialise module subparser."""
     parser = subparsers.add_parser(
         __name__.split(".")[-1],
-        description="Evaluate indexes mixing across flowcell lanes.",
+        description="Deprecated alias of triage: evaluate indexes mixing across flowcell lanes.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        help="Evaluate indexes mixing across flowcell lanes.",
+        help="Deprecated alias of triage.",
     )
     add_arguments(parser)
     parser.set_defaults(parse=validate_args, run=main)
@@ -191,25 +190,6 @@ def top_undetermined(
         }
         for idx, count in indexes.most_common(1000)
     ]
-
-
-def parallel_extract_indexes_from_undetermined_files(
-    undetermined_files: list[pathlib.Path], threads: int
-) -> list[dict[str, str | int | float]]:
-    """Extract indexes information from multiple Undetermined FASTQ files in parallel."""
-    if threads > 1:
-        with Pool(threads) as pool:
-            results = pool.map(
-                extract_indexes_from_undetermined_file, undetermined_files
-            )
-    else:
-        results = [
-            extract_indexes_from_undetermined_file(f) for f in undetermined_files
-        ]
-
-    # Flatten the list of lists of dictionaries into a single list of dictionaries
-    flat_results = [item for sublist in results for item in sublist]
-    return flat_results
 
 
 def _orientations(index1: str, index2: str | None):
@@ -390,32 +370,13 @@ def report(
 
 
 def main(args: argparse.Namespace) -> None:
-    """Main function."""
+    """Deprecated: run triage, which writes the same reports and more."""
     setup_logging(args)
-    logging.info("Running strainer module...")
-
-    # Extract the flowcell name from the input path for logging and output file naming
-    basename = args.input_path.resolve().name
-    logging.debug(f"Processing flowcell: '{basename}'")
-    output_file = args.output_path / f"{basename}_unexpected_indexes.csv"
-    logging.debug(f"Output will be saved to: {output_file}")
-    if args.threads > 1:
-        logging.debug(f"Using {args.threads} threads for processing.")
-
-    # Determine the sample sheet path, either from the command line argument or by looking for SampleSheet.csv in the input directory
-    sample_sheet = args.sample_sheet or args.input_path / "SampleSheet.csv"
-    logging.debug(f"Using sample sheet: {sample_sheet}")
-
-    # Extract indexes from the sample sheet
-    sample_sheet_indexes = extract_indexes_from_sample_sheet(sample_sheet)
-
-    # Recursively find all undetermined FASTQ files in the input directory
-    undetermined_files = find_undetermined(args.input_path)
-    logging.debug(f"Found {len(undetermined_files)} undetermined FASTQ files.")
-
-    logging.info("Extracting indexes from undetermined FASTQ files...")
-    undetermined_indexes = parallel_extract_indexes_from_undetermined_files(
-        undetermined_files, args.threads
+    logging.warning(
+        "'biomate strainer' is deprecated and will be removed in the next minor "
+        "release; running 'biomate triage', which writes the same reports."
     )
+    # Lazy import: triage imports this module
+    from biomate.triage import triage
 
-    report(sample_sheet_indexes, undetermined_indexes, args.output_path, basename)
+    triage.main(args)

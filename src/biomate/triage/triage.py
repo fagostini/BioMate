@@ -11,6 +11,7 @@ from biomate.headers import count_header_indexes
 from biomate.index.index import group_indexes
 from biomate.setup import setup_logging
 from biomate.strainer import strainer
+from biomate.triage import barcodes
 from biomate.waif import waif
 
 # Most frequent indexes grouped per file, and groups reported per file
@@ -98,6 +99,15 @@ def main(args: argparse.Namespace) -> None:
     logging.info("Strainer: searching for unexpected indexes...")
     strainer.report(
         sample_sheet_indexes,
+        [row for _, rows, _ in scans for row in rows],
+        args.output_path,
+        basename,
+    )
+
+    logging.info("Barcode findings: explaining undetermined indexes...")
+    barcodes.report(
+        sample_sheet,
+        args.input_path,
         [row for _, rows, _ in scans for row in rows],
         args.output_path,
         basename,
