@@ -338,11 +338,19 @@ def _run_patterns(
                 logging.warning(
                     "biomate_kernels is not installed; falling back to the regex engine"
                 )
-            elif not re.fullmatch(r"[A-Za-z+]+", pattern):
+            elif not re.fullmatch(r"[A-Za-z]+(\+[A-Za-z]+)*", pattern):
                 # The kernel matches letters literally: "ACG[TA]" or "ACG.A"
                 # would give different results from the regex engine
                 logging.warning(
-                    f"Pattern '{pattern}' uses regex syntax; using the regex engine"
+                    f"Pattern '{pattern}' uses regex syntax or an empty part; "
+                    "using the regex engine"
+                )
+            elif any(len(part) <= args.distance for part in pattern.split("+")):
+                # A part that can be deleted whole hits a regex-engine count
+                # quirk the kernel does not reproduce
+                logging.warning(
+                    f"Pattern '{pattern}' has a part not longer than --distance; "
+                    "using the regex engine"
                 )
             else:
                 rust_kernel = biomate_kernels.IndexPattern(

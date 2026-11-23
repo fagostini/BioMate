@@ -30,7 +30,7 @@ biomate nspector \
 
 - `--input`: one or more FASTQ files (`.fastq`, `.fq`, optionally gzipped) and/or directories to search recursively. A file found twice is scanned once. Required.
 - `--output`: output directory, created if missing (default: `./output`).
-- `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` stops with an error when `biomate_kernels` is missing. Both engines produce identical results; the Rust one is about 20× faster. `biomate_kernels` is not installed with BioMate: see [Rust engine](https://github.com/fagostini/BioMate#rust-engine-optional) to build it.
+- `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` stops with an error when `biomate_kernels` is missing. Both engines produce identical results on valid FASTQ files (quality characters from `!` up); the Rust one is about 20× faster. `biomate_kernels` is not installed with BioMate: see [Rust engine](https://github.com/fagostini/BioMate#rust-engine-optional) to build it.
 - `--threads`: Rust engine: files scanned in parallel (default `0` = one per available core). Python engine: extra decompression threads per file. The Rust engine also decompresses each gzip file on its own thread, ahead of parsing, and reads multi-member gzip (as written by BCL Convert).
 - `--spatial-bin-size`: width of the spatial bins in read-name X/Y coordinate units (default: `2000`). Raise it if the report gets large.
 - `--spatial-cycle-window`: spatial bins are counted per window of this many cycles (default: `10`), so the spatial map can follow the cycle window picked on the N per cycle chart.
@@ -57,7 +57,7 @@ Cycles are 1-based, so cycle 1 is the first base of the read.
 
 ### Low-quality companion
 
-In the same pass, nspector counts called bases (A, C, G or T, not N) whose Phred score is below `--min-qual`.
+In the same pass, nspector counts called bases (every base other than an uppercase `N`) whose Phred score is below `--min-qual`.
 `lowq` columns hold the number of reads with such a base: at that cycle in the cycle tables, anywhere in the read in the tile and sample tables.
 The two metrics separate two failure modes:
 

@@ -107,6 +107,28 @@ class TestIndexPatternParity:
             seq = _plant(rng, base, kind, pos)
             assert _kernel(rustpat, seq) == _reference(pypat, seq), (kind, pos, seq)
 
+    @pytest.mark.parametrize(
+        "motif", ["ACGT+TTGA", "ACGTAC+GGTA", "AAC+GGT+TTA", "ACGTACGT+TTGGCCAA"]
+    )
+    @pytest.mark.parametrize("error_type", ["e", "s", "i", "d"])
+    def test_short_reads_multi_part(self, motif, error_type):
+        """Short reads end mid-pattern, so parts are deleted at the read end.
+
+        Covers the budget restore after a failed end-of-read deletion. Only
+        distances below every part length: index.py sends the rest to regex.
+        """
+        rng = random.Random(3)
+        for distance in range(min(3, *(len(p) for p in motif.split("+")))):
+            pypat = compile_index_regex(motif, distance, error_type)
+            rustpat = biomate_kernels.IndexPattern(motif, distance, error_type)
+            for _ in range(400):
+                length = rng.randint(0, 24)
+                seq = "".join(rng.choice("ACGTN") for _ in range(length))
+                assert _kernel(rustpat, seq) == _reference(pypat, seq), (
+                    distance,
+                    seq,
+                )
+
     def test_known_semantic_cases(self):
         """Probe cases that pin down the engine's documented behaviors."""
         pypat = compile_index_regex(M, 2, "e")
@@ -375,6 +397,37 @@ class TestScanNContentParity:
         p = tmp_path / "coords.fastq.gz"
         _write_fastq(p, records)
         assert _kernel_scan(p) == _reference_scan(p)
+
+    @pytest.mark.parametrize(
+        "x",
+        ["-5", "-1500", "3000000000", "1_000"],
+        ids=["neg", "neg-bin", "big", "underscore"],
+    )
+    def test_unusual_coordinates(self, tmp_path, x):
+        """Negative (floor-binned), 64-bit and underscore coordinates match."""
+        p = tmp_path / "coords.fastq"
+        _write_fastq(p, [(f"M1:1:FC:1:1101:{x}:20 1:N:0:AA", "ANGT")], gz=False)
+        assert _kernel_scan(p) == _reference_scan(p)
+
+    def test_gzip_detected_by_content(self, tmp_path):
+        """A gzipped file without a .gz suffix is still read as gzip."""
+        p = tmp_path / "noext.fastq"
+        _write_fastq(p, [("M1:1:FC:1:1101:1:2 1:N:0:AA", "ANGT")])
+        assert _kernel_scan(p) == _reference_scan(p)
+
+    @pytest.mark.parametrize(
+        "data",
+        ["@M1:1:FC:1:1101:1:1\nANGT\nX\nIIII\n", "@M1:1:FC:1:1101:1:1\nANGT\n+\nII\n"],
+        ids=["no-plus", "short-qual"],
+    )
+    def test_malformed_record_raises_in_both(self, tmp_path, data):
+        """Missing '+' or quality length mismatch is an error in both engines."""
+        p = tmp_path / "bad.fastq"
+        p.write_text(data)
+        with pytest.raises(Exception):
+            _reference_scan(p)
+        with pytest.raises(ValueError):
+            _kernel_scan(p)
 
     @pytest.mark.parametrize("min_qual", [0, 2, 20, 30, 93])
     def test_low_quality_and_n_shape(self, tmp_path, min_qual):
