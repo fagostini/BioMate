@@ -56,6 +56,8 @@ def test_main_writes_every_report(tmp_path, threads):
         )
     )
 
+    findings = polars.read_csv(out / "FC_barcode_findings.csv")
+    assert "Label" in findings.columns
     unexpected = polars.read_csv(out / "FC_unexpected_indexes.csv")
     assert sorted(
         unexpected.select("Lane", "Undetermined_Index", "Orientation").rows()

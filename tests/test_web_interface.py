@@ -25,9 +25,9 @@ class TestValidateModuleName:
         """Test that 'blabber' is recognized as valid."""
         assert validate_module_name("blabber") is True
 
-    def test_valid_module_name_strainer(self):
-        """Test that 'strainer' is recognized as valid."""
-        assert validate_module_name("strainer") is True
+    def test_valid_module_name_triage(self):
+        """Test that 'triage' is recognized as valid."""
+        assert validate_module_name("triage") is True
 
     def test_valid_module_name_index(self):
         """Test that 'index' is recognized as valid."""
@@ -98,7 +98,7 @@ class TestModulesDefinition:
             "dirstruct",
             "fastrewind",
             "nspector",
-            "strainer",
+            "fqcheck",
             "triage",
             "waif",
         ]
@@ -133,10 +133,10 @@ class TestModulesDefinition:
         assert "seq_number" in param_names
         assert "seq_length" in param_names
 
-    def test_strainer_module_has_parameters(self):
-        """Test that strainer module has expected parameters."""
-        strainer = next(m for m in MODULES if m["name"] == "strainer")
-        param_names = [p["form_name"] for p in strainer["parameters"]]
+    def test_triage_module_has_parameters(self):
+        """Test that triage module has expected parameters."""
+        triage = next(m for m in MODULES if m["name"] == "triage")
+        param_names = [p["form_name"] for p in triage["parameters"]]
         assert "input_path" in param_names
         assert "output_path" in param_names
 
@@ -385,6 +385,7 @@ class TestModuleForms(tornado.testing.AsyncHTTPTestCase):
             biomate.dirstruct.dirstruct,
             biomate.index.index,
             biomate.fastrewind.fastrewind,
+            biomate.fqcheck.fqcheck,
             biomate.nspector.nspector,
             biomate.strainer.strainer,
             biomate.triage.triage,

@@ -1,5 +1,7 @@
 # Strainer
 
+> _**Deprecated:** `biomate strainer` now runs [Triage](triage.md), which writes the same reports plus its own, and will be removed in the next minor release. The search described below is unchanged._
+
 This module evaluates index mixing across flowcell lanes.
 It scans the undetermined FASTQ files produced by a demultiplexing run and identifies reads whose index sequences match (within one mismatch) a sample that was assigned to a _different_ lane.
 Such cross-lane contamination can occur when sample plates are accidentally loaded into the wrong lane position.

@@ -186,9 +186,10 @@ BioMate/
 │   ├── blabber/          # Sequence generator
 │   ├── dirstruct/        # Directory structure tool
 │   ├── fastrewind/       # FASTQ file conversion
+│   ├── fqcheck/          # FASTQ integrity and mate check
 │   ├── index/            # Indexing tool
 │   ├── nspector/         # FASTQ inspector
-│   ├── strainer/         # Index analysis
+│   ├── strainer/         # Index analysis (CLI deprecated: runs triage)
 │   ├── triage/           # Undetermined reads triage
 │   ├── waif/             # Always-undetermined barcodes
 │   ├── design/, static/  # Web UI templates and assets

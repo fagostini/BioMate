@@ -483,6 +483,8 @@ def test_main_reports_only_cross_lane_index(tmp_path):
     out = polars.read_csv(tmp_path / "FC_unexpected_indexes.csv")
     assert out.get_column("Undetermined_Index").to_list() == ["GAACTGAGCG+CGCTCCACGA"]
     assert out.get_column("Sample_Project").to_list() == ["ProjectA"]
+    # The deprecated strainer command runs triage, which adds its own report
+    assert (tmp_path / "FC_top_undetermined.csv").is_file()
 
 
 def test_clean_results_keeps_own_lane_orientation_hits():
