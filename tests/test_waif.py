@@ -51,6 +51,7 @@ def make_args(
     sample_sheet: Path | None = None,
     block_cache: Path | None = None,
     lanes: list[int] | None = None,
+    bclconvert_reports: bool = False,
 ) -> argparse.Namespace:
     """Build the argparse.Namespace expected by validate_args and main."""
     return argparse.Namespace(
@@ -60,6 +61,7 @@ def make_args(
         sample_sheet=sample_sheet,
         block_cache=block_cache,
         lanes=lanes,
+        bclconvert_reports=bclconvert_reports,
         verbose=False,
         quiet=False,
     )
@@ -87,6 +89,23 @@ def write_flowcell(root: Path, data: dict[str, dict[int, dict[str, int]]]) -> No
             {"Lane": lane, "Barcodes": barcodes} for lane, barcodes in lanes.items()
         ]
         p.write_text(json.dumps({"UnknownBarcodes": unknown_barcodes}))
+
+
+def write_reports(root: Path, data: dict[str, str]) -> None:
+    """Write ``data`` ({dataset: CSV text}) as Reports/Top_Unknown_Barcodes.csv."""
+    for ds, text in data.items():
+        p = root / ds / "Reports" / "Top_Unknown_Barcodes.csv"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+
+
+REPORT_HEADER = "Lane,index,index2,# Reads,% of Unknown Barcodes,% of All Reads\n"
+
+
+def run_reports(input_dir: Path, output_file: Path) -> pl.DataFrame:
+    """Run waif with --bclconvert-reports and read the results CSV back."""
+    main(make_args(input_dir, output_file, bclconvert_reports=True))
+    return pl.read_csv(output_file, schema_overrides={"Barcode": pl.String})
 
 
 def write_fastq(
@@ -385,6 +404,65 @@ class TestStatsJsonMode:
         )
         out = run_main(tmp_path, tmp_path / "out.csv", lanes=[2, 5])
         assert out["Lane"].to_list() == [2]
+
+
+class TestBclconvertReportsMode:
+    """Tests for --bclconvert-reports (Top_Unknown_Barcodes.csv input)."""
+
+    def test_mixed_lengths_dual_index(self, tmp_path: Path) -> None:
+        write_reports(
+            tmp_path,
+            {
+                "ds_long": REPORT_HEADER
+                + "1,GGGGGGGG,AAAAAAAA,100,0.5,0.1\n"
+                + "1,CCCCCCCC,TTTTTTTT,9,0.1,0.01\n"
+                + "2,CCCCCCCC,TTTTTTTT,30,0.1,0.01\n",
+                "ds_short": REPORT_HEADER + "1,GGGGGG,AAAAAA,50,0.5,0.1\n",
+            },
+        )
+        res = run_reports(tmp_path, tmp_path / "out.csv")
+        # Lane 2 is in one dataset only; CCCCCC+TTTTTT is not in ds_short.
+        assert res.select("Lane", "Barcode", "Count").rows() == [
+            (1, "GGGGGG+AAAAAA", 80)
+        ]
+
+    def test_single_index_without_index2_column(self, tmp_path: Path) -> None:
+        write_reports(
+            tmp_path,
+            {
+                # bcl-convert may write counts with thousands separators.
+                "a": 'Lane,index,# Reads\n1,GGGGGGGG,"1,000"\n',
+                "b": REPORT_HEADER + "1,GGGGGG,,20,0.5,0.1\n",
+            },
+        )
+        res = run_reports(tmp_path, tmp_path / "out.csv")
+        assert res.select("Lane", "Barcode", "Count").rows() == [(1, "GGGGGG", 510)]
+
+    def test_numeric_looking_index_stays_text(self, tmp_path: Path) -> None:
+        write_reports(
+            tmp_path,
+            {
+                "a": REPORT_HEADER + "1,0001,,10,0.5,0.1\n",
+                "b": REPORT_HEADER + "1,0001,,30,0.5,0.1\n",
+            },
+        )
+        res = run_reports(tmp_path, tmp_path / "out.csv")
+        assert res.select("Lane", "Barcode", "Count").rows() == [(1, "0001", 20)]
+
+    def test_demultiplexing_dir_excluded(self, tmp_path: Path) -> None:
+        write_reports(
+            tmp_path,
+            {
+                "a": REPORT_HEADER + "1,GGGG,,10,0.5,0.1\n",
+                "Demultiplexing": REPORT_HEADER + "1,GGGG,,10,0.5,0.1\n",
+            },
+        )
+        res = run_reports(tmp_path, tmp_path / "out.csv")
+        assert res.height == 0
+
+    def test_no_report_files_is_an_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="No Top_Unknown_Barcodes.csv"):
+            run_reports(tmp_path, tmp_path / "out.csv")
 
 
 class TestExactMode:
@@ -782,6 +860,7 @@ class TestValidateArgs:
             sample_sheet=None,
             block_cache=None,
             lanes=None,
+            bclconvert_reports=False,
             verbose=False,
             quiet=False,
         )
@@ -812,6 +891,11 @@ class TestValidateArgs:
         (tmp_path / "input").mkdir()
         args = self._make_args(tmp_path, exact=True)
         with pytest.raises(argparse.ArgumentTypeError, match="Sample Sheet"):
+            validate_args(args)
+
+    def test_exact_and_bclconvert_reports_rejected(self, tmp_path: Path) -> None:
+        args = make_args(tmp_path, None, exact=True, bclconvert_reports=True)
+        with pytest.raises(argparse.ArgumentTypeError, match="cannot be used"):
             validate_args(args)
 
     def test_explicit_sample_sheet_validated(self, tmp_path: Path) -> None:

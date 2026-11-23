@@ -568,7 +568,8 @@ MODULES: List[Dict[str, Any]] = [
             "that share a lane and reports the barcodes undetermined in "
             "every one of them, with the mean count rounded up to a multiple "
             "of 10. By default it reads the UnknownBarcodes field of the "
-            "Stats.json files; with the Exact flag it counts the undetermined "
+            "Stats.json files, or with the bcl-convert Reports flag the "
+            "Reports/Top_Unknown_Barcodes.csv files; with the Exact flag it counts the undetermined "
             "FASTQ headers directly (a Sample Sheet is then required to "
             "select the lanes with samples from two or more projects). Outputs a CSV with Lane, Barcode, "
             "Count and Total % columns."
@@ -603,6 +604,17 @@ MODULES: List[Dict[str, Any]] = [
                 ),
                 "form_name": "exact",
                 "cli_name": "exact",
+            },
+            {
+                "label": "bcl-convert Reports",
+                "param_type": "boolean",
+                "default": False,
+                "help": (
+                    "Read Reports/Top_Unknown_Barcodes.csv files instead of "
+                    "Stats.json (not with Exact)"
+                ),
+                "form_name": "bclconvert_reports",
+                "cli_name": "bclconvert-reports",
             },
             {
                 "label": "Sample Sheet Path",

@@ -8,12 +8,14 @@ For each such barcode the module reports an estimated read count: the mean of th
 
 The minimal command is `biomate waif --input-path <DIR>`.
 By default the module reads the `UnknownBarcodes` field of every `Stats.json` file found under the input directory.
+With `--bclconvert-reports` it reads the bcl-convert `Reports/Top_Unknown_Barcodes.csv` files instead.
 
 ## Options
 
-- `--input-path`: Path to the input directory. In default mode it must contain at least one `<Dataset>/Stats/Stats.json` file; in exact mode it must contain the undetermined FASTQ files. This argument is required.
+- `--input-path`: Path to the input directory. In default mode it must contain at least one `<Dataset>/Stats/Stats.json` file; with `--bclconvert-reports`, at least one `<Dataset>/Reports/Top_Unknown_Barcodes.csv` file; in exact mode, the undetermined FASTQ files. This argument is required.
 - `--output-file`: File to write the results CSV to. If not specified, the results are written to stdout (and logging is suppressed automatically). The parent directory is created automatically if it does not exist.
 - `--exact`: Enable exact counting of undetermined indexes by reading the undetermined FASTQ files instead of relying on `Stats.json`. Requires a Sample Sheet to identify the lanes that carry samples from two or more projects.
+- `--bclconvert-reports`: Read the bcl-convert `Top_Unknown_Barcodes.csv` reports instead of `Stats.json`. Cannot be combined with `--exact`.
 - `--sample-sheet`: Path to an explicit Sample Sheet file (only used in exact mode). If not provided, the module looks for `SampleSheet.csv` inside `--input-path`.
 - `--lanes LANE [LANE ...]`: Only process these lanes (e.g. `--lanes 1 3`). The selection is applied on top of the automatic one: requested lanes that are not shared between datasets (default mode) or not multi-project in the Sample Sheet (exact mode) are skipped with a warning (not shown when the results go to stdout, since logging is then suppressed). In exact mode only the requested lanes' FASTQ files are read, and the run stops with an error if none of them is eligible.
 - `--block-cache DIR`: Directory for a small gzip member-offset index of the undetermined files; enables forked per-file workers that decompress and count in parallel (effective when there are fewer files than cores). Each file is scanned once to locate member boundaries; the index file is tiny and the source is never copied or re-compressed. Only used in exact mode; only supported on Linux.
@@ -35,6 +37,13 @@ The module globs `**/Stats.json` under `--input-path` and reads the `UnknownBarc
 The dataset name is the directory that contains the `Stats` folder (i.e. `input_path/<Dataset>/Stats/Stats.json`).
 Files below any `Demultiplexing/` directory are excluded, as that is the primary bcl-convert demux output rather than a re-run.
 `Stats.json` files without an `UnknownBarcodes` field are skipped with a warning.
+
+### bcl-convert reports (`--bclconvert-reports`)
+
+The module globs `**/Reports/Top_Unknown_Barcodes.csv` under `--input-path`.
+The dataset name is the directory that contains the `Reports` folder (i.e. `input_path/<Dataset>/Reports/Top_Unknown_Barcodes.csv`).
+The `Lane`, `index`, `index2` and `# Reads` columns are used; the barcode is `index+index2`, or `index` alone when `index2` is empty or missing (single-index runs).
+Counts may contain thousands separators. Files below any `Demultiplexing/` directory are excluded.
 
 ### Exact mode
 
