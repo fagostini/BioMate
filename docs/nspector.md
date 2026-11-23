@@ -33,7 +33,7 @@ biomate nspector \
 - `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` stops with an error when `biomate_kernels` is missing. Both engines produce identical results; the Rust one is about 20× faster. `biomate_kernels` is not installed with BioMate: see [Rust engine](https://github.com/fagostini/BioMate#rust-engine-optional) to build it.
 - `--threads`: Rust engine: files scanned in parallel (default `0` = one per available core). Python engine: extra decompression threads per file. The Rust engine also decompresses each gzip file on its own thread, ahead of parsing, and reads multi-member gzip (as written by BCL Convert).
 - `--spatial-bin-size`: width of the spatial bins in read-name X/Y coordinate units (default: `2000`). Raise it if the report gets large.
-- `--spatial-cycle-window`: spatial bins are counted per window of this many cycles (default: `10`), so the spatial map can follow a cycle range dragged on the N per cycle chart.
+- `--spatial-cycle-window`: spatial bins are counted per window of this many cycles (default: `10`), so the spatial map can follow the cycle window picked on the N per cycle chart.
 - `--min-qual`: Phred score (0–93) below which a called (non-N) base counts as low quality (default: `20`). See [Low-quality companion](#low-quality-companion).
 - `--warn-rate`, `--fail-rate`: thresholds for the [anomaly flags](#anomaly-flags) (defaults: `0.01` and `0.05`); they must satisfy `0 < --warn-rate <= --fail-rate <= 1`.
 - `--run-folder`: an Illumina run folder, which must contain an `InterOp/` subfolder. Nspector reads per-tile cluster density, %PF, %≥Q30, % occupied and phasing rates from its `InterOp/` files and plots them against the N rate; it also plots the intensity, spot width (focus), PhiX error rate and no-call rate at each cycle under the N per cycle chart. Metrics the instrument did not write are left out. Needs the optional extra: `pip install 'biomate[interop]'`.
@@ -139,19 +139,19 @@ The **Project**, **Lane**, **Read**, **Metric** and **Show WARN flags** controls
 | View | What it shows | Interaction |
 | --- | --- | --- |
 | Samples × lanes | N rate per sample and lane for the selected read. The selected lane is outlined. | Click a sample to select it. Shift-click adds more samples; double-click clears the selection. |
-| N per cycle | One line per sample along the read. The selected samples are highlighted in red. | Drag to select a cycle window. |
-| Flowcell tiles | Tiles laid out by surface, swath and segment, coloured by N bases per read **within the selected cycle window**. | Click a tile to select it. |
+| N per cycle | One line per sample along the read. The selected samples are highlighted in red. | Drag across the strip under the chart to zoom in on a cycle window; the tile map and spatial map use the same window. Click the strip outside the window to zoom out. |
+| Flowcell tiles | Tiles laid out by surface, swath and segment, coloured by N bases per read **within the selected cycle window**. When the map is too wide to share the row (e.g. NovaSeq X), the spatial map sits below it. | Click a tile to select it. |
 | N bases per read | Histogram (symlog) of N bases per read for the selected samples, or for all samples. | Follows the sample selection. |
 | Reads lost when filtering | The share of reads a "no more than k N bases" filter would discard, for each k. | Follows the lane, read and sample selection. |
 | N vs low-Q per cycle | Fraction of reads with an N, and with a low-quality called base, along the read. | Follows the lane, read and sample selection. |
 | Longest N run, first N | Histogram of the longest N run per read, and where the first N falls. | Follows the lane, read and sample selection. |
 | Tiles by surface and swath | One point per tile at its tile-map value, one row per surface and swath, with the row median. The first and last segment of each swath are red. | Click a point to select that tile. |
-| N per base per tile, R1 vs R2 (with both reads) | One point per tile. On the diagonal: a defect on the tile. Off the diagonal: a problem during one read. | Follows the project and lane; click a point to select that tile. |
-| Undetermined share vs N per base (with Undetermined reads) | One point per tile and read: the share of its reads not assigned to a sample against its N per base. | Click a point to select that tile. |
+| N per base per tile, R1 vs R2 (with both reads) | One point per tile. On the diagonal: a defect on the tile. Off the diagonal: a problem during one read. Both axes share one range, from 0 to the worst tile in any project or lane selection. | Follows the project and lane; click a point to select that tile. |
+| Undetermined share vs N per base (with Undetermined reads) | One point per tile and read: the share of its reads not assigned to a sample against its N per base. Both axes share one range, from 0 to the largest value. | Click a point to select that tile. |
 | Tile × cycle | Heatmap of every tile at every cycle. Cells with no N and no low-Q base are left empty. Flagged cells and dark cycles are outlined in orange. | Highlights the selected tile. |
 | InterOp per cycle (with `--run-folder`) | P90 intensity, spot width (FWHM), PhiX error rate and no-call rate at each cycle, averaged over the lane's tiles, with the clicked tiles (tile map, flag row or scatter) drawn in orange. An N spike with an intensity drop points to fluidics or reagents; with a FWHM jump, to focus. | Follows the lane and read. |
 | N per base vs InterOp (with `--run-folder`) | One point per tile: N per base against %PF, cluster density, %≥Q30, % occupied or a phasing rate, coloured by lane. | Click a point to select that tile everywhere. |
-| Spatial N density | N bases binned over the X/Y coordinates of the selected tile (or of all tiles in the selection), with marginal histograms. | Follows the tile selection, and the cycle range dragged on N per cycle (by windows of `--spatial-cycle-window` cycles). |
+| Spatial N density | N bases binned over the X/Y coordinates of the selected tile (or of all tiles in the selection), with marginal histograms. The axes always span the whole tile, however few bins the selection holds. | Follows the tile selection, and the cycle window picked on N per cycle (by windows of `--spatial-cycle-window` cycles). |
 
 The tile-level views (tile map, tile × cycle and spatial) sum the samples of the selected projects. Tile defects are physical, so they affect every sample on that lane; flags are always computed on the whole flowcell.
 

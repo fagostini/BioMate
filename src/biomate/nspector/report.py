@@ -41,6 +41,8 @@ MAX_TILE_CYCLE_ROWS = 200_000
 MANY_SAMPLES = 200
 # width of the full-row charts, in px (page is 1400 px wide, minus legends)
 FULL_WIDTH = 1100
+# widest tile map that fits beside the spatial map (~540 px plus legends)
+SIDE_BY_SIDE_TILE_MAP = 560
 # Inlined data above this size triggers a warning (browsers slow down).
 SIZE_WARNING_BYTES = 20 * 1024 * 1024
 
@@ -107,8 +109,9 @@ CAPTIONS = {
         "The chosen metric at each sequencing cycle, one line per sample and read, "
         "added up over the selected lanes; R1 in the base colour, R2 lighter. "
         "Above 200 samples a band shows the median and interquartile range instead. "
-        "A spike at one cycle points to a dark cycle. Drag across the chart to pick "
-        "a cycle range for the tile map and the spatial map."
+        "A spike at one cycle points to a dark cycle. Drag across the strip under "
+        "the chart to zoom in on a cycle range; the tile map and the spatial map "
+        "then show that range too."
     ),
     "n_per_read": (
         "How many N bases each read carries (log scale), per read, for the clicked "
@@ -392,6 +395,17 @@ def with_tile_anchors(
     return polars.concat([frame, anchors], how="vertical_relaxed")
 
 
+def _max_rate(*frames: polars.DataFrame) -> float:
+    """Largest finite value in the numeric ``frames``, or a tiny positive if none."""
+    tops = [
+        column.filter(column.is_finite()).max()
+        for frame in frames
+        for column in frame.iter_columns()
+    ]
+    # an all-zero plot still needs a non-empty range
+    return float(max((t for t in tops if t is not None), default=0)) or 1e-6
+
+
 def _flags(tables: NspectorTables) -> polars.DataFrame:
     """Return the flags frame, empty when flags were not computed."""
     if tables.flags is None:
@@ -565,12 +579,18 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
     )
     max_cycle = int(tables.sample_cycle["cycle"].max())
     cycle_ticks = alt.Axis(values=list(range(0, max_cycle + 1, 10)))
+    # the brush lives on the strip under the chart: the chart zooms to it, and
+    # the tile and spatial maps use the same cycle range
     cycle_x = alt.X(
-        "cycle:Q", title="Cycle (drag to select a window)", axis=cycle_ticks
+        "cycle:Q",
+        title="Cycle",
+        # whole cycles only; the tick count adapts to the zoomed range
+        axis=alt.Axis(tickMinStep=1, format="d"),
+        scale=alt.Scale(domain={"param": "cycle_brush", "encoding": "x"}),
     )
     if n_samples <= MANY_SAMPLES:
         sample_cycle = (
-            cycle_base.mark_line(interpolate="step-after")
+            cycle_base.mark_line(interpolate="step-after", clip=True)
             .encode(
                 x=cycle_x,
                 y=alt.Y(
@@ -590,7 +610,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
                 .otherwise(alt.value(0.15)),
                 tooltip=["project:N", "sample:N", "read:N", "cycle:Q", *rate_tooltip],
             )
-            .add_params(cycle_brush, pick_read)
+            .add_params(pick_read)
             .properties(
                 title="N per cycle, one line per sample and read "
                 "(clicked samples drawn thicker)"
@@ -604,7 +624,7 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             groupby=["read", "cycle"],
         )
         band = (
-            stats.mark_area(interpolate="step-after")
+            stats.mark_area(interpolate="step-after", clip=True)
             .encode(
                 x=cycle_x,
                 y=alt.Y("q1:Q", title=_value_title()),
@@ -619,16 +639,16 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
                     alt.Tooltip("q3:Q", format=".4g"),
                 ],
             )
-            .add_params(cycle_brush, pick_read)
+            .add_params(pick_read)
         )
-        median = stats.mark_line(interpolate="step-after").encode(
-            x="cycle:Q", y="median:Q", color=read_color, opacity=shown(pick_read)
+        median = stats.mark_line(interpolate="step-after", clip=True).encode(
+            x=cycle_x, y="median:Q", color=read_color, opacity=shown(pick_read)
         )
         picked = (
             cycle_base.transform_filter({"param": "pick_sample", "empty": False})
-            .mark_line(interpolate="step-after", strokeWidth=3)
+            .mark_line(interpolate="step-after", strokeWidth=3, clip=True)
             .encode(
-                x="cycle:Q",
+                x=cycle_x,
                 y="value:Q",
                 detail="label:N",
                 color=read_color,
@@ -640,7 +660,32 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             title=f"N per cycle: median and IQR of {n_samples} samples per read, "
             "clicked samples drawn thicker"
         )
-    sample_cycle = sample_cycle.properties(width=FULL_WIDTH, height=260)
+    cycle_strip = (
+        cycle_base.transform_aggregate(
+            n="sum(n)",
+            lowq="sum(lowq)",
+            total="sum(total)",
+            groupby=["read", "cycle"],
+        )
+        .transform_calculate(value=VALUE_EXPR)
+        .mark_line(interpolate="step-after")
+        .encode(
+            x=alt.X(
+                "cycle:Q",
+                title="Drag here to zoom in on a cycle range "
+                "(click outside it to zoom out)",
+                axis=cycle_ticks,
+            ),
+            y=alt.Y("value:Q", title=None, axis=None),
+            color=read_color.legend(None),
+            opacity=shown(pick_read),
+        )
+        .add_params(cycle_brush)
+        .properties(width=FULL_WIDTH, height=50)
+    )
+    sample_cycle = alt.vconcat(
+        sample_cycle.properties(width=FULL_WIDTH, height=260), cycle_strip, spacing=8
+    )
 
     # -- C: flowcell tile map, restricted to the brushed cycles -------------
     tile_cycle_data, window = window_tile_cycle(tables)
@@ -772,18 +817,34 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
                 r1="datum.n_R1 / datum.bases_R1", r2="datum.n_R2 / datum.bases_R2"
             )
         )
-        diagonal = pair_base.transform_calculate(
-            top="max(datum.r1, datum.r2)"
-        ).transform_aggregate(top="max(top)")
+        # one range for both axes, from 0 to the worst tile in any selection
+        # (per project or summed over projects), so the diagonal stays at 45°
+        pair_top = _max_rate(
+            pair.with_columns(
+                (polars.col(f"n_bases_{r}") / polars.col(f"bases_{r}")).alias(r)
+                for r in ("R1", "R2")
+            ).select("R1", "R2"),
+            pair.group_by("lane", "tile")
+            .agg(polars.col("^(n_bases|bases)_R[12]$").sum())
+            .select(
+                (polars.col(f"n_bases_{r}") / polars.col(f"bases_{r}")).alias(r)
+                for r in ("R1", "R2")
+            ),
+        )
+        pair_scale = alt.Scale(domain=[0, pair_top], nice=False)
         read_pair = alt.layer(
-            # y = x from 0 to the largest rate shown
-            diagonal.transform_calculate(zero="0")
+            # y = x across the whole plot
+            alt.Chart(polars.DataFrame({"zero": [0.0], "top": [pair_top]}))
             .mark_rule(strokeDash=[4, 4], color="#8a93a3")
             .encode(x="zero:Q", y="zero:Q", x2="top:Q", y2="top:Q"),
             pair_base.mark_circle(size=60)
             .encode(
-                x=alt.X("r1:Q", title="N per base in R1").axis(format="~%"),
-                y=alt.Y("r2:Q", title="N per base in R2").axis(format="~%"),
+                x=alt.X("r1:Q", title="N per base in R1", scale=pair_scale).axis(
+                    format="~%"
+                ),
+                y=alt.Y("r2:Q", title="N per base in R2", scale=pair_scale).axis(
+                    format="~%"
+                ),
                 **tile_point,
                 tooltip=[
                     "lane:O",
@@ -799,16 +860,28 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
         tile_views.append(_caption(read_pair, CAPTIONS["read_pair"], 300))
 
     if UNDETERMINED in projects and len(projects) > 1:
+        undetermined_tiles = tables.tile_summary.group_by("read", "lane", "tile").agg(
+            polars.col("n_bases", "bases", "total").sum(),
+            polars.col("total")
+            .filter(polars.col("project") == UNDETERMINED)
+            .sum()
+            .alias("undetermined"),
+        )
+        # one range for both axes: both are shares of the tile
+        undetermined_scale = alt.Scale(
+            domain=[
+                0,
+                _max_rate(
+                    undetermined_tiles.select(
+                        polars.col("undetermined") / polars.col("total"),
+                        polars.col("n_bases") / polars.col("bases"),
+                    )
+                ),
+            ],
+            nice=False,
+        )
         undetermined = (
-            alt.Chart(
-                tables.tile_summary.group_by("read", "lane", "tile").agg(
-                    polars.col("n_bases", "bases", "total").sum(),
-                    polars.col("total")
-                    .filter(polars.col("project") == UNDETERMINED)
-                    .sum()
-                    .alias("undetermined"),
-                )
-            )
+            alt.Chart(undetermined_tiles)
             .transform_filter(LANE_FILTER)
             .transform_calculate(
                 share="datum.undetermined / datum.total",
@@ -816,10 +889,14 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
             )
             .mark_circle(size=60)
             .encode(
-                x=alt.X("share:Q", title="Undetermined reads on the tile").axis(
-                    format="%"
+                x=alt.X(
+                    "share:Q",
+                    title="Undetermined reads on the tile",
+                    scale=undetermined_scale,
+                ).axis(format="~%"),
+                y=alt.Y("rate:Q", title="N per base", scale=undetermined_scale).axis(
+                    format="~%"
                 ),
-                y=alt.Y("rate:Q", title="N per base").axis(format="~%"),
                 **tile_point,
                 tooltip=[
                     "read:N",
@@ -962,8 +1039,26 @@ def build_chart(tables: NspectorTables) -> alt.VConcatChart:
     }
     # marginals use the same coordinate edges and un-niced data extent as the
     # density map, so their bars line up with its columns and rows
-    x_scale = alt.Scale(zero=False, nice=False)
-    y_scale = alt.Scale(zero=False, nice=False, reverse=True)
+    # fixed to the extent of every tile, so the axes do not shrink to the few
+    # bins of a sparse selection
+    extent = tables.spatial.select(
+        polars.col("x_bin").min().alias("x_min"),
+        (polars.col("x_bin").max() + 1).alias("x_max"),
+        polars.col("y_bin").min().alias("y_min"),
+        (polars.col("y_bin").max() + 1).alias("y_max"),
+    ).row(0, named=True)
+    fixed = {} if extent["x_min"] is None else extent
+    x_scale = alt.Scale(
+        zero=False,
+        nice=False,
+        **({"domain": [fixed["x_min"] * size, fixed["x_max"] * size]} if fixed else {}),
+    )
+    y_scale = alt.Scale(
+        zero=False,
+        nice=False,
+        reverse=True,
+        **({"domain": [fixed["y_min"] * size, fixed["y_max"] * size]} if fixed else {}),
+    )
     xy = (
         spatial.transform_aggregate(n="sum(n_bases)", groupby=["x_bin", "y_bin"])
         .transform_calculate(**bin_edges)
@@ -1446,7 +1541,12 @@ def _assemble(
             ),
             _section(
                 "Flowcell",
-                alt.hconcat(
+                # side by side when both fit the page, else the spatial map below
+                (
+                    alt.hconcat
+                    if tile_map_width <= SIDE_BY_SIDE_TILE_MAP
+                    else alt.vconcat
+                )(
                     _caption(tile_map, CAPTIONS["tile_map"], max(tile_map_width, 360)),
                     _caption(spatial_view, CAPTIONS["spatial"], 540),
                     spacing=48,
