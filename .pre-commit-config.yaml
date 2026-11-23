@@ -62,10 +62,7 @@ repos:
   repo: https://github.com/commitizen-tools/commitizen
   rev: v4.15.1
 - hooks:
-  - args:
-    - --exclude
-    - cytoprofiling
-    id: interrogate
+  - id: interrogate
   repo: https://github.com/econchick/interrogate
   rev: 1.7.0
 - hooks:

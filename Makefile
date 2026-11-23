@@ -128,7 +128,7 @@ singularity: remove_singularity singularity.sif
 .PHONY: remove_singularity
 
 singularity.sif: singularity.def
-	@singularity build --fakeroot --fix-perms --force --bind $(PROJECT_DIR):/mnt $@ $< > singularity_build.out 2> singularity_build.err && echo "Singularity image built successfully!" || echo "Error building Singularity image! Check singularity_build.err for details."
+	@singularity build --fakeroot --fix-perms --force --bind $(PROJECT_DIR):/mnt $@ $< > singularity_build.out 2> singularity_build.err && echo "Singularity image built successfully!" || { echo "Error building Singularity image! Check singularity_build.err for details."; exit 1; }
 
 remove_singularity:
 	@if [[ -f singularity.sif ]]; then rm singularity.sif; fi
@@ -146,7 +146,7 @@ export: requirements.txt
 .PHONY: interrogate
 ## Run interrogate in verbose mode to check for code quality
 interrogate: check-uv
-	@$(UV)x interrogate --verbose
+	@$(UV) run interrogate --verbose
 
 
 .PHONY: test
@@ -263,15 +263,19 @@ compare_results: $(TEMP_DIR)/Demultiplexed comparison_message
 	@FLOWCELL_ID=$(FLOWCELL_ID) bash assets/compare_results.sh && echo "All files pairwise comparisons were successful!" || echo "WARNING: Some pairwise comparisons yield different results!"
 
 
+## Run the demultiplexing test with the no-index sample sheet
 test_none:
 	@$(MAKE) FLOWCELL_ID=$(FLOWCELL_ID_NONE) deepclean run_message copy_none validate_samplesheet report_results compare_results
 
+## Run the demultiplexing test with the single-index sample sheet
 test_single:
 	@$(MAKE) FLOWCELL_ID=$(FLOWCELL_ID_SINGLE) deepclean run_message copy_single validate_samplesheet report_results compare_results
 
+## Run the demultiplexing test with the dual-index sample sheet
 test_dual:
 	@$(MAKE) FLOWCELL_ID=$(FLOWCELL_ID_DUAL) deepclean run_message copy_dual validate_samplesheet report_results compare_results
 
+## Run the demultiplexing test with the mixed-index sample sheet
 test_mix:
 	@$(MAKE) FLOWCELL_ID=$(FLOWCELL_ID_MIX) deepclean run_message copy_mix validate_samplesheet report_results compare_results
 
