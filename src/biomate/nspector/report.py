@@ -147,8 +147,8 @@ CAPTIONS = {
         "The flowcell laid out by surface, swath and tile segment, coloured by N "
         "per read in the cycle range picked on the N per cycle chart (all cycles if "
         "none); colours are log-scaled so normal tiles still differ when one is "
-        "extreme. Orange outlines mark FAIL tiles (tick Show WARN flags for WARN "
-        "too). Click a tile to show it in the spatial map and highlight it in the "
+        "extreme. Orange outlines mark tiles flagged on their own as FAIL (tick Show WARN "
+        "flags for WARN too); a flagged lane is listed in the flag table instead. Click a tile to show it in the spatial map and highlight it in the "
         "tile × cycle heatmap."
     ),
     "spatial": (
@@ -1608,10 +1608,13 @@ def _table(
 
 def summary_tables(scans: list[FileScan], tables: NspectorTables, top: int = 10):
     """Return (inputs, worst tiles, worst cycles) frames for the report header."""
-    tile_status = (
-        _flags(tables)
-        .filter(polars.col("kind") == "tile")
-        .select("read", "lane", "tile", "status")
+    flags = _flags(tables)
+    tile_status = flags.filter(polars.col("kind") == "tile").select(
+        "read", "lane", "tile", "status"
+    )
+    # tiles on a flagged lane carry no tile flag of their own (the lane flag covers them)
+    lane_status = flags.filter(polars.col("kind") == "lane").select(
+        "read", "lane", polars.col("status").alias("lane_status")
     )
     inputs = polars.DataFrame(
         {
@@ -1647,7 +1650,11 @@ def summary_tables(scans: list[FileScan], tables: NspectorTables, top: int = 10)
         .join(
             tile_status, on=["read", "lane", "tile"], how="left", maintain_order="left"
         )
-        .with_columns(polars.col("status").fill_null("PASS"))
+        .join(lane_status, on=["read", "lane"], how="left", maintain_order="left")
+        .with_columns(
+            polars.coalesce("status", "lane_status", polars.lit("PASS")).alias("status")
+        )
+        .drop("lane_status")
     )
     worst_cycles = (
         tables.sample_cycle.group_by("read", "lane", "cycle")
@@ -2243,7 +2250,7 @@ def write_multiqc(tables: NspectorTables, output: pathlib.Path) -> list[pathlib.
         table = {
             "id": "nspector_flags",
             "section_name": "nspector: anomaly flags",
-            "description": "Tiles, tile-cycle cells, dark cycles and samples with high N rates "
+            "description": "Lanes, tiles, tile-cycle cells, dark cycles and samples with high N rates "
             "(see nspector_flags.parquet).",
             "plot_type": "table",
             "pconfig": {"id": "nspector_flags_table", "title": "nspector: flags"},

@@ -477,7 +477,7 @@ def _some(items: list[str], limit: int = 5) -> str:
 def verdict(flags: polars.DataFrame, share: float | None) -> str:
     """Sum up the collapsed flags (``collapse_flags``) in a few plain sentences."""
     if not flags.height:
-        return "No anomalies: no lane, tile, cycle or sample reaches the warn rate."
+        return "No anomalies: no lane, tile, cycle or sample was flagged."
 
     def of(kind: str) -> list[dict]:
         return flags.filter(polars.col("kind") == kind).to_dicts()
