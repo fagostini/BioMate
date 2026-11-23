@@ -45,6 +45,14 @@ site/
 dist/
 build/
 rust/biomate_kernels/target/
+*.sif
+singularity_build.*
+bench_out/
+*.tar.gz
+.ruff_cache/
+data/
+results/
+inputs/
 
 # Notebooks
 notebooks/

@@ -227,7 +227,7 @@ Nspector writes MultiQC custom content to `<output>/multiqc/`:
 - `nspector_cycle_rate_mqc.json`: a line graph of % reads with N per cycle.
 - `nspector_general_stats_mqc.tsv`: % reads with N, the N base count, % reads with a low-Q base, % reads with a poly-G tail and the worst flag status per sample, added to the General Statistics table.
 - `nspector_flags_mqc.json`: a table of every flag (only written when there are flags).
-- `nspector_read_loss_mqc.json`: a line graph of the reads lost when filtering on N bases per read, one line per read.
+- `nspector_read_loss_mqc.json`: a line graph of the reads lost when filtering on N bases per read, one line per read (only written when some read has an N).
 - `nspector_verdict_mqc.html`: the written verdict and what removing the flagged tiles and cycles would cost.
 
 ```bash
@@ -264,7 +264,7 @@ nspector_results/
 │   ├── nspector_tile_rate_mqc.json
 │   ├── nspector_cycle_rate_mqc.json
 │   ├── nspector_general_stats_mqc.tsv
-│   ├── nspector_read_loss_mqc.json
+│   ├── nspector_read_loss_mqc.json      # only when some read has an N
 │   ├── nspector_verdict_mqc.html
 │   └── nspector_flags_mqc.json           # only when there are flags
 └── individual_tiles/                     # only with --png
@@ -289,7 +289,7 @@ With `--png`, each input file with at least one N read also gets `<stem>_n_count
 | `polyg_rate` | share of reads ending in a poly-G tail |
 | `by_read` | per read: `{"<read>": {"n_rate", "n_per_base", "polyg_rate", "mean_q", "flank_q"}}`, where `mean_q` is the mean quality of all called bases and `flank_q` the mean quality of the called bases next to an N |
 | `removal_costs` | reads given up and N share removed by excluding flagged tiles or trimming dark cycles |
-| `parameters` | the options used |
+| `parameters` | the flagging options used: `--warn-rate`, `--fail-rate`, `--min-qual`, `--spatial-bin-size`, `--spatial-cycle-window` |
 
 ## Read header format
 
@@ -301,4 +301,4 @@ The module expects standard Illumina FASTQ read identifiers:
 
 Lane, tile, X and Y are taken from fields 3–6 (0-indexed) of the colon-separated identifier.
 
-> _**Note:** A file is skipped with a warning when any read header deviates from this format. A file without any N bases is still included and contributes a rate of zero._
+> _**Note:** A file is skipped with a warning when any read header deviates from this format, or when it has no reads. A file without any N bases is still included and contributes a rate of zero._

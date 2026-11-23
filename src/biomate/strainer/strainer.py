@@ -58,13 +58,13 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise argparse.ArgumentTypeError(
             f"Sample sheet {args.sample_sheet} does not exist."
         )
+    if args.threads < 1:
+        raise argparse.ArgumentTypeError("--threads must be >= 1.")
     if not args.output_path.is_dir():
         logging.info(
             f"Output directory {args.output_path} does not exist. Creating it..."
         )
         args.output_path.mkdir(parents=True, exist_ok=True)
-    if args.threads < 1:
-        raise argparse.ArgumentTypeError("--threads must be >= 1.")
     return args
 
 
@@ -130,9 +130,9 @@ def extract_indexes_from_sample_sheet(
     data = data.select(
         polars.col("Lane").str.zfill(3).str.pad_start(4, "L"),
         "Sample_Project",
-        polars.col("index").alias("index1"),
-        "index2",
-    ).filter(polars.col("index1").str.strip_chars().str.len_chars() > 0)
+        polars.col("index").str.strip_chars().str.to_uppercase().alias("index1"),
+        polars.col("index2").str.strip_chars().str.to_uppercase(),
+    ).filter(polars.col("index1").str.len_chars() > 0)
 
     if data.height == 0:
         raise ValueError("No data rows found in Sample Sheet data section.")
@@ -395,7 +395,7 @@ def main(args: argparse.Namespace) -> None:
     logging.info("Running strainer module...")
 
     # Extract the flowcell name from the input path for logging and output file naming
-    basename = args.input_path.name
+    basename = args.input_path.resolve().name
     logging.debug(f"Processing flowcell: '{basename}'")
     output_file = args.output_path / f"{basename}_unexpected_indexes.csv"
     logging.debug(f"Output will be saved to: {output_file}")

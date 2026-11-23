@@ -253,3 +253,17 @@ class TestCreateWithExistingPaths:
         assert (dest / "a").read_text() == "keep"
         assert (dest / "ok").is_dir()
         assert "Cannot create" in caplog.text
+
+
+def test_create_skips_paths_outside_output(tmp_path, caplog):
+    """Absolute paths and '..' entries cannot escape --output-path."""
+    struct_file = tmp_path / "struct.txt"
+    outside = tmp_path / "outside"
+    struct_file.write_text(f"../escaped\tdir\n{outside}\tdir\nok\tdir\n")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    main(_create_args(struct_file, dest))
+    assert not (tmp_path / "escaped").exists()
+    assert not outside.exists()
+    assert (dest / "ok").is_dir()
+    assert "outside the output path" in caplog.text

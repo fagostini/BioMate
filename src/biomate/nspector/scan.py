@@ -589,7 +589,11 @@ def scan_files(
         ]
     if engine == "rust":
         # 0 = one file per available core (sched_getaffinity respects taskset/cgroups)
-        workers = threads or len(os.sched_getaffinity(0))
+        workers = threads or (
+            len(os.sched_getaffinity(0))
+            if hasattr(os, "sched_getaffinity")  # Linux only
+            else os.cpu_count() or 1
+        )
 
         def scan_one(path: pathlib.Path) -> FileScan:
             # one file per call so progress can be reported; the kernel

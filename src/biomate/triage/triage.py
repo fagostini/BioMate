@@ -82,7 +82,7 @@ def main(args: argparse.Namespace) -> None:
     """Main function."""
     setup_logging(args)
     logging.info("Running triage module...")
-    basename = args.input_path.name
+    basename = args.input_path.resolve().name
 
     sample_sheet = args.sample_sheet or args.input_path / "SampleSheet.csv"
     sample_sheet_indexes = strainer.extract_indexes_from_sample_sheet(sample_sheet)

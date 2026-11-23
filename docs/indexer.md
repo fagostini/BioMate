@@ -9,15 +9,14 @@ The command `biomate index` requires the path to one or more FASTQ files (`--inp
 ## Options
 
 - `--input`: Path(s) to the input FASTQ file(s). They can be gzipped or uncompressed. Results are kept per file: with several inputs, standard output prints a `# <path>` line before each file's results, and `--output` gets one subdirectory per input file, named after the file without its `.fastq`/`.fq`/`.fasta`/`.fa` suffix (optionally followed by `.gz`); input file names must therefore be distinct.
-- `--output`: Path to the output directory where the results will be saved. If not specified, the results will be printed to the standard output. With a pattern, the output directory contains `pattern<INDEX>_matches.txt` (statistics for each matched sequence) and `pattern<INDEX>_errors.txt` (statistics for each edit distance) per pattern; with index discovery, it contains `indexes_matches.txt` and `indexes_groups.txt`.
-- `--index-regex`: Pattern or regular expression to search for in the sequences. Patterns are uppercased, and a `+` separates the two parts of a dual index. Cannot be combined with `--index-file`.
+- `--output`: Path to the output directory where the results will be saved. If not specified, the results will be printed to the standard output. With a pattern, the output directory contains `pattern<INDEX>_matches.txt` (statistics for each matched sequence) and `pattern<INDEX>_errors.txt` (statistics for each edit distance) per pattern (a pattern with no match writes no files, only a warning); with index discovery, it contains `indexes_matches.txt` and `indexes_groups.txt`.
+- `--index-regex`: Pattern or regular expression to search for in the sequences. Patterns are uppercased (regex escapes too, so write bases and character classes such as `[CG]`, not `\d` or `\w`), and a `+` separates the two parts of a dual index. Cannot be combined with `--index-file`.
 - `--index-file`: Path to a file containing a list of patterns or regular expressions to search for in the sequences. Each line in the file should contain a single pattern or regular expression.
-- `--engine`: Matching engine, `regex` (default) or `rust`. `rust` needs the optional `biomate_kernels` package and falls back to `regex` when the package is missing or the pattern uses regular-expression syntax. Ignored by index discovery.
-- `--distance`: Maximum edit distance to consider when matching patterns. Default is 0 (exact match).
+- `--distance`: Maximum edit distance to consider when matching patterns. Default is 0 (exact match). Each read is counted at its leftmost match within the distance, which is not always the match with the fewest errors.
 - `--min-count`: Index discovery only. Indexes seen fewer times are not grouped or listed; their read and index totals are reported in one `# ... below --min-count ...` line (at the end of standard output, or of `indexes_groups.txt`). Default is 1 (keep all). On large files most distinct indexes are sequencing noise seen once or twice, so a small cutoff (e.g. 10) cuts grouping time, memory and output size by orders of magnitude.
 - `--threads`: Number of input files processed in parallel. Only used with several inputs and `--output`; standard output is always written one file at a time. Default is 1.
 - `--error-type`: Type of error to consider when calculating the edit distance. Can be insertions (`i`), deletions (`d`), substitutions (`s`), or any error (`e`). Default is `s`.
-- `--engine`: `regex` (default) or `rust`. `rust` matches literal patterns (letters and `+` only) with the native `biomate_kernels` package; it falls back to `regex`, with a warning, for other patterns or when `biomate_kernels` is not installed. `biomate_kernels` is not installed with BioMate: see [Rust engine](https://github.com/fagostini/BioMate#rust-engine-optional) to build it.
+- `--engine`: `regex` (default) or `rust`. `rust` matches literal patterns (letters and `+` only) with the native `biomate_kernels` package; it falls back to `regex`, with a warning, for other patterns or when `biomate_kernels` is not installed. Ignored by index discovery. `biomate_kernels` is not installed with BioMate: see [Rust engine](https://github.com/fagostini/BioMate#rust-engine-optional) to build it.
 
 ## Index discovery
 
@@ -57,4 +56,4 @@ When no output is specified, the command will print the statistics for each matc
 1 AACTTGATCTG 1 0.00%
 ```
 
-The first column is the edit distance, the second column is the matched pattern, the third column is the number of matches, and the fourth column is the percentage of matches relative to the total number of sequences in the FASTQ file.
+The first column is the edit distance, the second column is the matched pattern, the third column is the number of matches, and the fourth column is the percentage of matches relative to the total number of sequences in the FASTQ file. For a dual pattern (`A+B`) the two matched parts are space-separated, so the line has one more column.

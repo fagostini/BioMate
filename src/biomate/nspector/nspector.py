@@ -63,6 +63,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     except RuntimeError as err:
         raise argparse.ArgumentTypeError(str(err)) from err
 
+    if getattr(args, "threads", 0) < 0:
+        raise argparse.ArgumentTypeError("--threads must be 0 or more.")
     if getattr(args, "spatial_bin_size", 1) < 1:
         raise argparse.ArgumentTypeError("--spatial-bin-size must be at least 1.")
     if getattr(args, "spatial_cycle_window", 1) < 1:
@@ -160,13 +162,13 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         default=0.01,
         help="Flag as WARN when the fraction of reads with an N at a cycle reaches "
         "this rate, for a tile at one cycle, a tile on average, or most tiles at "
-        "one cycle (dark cycle) (default: 0.01).",
+        "one cycle (dark cycle), and for lane and sample N rates (default: 0.01).",
     )
     parser.add_argument(
         "--fail-rate",
         type=float,
         default=0.05,
-        help="Flag as FAIL above this rate, same scale as --warn-rate (default: 0.05).",
+        help="Flag as FAIL at or above this rate, same scale as --warn-rate (default: 0.05).",
     )
     parser.add_argument(
         "--run-folder",

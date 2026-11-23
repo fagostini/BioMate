@@ -66,7 +66,10 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         "--total-cycles",
         type=int,
         required=False,
-        help="The total number of cycles. Shorter samples will be filled with Ns.",
+        help=(
+            "The total number of cycles. Only used when larger than the total "
+            "from the Sample Sheet; the extra cycles are written as no-calls."
+        ),
     )
     parser.add_argument(
         "--interop-dir",
@@ -494,7 +497,7 @@ def organise_fastq_files(path: pathlib.Path) -> OrderedDict:
                     f"Lane information not found in file name {fastq_file.name}."
                 )
             lanes_dict.setdefault(lane, defaultdict(list))
-        except AttributeError:
+        except ValueError:
             logging.error(
                 f"Could not determine lane from file name {fastq_file.name}. "
                 "Ensure the file name contains lane information in the format _LXXX_."
@@ -541,7 +544,8 @@ def generate_run_id(name: str) -> str:
     # IMPORTANT: while some fields are taken from the read ids, the date
     # can vary depending on when it is generated
     run_id = (
-        datetime.today().strftime("%y%m%d")
+        datetime.today().strftime("%Y%m%d")
+        + "_"
         + fields["instrument"]
         + "_"
         + fields["run_number"].zfill(4)

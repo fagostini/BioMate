@@ -20,6 +20,7 @@ from biomate.fastrewind.fastrewind import (
     build_index_records,
     clean_directory,
     generate_run_id,
+    organise_fastq_files,
     parse_fastq_groups,
     parse_sequence_mask,
     preprocess_and_write_bcls,
@@ -302,6 +303,15 @@ class TestGenerateRunId:
         assert result.endswith("_B23NWY7LT4")
         assert "LH00217" in result
         assert "0424" in result
+        assert re.fullmatch(r"\d{8}_LH00217_0424_B23NWY7LT4", result)
+
+
+def test_organise_fastq_files_skips_names_without_lane(tmp_path):
+    """A FASTQ without a _L00N_ lane tag is logged and skipped, not fatal."""
+    (tmp_path / "Undetermined_S0_R1_001.fastq.gz").touch()
+    (tmp_path / "Sample_1_S1_L001_R1_001.fastq.gz").touch()
+    result = organise_fastq_files(tmp_path)
+    assert list(result) == ["L001"]
 
 
 class TestWriteRunInfoXml:
