@@ -4,7 +4,9 @@ Report barcodes that remain undetermined in every demultiplexing run of a
 lane.
 
 For each lane that appears in two or more datasets (bcl-convert runs stored in
-``<input_path>/<Dataset>/Stats/Stats.json`` directories), the barcodes that
+``<input_path>/<Dataset>/Stats/Stats.json`` directories, or in
+``<input_path>/<Dataset>/Reports/Top_Unknown_Barcodes.csv`` with
+``--bclconvert-reports``), the barcodes that
 are undetermined in *all* of those datasets are reported with an estimated
 read count: the mean of the datasets' counts, rounded up to a multiple of 10.
 """
@@ -25,6 +27,7 @@ from biomate.samplesheet import read_section
 from biomate.setup import setup_logging
 
 STATS_FILE_NAME = "Stats.json"
+TOP_UNKNOWN_FILE_NAME = "Top_Unknown_Barcodes.csv"
 EXCLUDED_DIR = "Demultiplexing"
 INDEX_SEP = "+"
 COUNT_ROUND_TO = 10
@@ -69,6 +72,14 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         help=(
             "Enable exact counting of undetermined indexes by reading the "
             "undetermined FASTQ files. Needs a Sample Sheet."
+        ),
+    )
+    parser.add_argument(
+        "--bclconvert-reports",
+        action="store_true",
+        help=(
+            "Read the bcl-convert Reports/Top_Unknown_Barcodes.csv files "
+            "instead of Stats.json."
         ),
     )
     parser.add_argument(
@@ -125,6 +136,10 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             f"Output directory {args.output_file.parent} does not exist. Creating it..."
         )
         args.output_file.parent.mkdir(parents=True, exist_ok=True)
+    if args.exact and args.bclconvert_reports:
+        raise argparse.ArgumentTypeError(
+            "--exact and --bclconvert-reports cannot be used together."
+        )
     if args.exact:
         if args.sample_sheet is not None and not args.sample_sheet.is_file():
             raise argparse.ArgumentTypeError(
@@ -325,6 +340,65 @@ def load_stats_frames(input_dir: pathlib.Path) -> polars.DataFrame:
     if not frames:
         raise ValueError(
             f"No usable {STATS_FILE_NAME} files found (all lacked 'UnknownBarcodes')."
+        )
+    return polars.concat(frames)
+
+
+def load_top_unknown_frames(input_dir: pathlib.Path) -> polars.DataFrame:
+    """Load every bcl-convert Top_Unknown_Barcodes.csv into a long barcode table.
+
+    Expected layout: ``input_dir/<Dataset>/Reports/Top_Unknown_Barcodes.csv``;
+    the dataset name is the directory that contains the ``Reports`` folder
+    (``file.parents[1]``). The ``index2`` column may be missing or empty for
+    single-index runs. Files below any ``Demultiplexing/`` directory are
+    excluded (see ``load_stats_frames``).
+
+    Raises:
+        ValueError: If no Top_Unknown_Barcodes.csv files are found.
+    """
+    report_files = [
+        f
+        for f in input_dir.glob(f"**/Reports/{TOP_UNKNOWN_FILE_NAME}")
+        if EXCLUDED_DIR not in f.parts
+    ]
+    if not report_files:
+        raise ValueError(f"No {TOP_UNKNOWN_FILE_NAME} files found under {input_dir}.")
+
+    frames = []
+    for f in report_files:
+        # Read every column as text so indexes are never parsed as numbers.
+        frame = polars.read_csv(f, infer_schema=False)
+        if "index2" not in frame.columns:
+            frame = frame.with_columns(polars.lit("").alias("index2"))
+        frames.append(
+            frame.select(
+                polars.col("Lane").cast(polars.Int64),
+                polars.col("index").fill_null("").alias("index1"),
+                polars.col("index2").fill_null(""),
+                polars.col("# Reads")
+                .str.replace_all(",", "")
+                .cast(polars.Int64)
+                .alias("Count"),
+            )
+            .with_columns(
+                polars.when(polars.col("index2") == "")
+                .then(polars.col("index1"))
+                .otherwise(polars.concat_str("index1", "index2", separator=INDEX_SEP))
+                .alias("Barcode"),
+                polars.lit(f.parents[1].name).alias("Dataset"),
+            )
+            .with_columns(polars.col("Barcode").str.len_chars().alias("Barcode_len"))
+            .select(
+                [
+                    "Lane",
+                    "Barcode",
+                    "Count",
+                    "Dataset",
+                    "Barcode_len",
+                    "index1",
+                    "index2",
+                ]
+            )
         )
     return polars.concat(frames)
 
@@ -629,7 +703,10 @@ def main(args: argparse.Namespace) -> None:
             )
         table = fastqs_to_stats_frames(input_dir, lanes_to_filter, args.block_cache)
     else:
-        table = load_stats_frames(input_dir)
+        if args.bclconvert_reports:
+            table = load_top_unknown_frames(input_dir)
+        else:
+            table = load_stats_frames(input_dir)
         lanes_to_filter = restrict_lanes(find_shared_lanes(table), args.lanes)
 
     present_lanes = set(table.get_column("Lane").unique().to_list())
