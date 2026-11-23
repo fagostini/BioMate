@@ -501,6 +501,12 @@ class TestValidateArgs:
         with pytest.raises(argparse.ArgumentTypeError, match="spatial-bin-size"):
             validate_args(args)
 
+    def test_negative_threads_rejected(self, tmp_path):
+        args = self._make_args(tmp_path)
+        args.threads = -1
+        with pytest.raises(argparse.ArgumentTypeError, match="threads"):
+            validate_args(args)
+
 
 # ---------------------------------------------------------------------------
 # main

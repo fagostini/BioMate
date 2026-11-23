@@ -114,9 +114,10 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     parser.add_argument(
         "--taint",
         action="store_true",
-        help="""Add to the undetermined files approximately 10%% of the sequences from each project
-        in the same lane, if there are projects with different sequencing designs.
-        """,
+        help=(
+            "Add to the undetermined files of each lane about 1%% of the "
+            "sequences of the samples in that lane (requires --sample-sheet)."
+        ),
     )
     parser.add_argument(
         "--taint-count",
@@ -750,7 +751,7 @@ def main(args: argparse.Namespace) -> None:
     """Main function."""
     global rng
     if not args.output:
-        args.quiet = False
+        args.quiet = True
     setup_logging(args)
     logging.info("Running blabber module...")
 

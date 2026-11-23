@@ -49,7 +49,10 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         "--input-path",
         type=pathlib.Path,
         required=True,
-        help="pathlib.Path to the input directory containing the stats files.",
+        help=(
+            "Path to the input directory: the run output with Stats.json files "
+            "or, with --exact, the undetermined FASTQ files."
+        ),
     )
     parser.add_argument(
         "--output-file",
@@ -65,7 +68,7 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         action="store_true",
         help=(
             "Enable exact counting of undetermined indexes by reading the "
-            "undetermined FASTQ files."
+            "undetermined FASTQ files. Needs a Sample Sheet."
         ),
     )
     parser.add_argument(
@@ -73,7 +76,7 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         type=pathlib.Path,
         required=False,
         help=(
-            "pathlib.Path to the Sample Sheet file (required for --exact). If not "
+            "Path to the Sample Sheet file (used with --exact). If not "
             "provided, the module looks for SampleSheet.csv in the input "
             "directory."
         ),
@@ -102,7 +105,8 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
             "decompress and count in parallel (effective when there are "
             "fewer files than cores). Each file is scanned once to locate "
             "member boundaries (a few minutes per large file); the index "
-            "file is tiny and the source is never copied or re-compressed."
+            "file is tiny and the source is never copied or re-compressed. "
+            "Only used with --exact; Linux only."
         ),
     )
     parser.set_defaults(parse=validate_args, run=main)
@@ -235,7 +239,7 @@ def fastqs_to_stats_frames(
     files = [
         (lane, f)
         for lane in sorted(lanes)
-        for f in sorted(input_dir.glob(f"**/Undetermined_*_L00{lane}_R1_*.fastq.gz"))
+        for f in sorted(input_dir.glob(f"**/Undetermined_*_L{lane:03d}_R1_*.fastq.gz"))
         if EXCLUDED_DIR not in f.parts
     ]
     if not files:
@@ -636,6 +640,8 @@ def main(args: argparse.Namespace) -> None:
             if args.exact
             else "No lane appears in more than one dataset"
         )
+        if args.lanes is not None and not args.exact:
+            message += " among the requested lanes"
         logging.info(f"{message}; nothing to report.")
 
     results = shared_undetermined(table, lanes_to_filter)

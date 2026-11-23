@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 import pathlib
 
 from biomate.setup import setup_logging
@@ -139,6 +140,15 @@ def main(args: argparse.Namespace) -> None:
                 destination_type = parts[-1].strip() if len(parts) > 1 else ""
 
                 destination = args.output_path.joinpath(destination_path_str)
+                # normpath, not resolve: existing symlinks inside the output stay "existing"
+                if not pathlib.Path(os.path.normpath(destination)).is_relative_to(
+                    args.output_path
+                ):
+                    n_conflict += 1
+                    logging.warning(
+                        f"'{destination_path_str}' is outside the output path; skipping"
+                    )
+                    continue
 
                 if destination_type in ("file", "dir"):
                     is_file = destination_type == "file"

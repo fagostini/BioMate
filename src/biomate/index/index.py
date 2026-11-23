@@ -28,7 +28,7 @@ def _detect_input_type(filename: str) -> str | None:
     """Detect the input file type based on filename."""
     if re.match(r".*\.f(ast)?q(\.gz)?$", filename):
         return "FASTQ"
-    elif re.match(r".*\.f(ast)?a(.gz)?$", filename):
+    elif re.match(r".*\.f(ast)?a(\.gz)?$", filename):
         return "FASTA"
     return None
 
@@ -116,6 +116,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise argparse.ArgumentTypeError("--min-count must be >= 1.")
     if args.threads < 1:
         raise argparse.ArgumentTypeError("--threads must be >= 1.")
+    if args.distance < 0:
+        raise argparse.ArgumentTypeError("--distance must be >= 0.")
     for path in args.input:
         if not path.is_file():
             raise argparse.ArgumentTypeError(f"Input file {path} does not exist.")

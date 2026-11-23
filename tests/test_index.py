@@ -138,6 +138,15 @@ class TestValidateArgs:
         with pytest.raises(argparse.ArgumentTypeError, match="min-count"):
             validate_args(args)
 
+    def test_negative_distance_raises(self, tmp_path):
+        """--distance -1 raises ArgumentTypeError."""
+        f = tmp_path / "sample.fastq"
+        f.write_text("")
+        args = self._make_args(f)
+        args.distance = -1
+        with pytest.raises(argparse.ArgumentTypeError, match="distance"):
+            validate_args(args)
+
 
 # ---------------------------------------------------------------------------
 # write_results

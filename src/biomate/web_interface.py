@@ -64,7 +64,7 @@ MODULES: List[Dict[str, Any]] = [
             "The blabber tool generates random DNA sequences with configurable "
             "length, number, alphabet, and output format. It "
             "can mimic real Illumina output by using a SampleSheet.csv file. "
-            "Optionally taints output with ~10% cross-project sequences to simulate "
+            "Optionally taints the undetermined files with ~1% of the sample sequences to simulate "
             "index hopping."
         ),
         "parameters": [
@@ -129,7 +129,7 @@ MODULES: List[Dict[str, Any]] = [
                 "label": "Taint Output",
                 "param_type": "boolean",
                 "default": False,
-                "help": "Add ~10% sequences from other projects to undetermined files",
+                "help": "Add ~1% of the sample sequences of each lane to its undetermined files",
                 "form_name": "taint",
                 "cli_name": "taint",
             },
@@ -140,6 +140,14 @@ MODULES: List[Dict[str, Any]] = [
                 "help": "Seed for reproducible random generation",
                 "form_name": "random_seed",
                 "cli_name": "random-seed",
+            },
+            {
+                "label": "Taint Count",
+                "param_type": "number",
+                "default": "",
+                "help": "Exact number of reads to add to the undetermined files of each indexed lane (implies Taint)",
+                "form_name": "taint_count",
+                "cli_name": "taint-count",
             },
         ],
     },
@@ -275,6 +283,22 @@ MODULES: List[Dict[str, Any]] = [
                 "form_name": "threads",
                 "cli_name": "threads",
             },
+            {
+                "label": "InterOp Directory",
+                "param_type": "text",
+                "default": "",
+                "help": "Where IndexMetricsOut.bin is written (default: <output>/InterOp)",
+                "form_name": "interop_dir",
+                "cli_name": "interop-dir",
+            },
+            {
+                "label": "Force Overwrite",
+                "param_type": "boolean",
+                "default": False,
+                "help": "Clean up an existing Data folder in the output path first",
+                "form_name": "force",
+                "cli_name": "force",
+            },
         ],
     },
     {
@@ -368,6 +392,15 @@ MODULES: List[Dict[str, Any]] = [
                 "help": "Input files processed in parallel (with an output directory)",
                 "form_name": "threads",
                 "cli_name": "threads",
+            },
+            {
+                "label": "Search Engine",
+                "param_type": "select",
+                "default": "regex",
+                "help": "The rust engine requires the optional biomate_kernels package",
+                "form_name": "engine",
+                "cli_name": "engine",
+                "options": ["regex", "rust"],
             },
         ],
     },
@@ -468,6 +501,39 @@ MODULES: List[Dict[str, Any]] = [
                 "help": "Also write static PNG charts per input file (slow for many tiles)",
                 "form_name": "png",
                 "cli_name": "png",
+            },
+            {
+                "label": "Raw N Reads",
+                "param_type": "boolean",
+                "default": False,
+                "help": "Also write every N-containing read to Parquet parts (large; Python engine)",
+                "form_name": "raw",
+                "cli_name": "raw",
+            },
+            {
+                "label": "No HTML Report",
+                "param_type": "boolean",
+                "default": False,
+                "help": "Do not write the interactive HTML report",
+                "form_name": "no_html",
+                "cli_name": "no-html",
+            },
+            {
+                "label": "No MultiQC Files",
+                "param_type": "boolean",
+                "default": False,
+                "help": "Do not write MultiQC custom-content files",
+                "form_name": "no_multiqc",
+                "cli_name": "no-multiqc",
+            },
+            {
+                "label": "Fail On",
+                "param_type": "select",
+                "default": "",
+                "help": "Exit with code 3 when the worst flag is at least this status (empty: always exit 0)",
+                "form_name": "fail_on",
+                "cli_name": "fail-on",
+                "options": ["", "WARN", "FAIL"],
             },
         ],
     },
@@ -592,6 +658,15 @@ MODULES: List[Dict[str, Any]] = [
                 ),
                 "form_name": "block_cache",
                 "cli_name": "block-cache",
+            },
+            {
+                "label": "Lanes",
+                "param_type": "text",
+                "default": "",
+                "help": "Only process these lanes, comma-separated (e.g. 1,3)",
+                "form_name": "lanes",
+                "cli_name": "lanes",
+                "multiple": True,
             },
         ],
     },
@@ -1010,7 +1085,7 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
     parser.add_argument(
         "--host",
         default="localhost",
-        help="Host to bind to (default: localhost; use 127.0.0.1 for local-only access)",
+        help="Host to bind to (default: localhost, local-only access)",
     )
     parser.add_argument(
         "--port",
