@@ -116,7 +116,7 @@ def init_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPars
         action="store_true",
         help=(
             "Add to the undetermined files of each lane about 1%% of the "
-            "sequences of the samples in that lane (requires --sample-sheet)."
+            "sequences of the samples in that lane (only used with --sample-sheet)."
         ),
     )
     parser.add_argument(
@@ -431,7 +431,7 @@ def generate_dnaio_fastq_files(
         extension: Read name extension
         tiles: List of tile identifiers; sequences are assigned to them
             round-robin so that every tile is used at least once
-        taint: If True, return ~10% of sequences for contamination simulation
+        taint: If True, return ~10% of sequences as taint candidates
         sequences: Pre-generated sequences to use
         taint_count: If set (with taint=True), return exactly this many of the
             first generated sequences instead of the ~10% random sample. The
@@ -648,9 +648,9 @@ def generate_undetermined_files(
 ) -> None:
     """Generate Undetermined FASTQ files with tainted sequences from other samples.
 
-    Creates Undetermined_R1_001.fastq.gz and Undetermined_R2_001.fastq.gz in each lane
-    directory, containing approximately taint_rate*100% reads from other samples.
-    This simulates index hopping/cross-project contamination (~10% by default).
+    Creates Undetermined_S0_<Lane>_R[12]_001.fastq.gz in the Demultiplexing folder,
+    holding taint_rate of each lane's taint candidates (~10% of a sample's reads),
+    i.e. ~1% of the sample reads. This simulates lanes with mixed designs.
 
     With taint_count set, exactly that many reads are written to each lane using a
     deterministic round-robin across the per-sample contributions (in sheet order),
@@ -660,7 +660,7 @@ def generate_undetermined_files(
         output_basepath: Base output path containing lane directories
         taint_sequences: Dict mapping lane_key to per-sample lists of read pairs
             (lists of one or two SequenceRecords), in sheet order
-        taint_rate: Fraction of reads to include in undetermined files (default 0.1 = 10%)
+        taint_rate: Fraction of the taint candidates written (default 0.1)
         taint_count: Exact number of reads per lane; enables the deterministic
             round-robin selection (no shuffling, no randomness)
     """

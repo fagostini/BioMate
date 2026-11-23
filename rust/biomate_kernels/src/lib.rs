@@ -26,6 +26,10 @@
 //!    at a fixed gap length ALL error paths of the following part are explored
 //!    before the gap shrinks.
 //! 8. `fuzzy_counts` tuple order is (subs, ins, dels).
+//!
+//! Known gap: when a whole part (length <= distance) is deleted at the end
+//! of the read, the regex engine can report one more deletion than the path
+//! taken. `biomate.index` sends such patterns to the regex engine.
 
 use flate2::read::MultiGzDecoder;
 use pyo3::exceptions::PyValueError;
@@ -90,7 +94,10 @@ fn dfs(
         let total: u32 = counts.iter().sum::<u32>();
         if rest <= ctx.budget.total_cap - total && counts[2] + rest <= ctx.budget.caps[2] {
             counts[2] += rest;
-            return dfs(ctx, parts, k, part.len(), tp, counts, spans);
+            if let Some(r) = dfs(ctx, parts, k, part.len(), tp, counts, spans) {
+                return Some(r);
+            }
+            counts[2] -= rest; // restore: sibling branches share the budget
         }
         return None;
     }
@@ -389,7 +396,7 @@ struct FileScan {
     tiles: HashMap<(i32, i32), TileAcc>,
     n_per_read: HashMap<(i32, u32), u64>,
     /// (lane, tile, x bin, y bin, cycle window) -> N bases
-    spatial: HashMap<(i32, i32, i32, i32, u32), u64>,
+    spatial: HashMap<(i32, i32, i64, i64, u32), u64>,
     /// (lane, longest N run, first-N region, all-N flag) -> reads
     n_shape: HashMap<(i32, u32, u8, u8), u64>,
     /// (lane, 1-based cycle where the poly-G tail starts) -> reads
@@ -413,7 +420,7 @@ type ScanTuple = (
     Vec<(i32, i32, u64, u64, u64, u64, u64, u64, u64, u64, u64)>,
     Vec<(i32, i32, u32, u64, u64)>,
     Vec<(i32, u32, u64)>,
-    Vec<(i32, i32, i32, i32, u32, u64)>,
+    Vec<(i32, i32, i64, i64, u32, u64)>,
     Vec<(i32, u32, u8, u8, u64)>,
     Vec<(i32, u32, u64)>,
 );
@@ -422,9 +429,9 @@ type ScanTuple = (
 ///
 /// Python `int()` trims ASCII whitespace and allows a leading sign; `parse`
 /// after `trim()` matches that for the realistic (digit-only) coordinate
-/// fields. Returns `(lane, tile, x, y)`, or None for <7 colon-fields or
-/// non-numeric fields, exactly like the reference.
-fn parse_tile_coordinates(name: &str) -> Option<(i32, i32, i32, i32)> {
+/// fields. x and y are i64 so large values parse as in Python. Returns
+/// `(lane, tile, x, y)`, or None for <7 colon-fields or non-numeric fields.
+fn parse_tile_coordinates(name: &str) -> Option<(i32, i32, i64, i64)> {
     let base = name.split(' ').next()?;
     let parts = base.split(':').collect::<Vec<_>>();
     if parts.len() < 7 {
@@ -432,8 +439,8 @@ fn parse_tile_coordinates(name: &str) -> Option<(i32, i32, i32, i32)> {
     }
     let lane = parts[3].trim().parse::<i32>().ok()?;
     let tile = parts[4].trim().parse::<i32>().ok()?;
-    let x = parts[5].trim().parse::<i32>().ok()?;
-    let y = parts[6].trim().parse::<i32>().ok()?;
+    let x = parts[5].trim().parse::<i64>().ok()?;
+    let y = parts[6].trim().parse::<i64>().ok()?;
     Some((lane, tile, x, y))
 }
 
@@ -499,10 +506,11 @@ fn trim_eol(line: &[u8]) -> &[u8] {
     &line[..end]
 }
 
-/// Scan one FASTQ (`.gz` suffix => gzip) and aggregate N counters.
+/// Scan one FASTQ (gzip detected from the magic bytes) and aggregate N counters.
 ///
 /// Line protocol: `@name` / sequence / `+` / qualities. A name line not
-/// starting with `@`, or a truncated final record, is a hard error (the
+/// starting with `@`, a missing `+` line, qualities of a different length
+/// than the sequence, or a truncated final record is a hard error (the
 /// reference raises a `dnaio` format error in the same situations).
 fn scan_fastq_file(
     path: &str,
@@ -513,13 +521,16 @@ fn scan_fastq_file(
     // Phred+33: a quality byte below this is a low-quality call
     let lowq_byte = min_qual.saturating_add(33);
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut reader: Box<dyn BufRead> = if path.ends_with(".gz") {
+    let mut raw = std::io::BufReader::with_capacity(1 << 20, file);
+    // Like dnaio/xopen: gzip by content, not by file name
+    let is_gzip = raw.fill_buf().map_err(|e| e.to_string())?.starts_with(&[0x1f, 0x8b]);
+    let mut reader: Box<dyn BufRead> = if is_gzip {
         Box::new(std::io::BufReader::with_capacity(
             1 << 20,
-            ChannelReader::spawn(MultiGzDecoder::new(std::io::BufReader::new(file))),
+            ChannelReader::spawn(MultiGzDecoder::new(raw)),
         ))
     } else {
-        Box::new(std::io::BufReader::with_capacity(1 << 20, file))
+        Box::new(raw)
     };
 
     let mut out = FileScan {
@@ -556,6 +567,11 @@ fn scan_fastq_file(
         // '+' separator
         line.clear();
         reader.read_until(b'\n', &mut line).map_err(|e| e.to_string())?;
+        if !line.starts_with(b"+") {
+            return Err(format!(
+                "malformed FASTQ at record {record_idx}: missing '+' line"
+            ));
+        }
         // qualities
         line.clear();
         let nq = reader.read_until(b'\n', &mut line).map_err(|e| e.to_string())?;
@@ -576,8 +592,14 @@ fn scan_fastq_file(
         acc.total += 1;
 
         let qual = trim_eol(&line);
+        if qual.len() != seq.len() {
+            return Err(format!(
+                "malformed FASTQ at record {record_idx}: sequence and quality lengths differ"
+            ));
+        }
         acc.bases += seq.len() as u64;
-        let (xb, yb) = (x / bin_size, y / bin_size);
+        // floor division, like Python's `//`, for negative coordinates
+        let (xb, yb) = (x.div_euclid(bin_size as i64), y.div_euclid(bin_size as i64));
         // N bases of this read in the current cycle window (positions increase)
         let (mut window, mut in_window) = (0u32, 0u64);
         let mut n_count = 0u32;

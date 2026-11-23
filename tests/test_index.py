@@ -254,6 +254,22 @@ def test_rust_engine_is_skipped_for_regex_syntax(tmp_path, capsys):
     assert expected and capsys.readouterr().out == expected
 
 
+@pytest.mark.parametrize("pattern", ["ACGT+", "+ACGT", "AC++GT", "AC+GT"])
+def test_rust_engine_falls_back_for_empty_or_short_parts(tmp_path, capsys, pattern):
+    """Empty parts, and parts not longer than --distance, use the regex engine."""
+    pytest.importorskip("biomate_kernels")
+    f = tmp_path / "r.fastq"
+    _write_fastq(f, ["AAACGTACGTAA", "AT"])
+    args = _main_args(f, pattern, engine="regex")
+    args.distance = 2
+    main(args)
+    expected = capsys.readouterr().out
+    args = _main_args(f, pattern, engine="rust")
+    args.distance = 2
+    main(args)
+    assert expected and capsys.readouterr().out == expected
+
+
 # ---------------------------------------------------------------------------
 # index discovery and multiple inputs
 # ---------------------------------------------------------------------------

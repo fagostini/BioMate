@@ -979,6 +979,25 @@ def test_read_dark_on_every_cycle_is_a_lane_flag(tmp_path):
     assert flags.select("kind", "status").rows() == [("lane", "FAIL")]
 
 
+def test_worst_tiles_on_flagged_lane_show_lane_status(tmp_path):
+    """Tiles covered by a lane flag are not reported as PASS."""
+    from biomate.nspector.report import summary_tables
+
+    records = []
+    for t in range(1, 6):
+        for i in range(40):
+            seq = list("ACGT" * 5)
+            seq[i % 20] = "N"
+            records.append(_rec("".join(seq), tile=f"110{t}", x=str(i), y=str(i)))
+    path = tmp_path / "S_S1_L001_R1_001.fastq.gz"
+    write_fastq_gz(path, records)
+    scans = scan_files([path], "python")
+    tables = build_tables(scans)
+    tables.flags = build_flags(tables)
+    _, worst_tiles, _ = summary_tables(scans, tables)
+    assert set(worst_tiles["status"]) == {"FAIL"}
+
+
 def test_sample_flag_and_flagged_share(tmp_path):
     """One sample with far more Ns than its lane mates gets its own flag."""
     from biomate.nspector.flags import flagged_share

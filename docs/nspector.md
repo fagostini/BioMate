@@ -30,7 +30,7 @@ biomate nspector \
 
 - `--input`: one or more FASTQ files (`.fastq`, `.fq`, optionally gzipped) and/or directories to search recursively. A file found twice is scanned once. Required.
 - `--output`: output directory, created if missing (default: `./output`).
-- `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` stops with an error when `biomate_kernels` is missing. Both engines produce identical results; the Rust one is about 20× faster. `biomate_kernels` is not installed with BioMate: see [Rust engine](https://github.com/fagostini/BioMate#rust-engine-optional) to build it.
+- `--engine`: `auto` (default), `python` or `rust`. `auto` uses the native `biomate_kernels` scanner when it is installed, otherwise Python. `rust` stops with an error when `biomate_kernels` is missing. Both engines produce identical results on valid FASTQ files (quality characters from `!` up); the Rust one is about 20× faster. `biomate_kernels` is not installed with BioMate: see [Rust engine](https://github.com/fagostini/BioMate#rust-engine-optional) to build it.
 - `--threads`: Rust engine: files scanned in parallel (default `0` = one per available core). Python engine: extra decompression threads per file. The Rust engine also decompresses each gzip file on its own thread, ahead of parsing, and reads multi-member gzip (as written by BCL Convert).
 - `--spatial-bin-size`: width of the spatial bins in read-name X/Y coordinate units (default: `2000`). Raise it if the report gets large.
 - `--spatial-cycle-window`: spatial bins are counted per window of this many cycles (default: `10`), so the spatial map can follow the cycle window picked on the N per cycle chart.
@@ -57,7 +57,7 @@ Cycles are 1-based, so cycle 1 is the first base of the read.
 
 ### Low-quality companion
 
-In the same pass, nspector counts called bases (A, C, G or T, not N) whose Phred score is below `--min-qual`.
+In the same pass, nspector counts called bases (every base other than an uppercase `N`) whose Phred score is below `--min-qual`.
 `lowq` columns hold the number of reads with such a base: at that cycle in the cycle tables, anywhere in the read in the tile and sample tables.
 The two metrics separate two failure modes:
 
@@ -98,9 +98,9 @@ Flags appear:
 
 - in `nspector_flags.parquet`;
 - at the top of the report: a short written verdict, the share of all N bases that sit on a flagged lane, tile, cell or dark cycle (high: the Ns come from the flagged events; low: they are spread over the run), and a flag table where consecutive cycles are one row (`45–52`) and tiles hit at the same cycles share a row, with the largest rate and the number of flags merged (`events`). Clicking a row (or pressing Enter on it) sets the Lane and Read controls to the flag's and selects its tiles in the charts;
-- as orange outlines on the tile map and the tile × cycle heatmap;
+- as orange outlines on the tile map and the tile × cycle heatmap (tiles on a flagged lane are not outlined: the lane flag covers them);
 - under the flag table, as **What removing them would cost**: the reads given up and the share of all N bases removed by excluding the flagged tiles at demultiplexing, and by trimming dark cycles that run to the end of a read. Dark cycles inside a read cannot be left out by the demultiplexer and stay in the reads as N;
-- in a status column of the worst-tiles table;
+- in a status column of the worst-tiles table (a tile on a flagged lane shows the lane's status);
 - in `nspector_summary.json` (see [Summary JSON](#summary-json));
 - in MultiQC, as an `N status` column (worst flag on the sample or its lanes) and a flags table.
 
@@ -238,7 +238,7 @@ You can also point a larger MultiQC run at the output folder.
 
 ## Web interface
 
-When nspector is run from `biomate web`, the result panel shows an **Open interactive report** button.
+When nspector is run from `biomate web-interface`, the result panel shows an **Open interactive report** button.
 The server only serves reports produced by runs it started itself; each report is addressed by a random token, never by a file path.
 
 ## Output layout

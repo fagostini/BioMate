@@ -63,8 +63,8 @@ def extract_tile_coordinates(read_name: str) -> tuple[int, int, int, int] | None
         # Get the first part before any spaces (some formats have additional info)
         base_name = read_name.split(" ")[0]
         parts = base_name.split(":")
-        if len(parts) < 7:
-            return None
+        if len(parts) < 7 or "_" in "".join(parts[3:7]):
+            return None  # int() would accept "1_000"; the Rust kernel does not
         return (int(parts[3]), int(parts[4]), int(parts[5]), int(parts[6]))
     except (IndexError, ValueError):
         return None
