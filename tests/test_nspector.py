@@ -299,6 +299,27 @@ class TestReport:
         for selection in ("pick_sample", "pick_tile", "cycle_brush"):
             assert selection in text
 
+    def test_cycle_strip_zooms_and_axes_keep_fixed_ranges(self, built, monkeypatch):
+        """The strip's brush sets the N per cycle domain; map and scatter axes fixed."""
+        from biomate.nspector import report
+
+        tables = built[1]
+        for many in (1000, 1):
+            monkeypatch.setattr(report, "MANY_SAMPLES", many)
+            text = json.dumps(build_chart(tables).to_dict())
+            zoomed = '"domain": {"param": "cycle_brush", "encoding": "x"}'
+            # single chart, or each of the band / median / clicked layers
+            assert text.count(zoomed) == (1 if many > 1 else 3)
+            assert "Drag here to zoom in" in text
+        size = tables.bin_size
+        x_lo = int(tables.spatial["x_bin"].min()) * size
+        x_hi = (int(tables.spatial["x_bin"].max()) + 1) * size
+        assert f'"domain": [{x_lo}, {x_hi}]' in text
+        assert report._max_rate(
+            polars.DataFrame({"a": [0.1, float("nan")], "b": [float("inf"), 0.3]})
+        ) == pytest.approx(0.3)
+        assert report._max_rate(polars.DataFrame({"a": [0.0]})) > 0
+
     def test_many_samples_use_median_band(self, built, monkeypatch):
         from biomate.nspector import report
 
