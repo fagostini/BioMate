@@ -8,16 +8,16 @@ The minimal command is `biomate blabber`, which will generate 100 random 100 nuc
 
 ## Options
 
-- `--seq-number`: Number of sequences to generate. Default is 100.
+- `--seq-number`: Number of sequences to generate. Default is 100. With a sample sheet it is capped at 361201 (the number of distinct tile positions).
 - `--seq-length`: Length of each sequence. Default is 100.
 - `--alphabet`: Alphabet to use for sequence generation. Default is 'ACGT'.
 - `--output`: Path to the output file. If not specified, the output will be printed to the standard output. If it is an existing directory, the sequences are written to `sequences.txt`, `sequences.fasta` or `sequences.fastq` inside it. If a sample sheet is provided, this option is required and must be an existing directory, where the flowcell folder will be created.
 - `--format`: Format of the output sequences. Can be 'fasta', 'fastq', 'fastq-ext' or 'text'. Default is 'text'. The 'fastq-ext' format includes additional information in the FASTQ header.
 - `--sample-sheet`: Path to a sample sheet file. If provided, the output will be generated based on the sample sheet, creating a flowcell folder structure (see [Sample Sheet Usage](#sample-sheet-usage)). Requires `--output`, and `--format` `fastq` or `fastq-ext` (the default `text` is switched to `fastq-ext`; `fasta` is an error).
-- `--flowcell-id`: Full run folder name (`date_instrument_run_number_flowcell_id`) to use as the output folder; when given, the instrument, run number and flowcell in the read names are also pinned to its parts (default: a random identity is generated).
-- `--taint`: Add reads from the samples to the Undetermined files of every lane, to simulate lanes with mixed sequencing designs (see below).
+- `--flowcell-id`: Full run folder name (`date_instrument_run_number_flowcell_id`) to use as the output folder; when given, the instrument, run number (without leading zeros) and flowcell in the read names are also pinned to its parts. A name that does not split into 4 parts on `_` keeps the random identity (default: a random identity is generated). Only used with `--sample-sheet`.
+- `--taint`: Add reads from the samples to the Undetermined files of every lane, to simulate lanes with mixed sequencing designs (see below). Only used with `--sample-sheet`.
 - `--taint-count`: Write exactly this many reads to the Undetermined files of each lane with an indexed design (implies `--taint`, deterministic selection, see below).
-- `--random-seed`: Seed for the random number generator. It drives all random choices (sequences, qualities, run folder and flowcell names, tile assignment and positions, and the percentage-based `--taint` selection), so the same seed gives the same output. Only the `--taint-count` selection is seed-independent.
+- `--random-seed`: Seed for the random number generator. It drives all random choices (sequences, qualities, run folder and flowcell names, tile assignment and positions, and the percentage-based `--taint` selection), so the same seed gives the same output. Only the `--taint-count` selection is seed-independent, and the date part of the run folder name is always the current date.
 
 ## Sample Sheet Usage
 
@@ -28,7 +28,7 @@ When a sample sheet is provided, the output will be generated based on the sampl
 
 A sheet with neither `Recipe` nor `OverrideCycles` is rejected.
 
-> _**Note:** `--seq-length` is ignored when a sample sheet is provided: the read lengths are derived from the `Recipe` or `OverrideCycles` column. The output is FASTQ: with `--format fastq-ext` (also the default when `--format` is not given) the read headers carry the `1:N:0:<index>` comment, with `--format fastq` they do not._
+> _**Note:** `--seq-length` is ignored when a sample sheet is provided: the read lengths are derived from the `Recipe` or `OverrideCycles` column. The output is FASTQ (`--format fastq-ext` is the default when `--format` is not given). Reads of indexed samples always carry the `1:N:0:<index>` comment; for samples without an index, `fastq-ext` writes `1:N:0:NNNNNNNN` and `fastq` writes no comment._
 
 The name of the output directory will have the following format: `<DATE>_<INSTRUMENT>_<RUN>_A<FCID>`, where `<DATE>` is the current date in `YYYYMMDD` format, `<INSTRUMENT>` is a random 2-letter string followed by a random 5-digit number, `<RUN>` is a random number from 100 to 999 zero-padded to 4 digits (e.g. `0992`), and `<FCID>` is the flowcell ID. With `--flowcell-id`, the given name is used as is.
 Within the output flowcell folder, a `Demultiplexing` folder will be created, containing one subfolder per `Sample_Project`, each with one subfolder per `Sample_ID` holding that sample's FASTQ files. The FASTQ files are named `<NAME>_S<N>_<Lane>_R[12]_001.fastq.gz`, where `<NAME>` is the `Sample_ID` without its `Sample_` prefix, `<N>` is the sample index (from 1 to the total number of samples in the flowcell), and `<Lane>` is the lane number converted to the format `LXXX` (e.g., `L001` for lane 1). The R2 file is only written when the recipe has a second read.
@@ -63,7 +63,7 @@ When generating sequences based on a sample sheet, it is possible to simulate ca
 - `--taint` adds a percentage-based taint: roughly 10% of each sample's reads are flagged as candidates and, per lane, about 10% of the collected candidates (at least one) are written to the Undetermined files — around 1% of each sample's reads in total. The selection depends on `--random-seed`.
 - `--taint-count N` (implies `--taint`) writes **exactly `N`** reads to the Undetermined files of every lane with an indexed design, spreading them round-robin over the lane's samples in sample-sheet order (bounded by the reads available in the lane, with a warning when fewer could be collected). Lanes whose samples all use a no-index design are skipped, because position-based demultiplexing cannot keep their reads undetermined. The selection is deterministic and independent of `--random-seed`, so the resulting counts are assertable in tests.
 
-In both cases each tainted read is a full duplicate of a read already written to its sample's FASTQ files (same read name, sequence and qualities); with `--taint-count` the duplicate is placed at a unique tile/x/y position within the lane, so it never collides with the position of another read.
+In both cases each tainted read is a full duplicate of a read already written to its sample's FASTQ files (same sequence and qualities); with `--taint` the read name is also the same, while with `--taint-count` the duplicate is placed at a unique tile/x/y position within the lane, so its read name differs and it never collides with the position of another read.
 
 ### Tile Distribution
 

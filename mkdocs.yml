@@ -8,12 +8,15 @@ nav:
   - Sub-commands:
     - Blabber: blabber.md
     - Dirstruct: dirstruct.md
-    - Indexer: indexer.md
+    - Index: indexer.md
     - FastRewind: fastrewind.md
     - Nspector: nspector.md
     - Strainer: strainer.md
     - Triage: triage.md
     - Waif: waif.md
     - Web Interface: web-interface.md
+  - Compatibility: COMPATIBILITY.md
+exclude_docs: |
+  todo/
 theme:
   name: readthedocs

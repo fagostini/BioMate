@@ -189,7 +189,13 @@ BioMate/
 │   ├── index/            # Indexing tool
 │   ├── nspector/         # FASTQ inspector
 │   ├── strainer/         # Index analysis
+│   ├── triage/           # Undetermined reads triage
+│   ├── waif/             # Always-undetermined barcodes
+│   ├── design/, static/  # Web UI templates and assets
+│   ├── headers.py        # Read header index counting
+│   ├── samplesheet.py    # Sample sheet parsing
 │   └── web_interface.py  # Tornado web UI
+├── rust/biomate_kernels/ # Optional Rust kernels
 ├── tests/                # Test suite
 ├── docs/                 # Documentation
 ├── pyproject.toml        # Dependency definitions

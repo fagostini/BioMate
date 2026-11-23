@@ -10,7 +10,7 @@ Each tool is a sub-command: `biomate <name> --help` lists its options.
 
 - [Blabber](blabber.md) (`biomate blabber`) - FASTA, FASTQ or plain text sequence generator. It can be used to re-generate a demultiplexed flowcell folder using a sample sheet as input.
 - [Dirstruct](dirstruct.md) (`biomate dirstruct`) - Extract or create a directory structure. It can be used to simulate nested folder structures for testing purposes.
-- [Indexer](indexer.md) (`biomate index`) - Indexing tool for FASTA/FASTQ files. It can be used to search for expected indexes and get 'fuzzy' information.
+- [Index](indexer.md) (`biomate index`) - Indexing tool for FASTA/FASTQ files. It can be used to search for expected indexes and get 'fuzzy' information.
 - [FastRewind](fastrewind.md) (`biomate fastrewind`) - Convert a demultiplexed folder back into the Illumina NovaSeqXPlus output. It can be used to generate a subset for demultiplex testing.
 - [Nspector](nspector.md) (`biomate nspector`) - Inspect FASTQ files for N-base content and their distribution across flowcell tiles and sequencing cycles.
 - [Strainer](strainer.md) (`biomate strainer`) - Evaluate index mixing across flowcell lanes by identifying sample indexes from one lane appearing in undetermined reads of another.

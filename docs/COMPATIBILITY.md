@@ -6,8 +6,8 @@ This document tracks tested versions and known compatibility constraints for Bio
 
 | Python Version | Status | Notes |
 |---|---|---|
-| 3.12.x | ✅ Tested | Full support |
-| 3.13.11 | ✅ Tested (Current) | Full support |
+| 3.12.x | ✅ Tested (Current) | Full support; pinned in `.python-version` |
+| 3.13.11 | ✅ Tested | Full support |
 | 3.14.x | ❓ Not tested | Expected to work; pending verification |
 | 3.11 and earlier | ❌ Not supported | Uses `itertools.batched` (Python 3.12+) |
 
@@ -19,16 +19,18 @@ This document tracks tested versions and known compatibility constraints for Bio
 
 | Package | Tested Version | Status | Notes |
 |---|---|---|---|
-| numpy | 2.5.0 | ✅ Tested | Migrated from deprecated `numpy.random` to `np.random.Generator` (see ISSUE-002 for details) |
+| numpy | 2.4.4 | ✅ Tested | Migrated from deprecated `numpy.random` to `np.random.Generator` (see ISSUE-002 for details) |
 
 ### Tested Dependency Versions
 
+Versions as locked in `uv.lock`.
+
 | Package | Tested Version | Status | Purpose |
 |---|---|---|---|
-| polars | 1.42.0 | ✅ Tested | Data manipulation, CSV/FASTQ parsing |
+| polars | 1.39.3 | ✅ Tested | Data manipulation, CSV/FASTQ parsing |
 | altair | 6.2.2 | ✅ Tested | Visualizations (pinned to >=6.2.0,<7.0.0 per ISSUE-003) |
-| tornado | 6.5.7 | ✅ Tested | Web interface server |
-| regex | 2026.5.9 | ✅ Tested | Pattern matching for index evaluation |
+| tornado | 6.5.5 | ✅ Tested | Web interface server |
+| regex | 2026.3.32 | ✅ Tested | Pattern matching for index evaluation |
 | dnaio | 1.2.4 | ✅ Tested | FASTQ/FASTA file I/O |
 | rich | 14.3.3 | ✅ Tested | Logging and progress output |
 | fastavro | 1.12.1 | ✅ Tested | Avro intermediate files in fastrewind |
@@ -71,7 +73,7 @@ This document tracks tested versions and known compatibility constraints for Bio
 
 - **Problem:** Non-standard pip flag masked package conflicts
 - **Solution:** Replaced with virtual environment setup
-- **Affected Files:** Dockerfile (venv-based installation)
+- **Affected Files:** Dockerfile (venv-based installation). `singularity.def` still installs with `--break-system-packages`.
 
 ### ISSUE-006: Python 3.12+ Requirement (NO ACTION NEEDED)
 
@@ -129,7 +131,7 @@ git commit -m "chore: update dependencies"
 ### Before Upgrading Dependencies
 
 1. Run full test suite: `uv run pytest tests/ -v`
-2. Test sequence generation: `uv run biomate blabber --seq-number 1000 --seq-length 100 --output test.fastq`
+2. Test sequence generation: `uv run biomate blabber --seq-number 1000 --seq-length 100 --format fastq --output test.fastq`
 3. Test visualization: `uv run biomate nspector --input test.fastq --output /tmp`
 4. Test sample sheet handling: Verify with real Illumina sample sheets
 
@@ -202,6 +204,6 @@ If you encounter compatibility problems:
 
 ---
 
-**Last Updated:** August 2026  
+**Last Updated:** November 2026  
 **Maintainer:** BioMate Development Team  
 **Next Review:** When adding new dependencies or supporting new Python versions
