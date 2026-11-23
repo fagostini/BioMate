@@ -176,11 +176,15 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!val && defaultVal) {
           val = defaultVal;
         }
-        if (val) {
-          var cmdIdx = parts.indexOf('--' + meta.cli_name);
-          if (cmdIdx !== -1) {
-            parts.splice(cmdIdx, 2);
+        if (val && meta.multiple) {
+          // Same split as the server: one argument per comma-separated value
+          var items = val.split(',').map(function(v) { return v.trim(); })
+            .filter(function(v) { return v && !v.startsWith('-'); });
+          if (items.length) {
+            parts.push('--' + meta.cli_name);
+            items.forEach(function(v) { parts.push(shlexQuote(v)); });
           }
+        } else if (val) {
           parts.push('--' + meta.cli_name);
           parts.push(shlexQuote(val));
         }
@@ -202,6 +206,9 @@ document.addEventListener('DOMContentLoaded', function() {
   updatePreview();
   function refresh(event) {
     if (!event.target.matches('select, input[type="text"], input[type="number"], input[type="checkbox"]')) return;
+    if (event.target.type === 'checkbox') {
+      event.target.closest('.form-check').querySelector('label').textContent = event.target.checked ? 'Yes' : 'No';
+    }
     updateVisibility();
     updatePreview();
   }

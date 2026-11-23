@@ -32,6 +32,7 @@ from typing import Any, Dict, List
 
 import json
 
+import biomate
 import tornado.httpserver
 import tornado.ioloop
 import tornado.template
@@ -64,8 +65,8 @@ MODULES: List[Dict[str, Any]] = [
             "The blabber tool generates random DNA sequences with configurable "
             "length, number, alphabet, and output format. It "
             "can mimic real Illumina output by using a SampleSheet.csv file. "
-            "Optionally taints the undetermined files with ~1% of the sample sequences to simulate "
-            "index hopping."
+            "Optionally taints the undetermined files with ~1% of the sample "
+            "sequences, to simulate lanes with mixed sequencing designs."
         ),
         "parameters": [
             {
@@ -121,7 +122,12 @@ MODULES: List[Dict[str, Any]] = [
                 "label": "Flowcell ID",
                 "param_type": "text",
                 "default": "",
-                "help": "Custom flowcell ID for read names",
+                "help": (
+                    "Full run name (date_instrument_run_flowcell) used as the output "
+                    "folder; also pins the instrument, run and flowcell in the read "
+                    "names. Only used with a Sample Sheet"
+                ),
+                "is_path": False,
                 "form_name": "flowcell_id",
                 "cli_name": "flowcell-id",
             },
@@ -184,6 +190,15 @@ MODULES: List[Dict[str, Any]] = [
                 "show_when": {"parameter": "_subcommand", "value": "extract"},
             },
             {
+                "label": "Output File",
+                "param_type": "text",
+                "default": "",
+                "help": "Tab-separated file to write the tree to (leave empty to show it here)",
+                "form_name": "output_file",
+                "cli_name": "output-file",
+                "show_when": {"parameter": "_subcommand", "value": "extract"},
+            },
+            {
                 "label": "No Tags",
                 "param_type": "boolean",
                 "default": False,
@@ -222,9 +237,9 @@ MODULES: List[Dict[str, Any]] = [
         "description": (
             "Fastrewind reverses the Illumina demultiplexing process. Given "
             "demultiplexed FASTQ files, it outputs a directory with .cbcl files, "
-            ".filter files, .locs files, and RunInfo.xml -- matching what "
-            "bcl-convert would produce from raw instrument data. Currently best "
-            "supported for NovaSeq X Plus instruments."
+            ".filter files, .locs files, and RunInfo.xml -- a run folder like "
+            "the instrument output, that bcl-convert can demultiplex again. "
+            "The output follows the NovaSeq X Plus layout."
         ),
         "parameters": [
             {
@@ -255,7 +270,10 @@ MODULES: List[Dict[str, Any]] = [
                 "label": "Total Cycles",
                 "param_type": "number",
                 "default": "",
-                "help": "Override total number of cycles",
+                "help": (
+                    "Total number of cycles; only used when larger than the Sample "
+                    "Sheet total, the extra cycles are written as no-calls"
+                ),
                 "form_name": "total_cycles",
                 "cli_name": "total-cycles",
             },
@@ -272,6 +290,7 @@ MODULES: List[Dict[str, Any]] = [
                 "param_type": "text",
                 "default": "",
                 "help": "Full run folder name to use as the run id in RunInfo.xml (e.g. 20260310_LM43899_0385_A12GGASZR5); its last part is written in the Flowcell element (generated if omitted)",
+                "is_path": False,
                 "form_name": "flowcell_id",
                 "cli_name": "flowcell-id",
             },
@@ -549,10 +568,10 @@ MODULES: List[Dict[str, Any]] = [
             "comparing unexpected indexes found in undetermined FASTQ pools "
             "against expected indexes from the Sample Sheet. It reads all "
             "Undetermined*R1*.fastq.gz files, filters poly-G artifacts, and "
-            "compares observed indexes against expected ones across all lanes "
-            "(allowing 1 mismatch). Sample indexes are also searched "
-            "reverse-complemented in every lane, to reveal an index entered "
-            "in the wrong orientation. Outputs CSV reports of unexpected "
+            "searches each sample's indexes in the undetermined reads of the "
+            "other lanes (allowing 1 mismatch). Sample indexes are also searched "
+            "reverse-complemented (exact match) in every lane, to reveal an index "
+            "entered in the wrong orientation. Outputs CSV reports of unexpected "
             "indexes and lane summaries."
         ),
         "parameters": [
@@ -604,7 +623,7 @@ MODULES: List[Dict[str, Any]] = [
             "of 10. By default it reads the UnknownBarcodes field of the "
             "Stats.json files; with the Exact flag it counts the undetermined "
             "FASTQ headers directly (a Sample Sheet is then required to "
-            "identify the shared lanes). Outputs a CSV with Lane, Barcode, "
+            "select the lanes with samples from two or more projects). Outputs a CSV with Lane, Barcode, "
             "Count and Total % columns."
         ),
         "parameters": [
@@ -643,7 +662,8 @@ MODULES: List[Dict[str, Any]] = [
                 "param_type": "text",
                 "default": "",
                 "help": (
-                    "Path to SampleSheet.csv (looks in the input directory if omitted)"
+                    "Path to SampleSheet.csv, used with Exact (looks in the input "
+                    "directory if omitted)"
                 ),
                 "form_name": "sample_sheet",
                 "cli_name": "sample-sheet",
@@ -654,7 +674,7 @@ MODULES: List[Dict[str, Any]] = [
                 "default": "",
                 "help": (
                     "Directory for a gzip member-offset index enabling "
-                    "forked parallel counting (Linux only)"
+                    "forked parallel counting; used with Exact, Linux only"
                 ),
                 "form_name": "block_cache",
                 "cli_name": "block-cache",
@@ -907,7 +927,7 @@ class MainHandler(SecurityHeadersMixin):
         """Serve the dashboard listing all BioMate tools."""
         loader = get_loader()
         t = loader.load("main.html")
-        self.write(t.generate(modules=_module_list(), gs_version="0.3.0"))
+        self.write(t.generate(modules=_module_list(), gs_version=biomate.__version__))
 
 
 class ModuleHandler(SecurityHeadersMixin):
@@ -932,6 +952,7 @@ class ModuleHandler(SecurityHeadersMixin):
                 "default": p.get("default", ""),
                 "is_boolean": p.get("param_type") == "boolean",
                 "show_when": p.get("show_when"),
+                "multiple": bool(p.get("multiple")),
             }
         self.write(
             t.generate(
@@ -939,7 +960,7 @@ class ModuleHandler(SecurityHeadersMixin):
                 param_meta=json.dumps(param_meta).encode("utf-8"),
                 result=None,
                 report_url=None,
-                gs_version="0.3.0",
+                gs_version=biomate.__version__,
                 modules=all_modules,
                 param_overrides={},
                 xsrf_form_html=self.xsrf_form_html,
@@ -999,6 +1020,7 @@ class ModuleHandler(SecurityHeadersMixin):
                 "default": p.get("default", ""),
                 "is_boolean": p.get("param_type") == "boolean",
                 "show_when": p.get("show_when"),
+                "multiple": bool(p.get("multiple")),
             }
 
         self.write(
@@ -1007,7 +1029,7 @@ class ModuleHandler(SecurityHeadersMixin):
                 param_meta=json.dumps(param_meta).encode("utf-8"),
                 result=result,
                 report_url=report_url,
-                gs_version="0.3.0",
+                gs_version=biomate.__version__,
                 modules=all_modules,
                 param_overrides=param_overrides,
                 xsrf_form_html=self.xsrf_form_html,
