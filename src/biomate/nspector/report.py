@@ -27,7 +27,7 @@ from biomate.nspector.flags import (
     status_name,
     verdict,
 )
-from biomate.nspector.scan import UNDETERMINED, FileScan
+from biomate.nspector.scan import UNDETERMINED, FileScan, flowcell_of
 from biomate.nspector.tables import KEYS, NspectorTables
 
 # Upper bound on spatial rows embedded in the report; beyond this only the
@@ -1716,6 +1716,74 @@ def project_summary(tables: NspectorTables) -> polars.DataFrame:
     )
 
 
+def lane_summary(scans: list[FileScan], tables: NspectorTables) -> polars.DataFrame:
+    """One row per flowcell and lane, plus an ``all`` row per multi-lane flowcell.
+
+    The flowcell comes from the first read name of each input file; rows with
+    no matching file (or an unreadable one) fall under ``unknown``. Status is
+    the worst flag on the rows summed, as in :func:`project_summary`.
+    """
+    flowcells = polars.DataFrame(
+        [
+            (s.project, s.sample, s.read, t[0], flowcell)
+            for s in scans
+            if (flowcell := flowcell_of(s.path))
+            for t in s.tiles
+        ],
+        schema={
+            "project": polars.Utf8,
+            "sample": polars.Utf8,
+            "read": polars.Utf8,
+            "lane": tables.sample_lane.schema["lane"],
+            "flowcell": polars.Utf8,
+        },
+        orient="row",
+    ).unique(KEYS, keep="first")
+    rows = (
+        flag_rank(tables, _flags(tables))
+        .join(flowcells, on=KEYS, how="left")
+        .with_columns(polars.col("flowcell").fill_null("unknown"))
+    )
+    total = polars.col("total").sum()
+    metrics = [
+        polars.col("sample").n_unique().alias("samples"),
+        total.alias("reads scanned"),
+        polars.col("n").sum().alias("reads with N"),
+        (polars.col("n").sum() / total).alias("N rate"),
+        (polars.col("n_bases").sum() / polars.col("bases").sum()).alias("N per base"),
+        (polars.col("polyg").sum() / total).alias("poly-G rate"),
+        (
+            polars.col("qual_sum").sum()
+            / (polars.col("bases").sum() - polars.col("n_bases").sum())
+        ).alias("mean Q"),
+        polars.col("status").max(),
+    ]
+    per_lane = rows.group_by("flowcell", "lane").agg(metrics)
+    per_flowcell = (
+        rows.group_by("flowcell")
+        .agg(polars.col("lane").n_unique().alias("lanes"), *metrics)
+        .filter(polars.col("lanes") > 1)
+        .drop("lanes")
+        .with_columns(polars.lit("all").alias("lane"))
+    )
+    return (
+        polars.concat(
+            [
+                per_lane.with_columns(polars.col("lane").cast(polars.Utf8)),
+                per_flowcell.select(per_lane.columns),
+            ]
+        )
+        # "all" after the lanes of its flowcell
+        .sort(
+            "flowcell",
+            polars.col("lane") == "all",
+            polars.col("lane").cast(polars.Int64, strict=False),
+        )
+        .fill_nan(None)
+        .with_columns(status_name())
+    )
+
+
 # number formats of the HTML summary tables
 TABLE_FORMATS = {
     "N rate": ".3%",
@@ -1724,6 +1792,8 @@ TABLE_FORMATS = {
     "reads scanned": ",",
     "N bases": ",",
     "bases": ",",
+    "poly-G rate": ".3%",
+    "mean Q": ".1f",
 }
 
 _PAGE = """<!DOCTYPE html>
@@ -1814,8 +1884,9 @@ _PAGE = """<!DOCTYPE html>
     <div class="stat"><b>{flag_badges}</b><span>anomaly flags</span></div>
   </div>
   <p class="verdict">{verdict}</p>
-  <nav class="meta"><a href="#projects">Projects</a> · <a href="#flags">Flags</a> · <a href="#worst">Worst tiles and cycles</a> · <a href="#controls">Charts</a> · <a href="#inputs">Inputs</a></nav>
+  <nav class="meta"><a href="#projects">Projects</a> · <a href="#lanes">Flowcells and lanes</a> · <a href="#flags">Flags</a> · <a href="#worst">Worst tiles and cycles</a> · <a href="#controls">Charts</a> · <a href="#inputs">Inputs</a></nav>
   <section id="projects"><h2>Projects</h2><div class="scroll">{projects}</div></section>
+  <section id="lanes"><h2>Flowcells and lanes</h2><div class="scroll">{lanes}</div></section>
 </header>
 <main>
   <section id="flags"><h2>Anomaly flags</h2>{flags}{costs}</section>
@@ -2096,6 +2167,7 @@ def write_report(
         if by_read.height > 1
         else "",
         projects=_table(project_summary(tables), TABLE_FORMATS),
+        lanes=_table(lane_summary(scans, tables), TABLE_FORMATS),
         n_tiles=tables.tile_summary.select("lane", "tile").unique().height,
         n_lanes=tables.sample_lane["lane"].n_unique(),
         worst_tiles=_table(worst_tiles, TABLE_FORMATS),

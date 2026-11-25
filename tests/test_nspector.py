@@ -23,6 +23,7 @@ from biomate.nspector.nspector import (
 )
 from biomate.nspector.report import (
     build_chart,
+    lane_summary,
     project_summary,
     select_spatial,
     window_tile_cycle,
@@ -949,6 +950,24 @@ def test_project_summary_and_header(tmp_path):
     spec = json.dumps(build_chart(tables).to_dict())
     for section in ("Samples and cycles", "N within reads", "Flowcell"):
         assert section in spec
+
+
+def test_lane_summary_per_flowcell_and_lane(run_files, tmp_path):
+    scans = scan_files(run_files, "python")
+    tables = build_tables(scans)
+    tables.flags = build_flags(tables)
+    lanes = lane_summary(scans, tables)
+    assert lanes.select("flowcell", "lane", "samples", "reads scanned").rows() == [
+        ("AABCCC", "1", 2, 16),
+        ("AABCCC", "2", 2, 16),
+        ("AABCCC", "all", 2, 32),
+    ]
+    assert lanes["reads with N"].to_list() == [10, 2, 12]
+    assert set(lanes["status"]) <= {"PASS", "WARN", "FAIL"}
+    # without the input files the flowcell is unknown, the numbers stay
+    assert lane_summary([], tables)["flowcell"].unique().to_list() == ["unknown"]
+    page = write_report(scans, tables, tmp_path).read_text()
+    assert "<h2>Flowcells and lanes</h2>" in page
 
 
 def test_robust_z_needs_a_real_difference_in_a_zero_spread_group():

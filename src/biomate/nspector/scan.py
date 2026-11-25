@@ -70,6 +70,23 @@ def extract_tile_coordinates(read_name: str) -> tuple[int, int, int, int] | None
         return None
 
 
+def flowcell_of(path: pathlib.Path) -> str | None:
+    """Flowcell ID from the first read name of a FASTQ, or None if unreadable.
+
+    shortcut: assumes every read in a file comes from one flowcell, which holds
+    for demultiplexer output; read it per record if merged FASTQs show up.
+    """
+    try:
+        with dnaio.open(path) as reader:
+            record = next(iter(reader), None)
+    except (OSError, dnaio.FileFormatError, dnaio.UnknownFileFormat):
+        return None
+    if record is None:
+        return None
+    parts = record.name.split(" ")[0].split(":")
+    return parts[2] if len(parts) >= 7 else None
+
+
 def fastq_stem(path: pathlib.Path) -> str:
     """Return the file name without its FASTQ (and compression) suffix."""
     name = path.name
