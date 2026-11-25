@@ -117,7 +117,7 @@ Flags appear:
 
 ## Report layout
 
-- The header shows reads scanned, the N rate per read and per sequenced base, the tile count and the flag counts, then a **Projects** table (samples, lanes, reads, N rates and worst flag status per project).
+- The header shows reads scanned, the N rate per read and per sequenced base, the tile count and the flag counts, then a **Projects** table (samples, lanes, reads, N rates and worst flag status per project) and a **Flowcells and lanes** table (the same totals plus poly-G rate and mean Q per flowcell and lane, with an `all` row per flowcell that has more than one lane). The flowcell ID comes from the first read name of each input file.
 - Charts are grouped in three sections: *Samples and cycles*, *N within reads* and *Flowcell*. A coloured band above the samples × lanes overview shows each sample's project; with more than 60 samples the names move to tooltips.
 - White lines in the tile × cycle heatmap separate surfaces and swaths.
 - The page opens in the browser's light or dark mode; the **Dark mode / Light mode** button switches it and the choice is remembered in that browser. The charts are redrawn on a switch, keeping the Project, Lane, Read, Metric and WARN settings (clicked samples, tiles and cycle ranges are cleared). **Print / save as PDF** prints the page (A3 landscape) without the controls.
